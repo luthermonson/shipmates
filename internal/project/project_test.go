@@ -138,7 +138,7 @@ func writeAgent(t *testing.T, persona, frontmatter string) {
 func TestResolvePersonaConfigFrontmatterOnly(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeAgent(t, "bosun",
-		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\n")
+		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\n")
 
 	cfg, err := ResolvePersonaConfig("bosun")
 	if err != nil {
@@ -153,19 +153,23 @@ func TestResolvePersonaConfigFrontmatterOnly(t *testing.T) {
 	if !cfg.DangerouslySkipPermissions {
 		t.Error("DangerouslySkipPermissions = false, want true")
 	}
+	if cfg.Model != "claude-opus-4-7" {
+		t.Errorf("Model = %q, want claude-opus-4-7", cfg.Model)
+	}
 }
 
 func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeAgent(t, "bosun",
-		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\n")
+		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\n")
 
 	cfgYAML := "crew:\n" +
 		"  bosun:\n" +
 		"    permissions:\n" +
 		"      mode: plan\n" +
 		"    remoteControl: custom-handle\n" +
-		"    dangerouslySkipPermissions: false\n"
+		"    dangerouslySkipPermissions: false\n" +
+		"    model: claude-haiku-4-5-20251001\n"
 	if err := os.WriteFile(ConfigName, []byte(cfgYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -182,6 +186,9 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 	}
 	if got.DangerouslySkipPermissions {
 		t.Error("DangerouslySkipPermissions = true, want false (override should win)")
+	}
+	if got.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("Model = %q, want claude-haiku-4-5-20251001 (override should win)", got.Model)
 	}
 }
 

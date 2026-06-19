@@ -57,6 +57,9 @@ func Open() *cli.Command {
 			if cfg.Mode != "" {
 				args = append(args, "--permission-mode", cfg.Mode)
 			}
+			if cfg.Model != "" {
+				args = append(args, "--model", cfg.Model)
+			}
 			if cfg.RemoteControl != "" {
 				args = append(args, "--remote-control", cfg.RemoteControl)
 				fmt.Fprintf(os.Stderr,

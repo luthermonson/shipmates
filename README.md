@@ -14,14 +14,22 @@ Shipmates personas have **persistent per-project memory**. They write down what 
 
 ## Install
 
-No published binary yet — build from source (Go 1.26+):
+Download a prebuilt binary from the [latest release](https://github.com/luthermonson/shipmates/releases/latest) — pick the asset for your platform (macOS, Linux, Windows × amd64/arm64). The whole persona catalog is embedded in the binary, so the single executable is all you need.
+
+Asset names look like `shipmates_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows), e.g. `shipmates_0.1.0_darwin_arm64.tar.gz`. Extract it and put `shipmates` on your PATH:
 
 ```bash
-git clone https://github.com/luthermonson/shipmates
-cd shipmates && go build -o shipmates .
+# macOS / Linux — after downloading the asset for your OS/arch:
+tar -xzf shipmates_*_*.tar.gz shipmates
+sudo mv shipmates /usr/local/bin/
+shipmates --version
 ```
 
-The whole persona catalog is embedded in the binary (`//go:embed`), so the single executable is all you need.
+On Windows, unzip the `..._windows_amd64.zip` (or `arm64`) and put `shipmates.exe` on your PATH.
+
+With a Go toolchain (1.26+) you can instead `go install github.com/luthermonson/shipmates@latest`, or build from source with `go build -o shipmates .`.
+
+Shipmates drives the `claude` CLI, so make sure [Claude Code](https://claude.com/claude-code) is installed and authenticated.
 
 ## Quickstart
 

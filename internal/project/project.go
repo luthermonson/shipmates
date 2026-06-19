@@ -87,6 +87,7 @@ type CrewOverride struct {
 	} `yaml:"permissions"`
 	RemoteControl              yaml.Node `yaml:"remoteControl"`
 	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
+	Model                      string    `yaml:"model"`
 }
 
 // LoadConfig reads shipmates.yaml, returning a zero Config if it's absent.
@@ -131,6 +132,7 @@ type PersonaConfig struct {
 	Mode                       string // ask|acceptEdits|bypassPermissions|plan|""
 	RemoteControl              string // resolved --remote-control value; "" = off
 	DangerouslySkipPermissions bool
+	Model                      string // --model value; "" = claude's configured default
 }
 
 // personaFrontmatter is the subset of a persona's YAML frontmatter that affects
@@ -142,6 +144,7 @@ type personaFrontmatter struct {
 	} `yaml:"permissions"`
 	RemoteControl              yaml.Node `yaml:"remoteControl"`
 	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
+	Model                      string    `yaml:"model"`
 }
 
 // ResolvePersonaConfig reads the installed persona's frontmatter, overlays any
@@ -164,6 +167,7 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 	}
 
 	cfg.Mode = strings.TrimSpace(fm.Permissions.Mode)
+	cfg.Model = strings.TrimSpace(fm.Model)
 	rcNode := fm.RemoteControl
 	if fm.DangerouslySkipPermissions != nil {
 		cfg.DangerouslySkipPermissions = *fm.DangerouslySkipPermissions
@@ -176,6 +180,9 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 	if ov, ok := conf.Crew[persona]; ok {
 		if m := strings.TrimSpace(ov.Permissions.Mode); m != "" {
 			cfg.Mode = m
+		}
+		if m := strings.TrimSpace(ov.Model); m != "" {
+			cfg.Model = m
 		}
 		if ov.RemoteControl.Kind != 0 {
 			rcNode = ov.RemoteControl

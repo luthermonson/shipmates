@@ -97,11 +97,15 @@ func oneShotDelegate(ctx context.Context, persona, prompt string) ([]byte, error
 	var args []string
 	creating := false
 	if _, err := os.Stat(marker); err == nil {
-		args = []string{"-p", "--resume", name, "--agent", persona, prompt}
+		args = []string{"-p", "--resume", name, "--agent", persona}
 	} else {
 		creating = true
-		args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona, prompt}
+		args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
 	}
+	if cfg, err := project.ResolvePersonaConfig(persona); err == nil && cfg.Model != "" {
+		args = append(args, "--model", cfg.Model)
+	}
+	args = append(args, prompt)
 
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "claude", args...)

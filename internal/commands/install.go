@@ -36,6 +36,8 @@ sessionPrefix: %s
 #     permissions: { mode: ask }
 #   backend:
 #     dangerouslySkipPermissions: true
+#   tester:
+#     model: claude-haiku-4-5-20251001   # run this persona on a cheaper/faster model
 
 # Set true to commit per-persona memory (shared team knowledge) instead of
 # keeping it gitignored (per-developer learnings).

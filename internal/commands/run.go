@@ -32,10 +32,14 @@ func Ask() *cli.Command {
 
 			var args []string
 			if _, err := os.Stat(marker); err == nil {
-				args = []string{"-p", "--resume", name, "--agent", persona, prompt}
+				args = []string{"-p", "--resume", name, "--agent", persona}
 			} else {
-				args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona, prompt}
+				args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
 			}
+			if cfg, err := project.ResolvePersonaConfig(persona); err == nil && cfg.Model != "" {
+				args = append(args, "--model", cfg.Model)
+			}
+			args = append(args, prompt)
 
 			cmd := exec.CommandContext(ctx, "claude", args...)
 			cmd.Stdin = strings.NewReader("") // immediate EOF — skip claude's ~3s stdin wait

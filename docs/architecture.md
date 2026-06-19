@@ -443,11 +443,12 @@ shipmates ask security "review the diff"
 
 ### Per-persona session options
 
-Beyond permissions, a persona's frontmatter can carry session-spawn options. Currently one knob:
+Beyond permissions, a persona's frontmatter (overridable per project via `shipmates.yaml` `crew:`) can carry session-spawn options:
 
 | Knob | Effect when shipmates spawns crew |
 |---|---|
 | `remoteControl` | enables `--remote-control [name]` on `shipmates open <persona>` |
+| `model` | passes `--model <model>` to every spawn of this persona (`ask`, `tell`, `open`, `fanout`, live server) — run cheap personas (e.g. `tester`) on a faster model and deep ones (`architect`) on a stronger one. Empty = claude's configured default. |
 
 ```yaml
 remoteControl: false           # default — off
