@@ -37,19 +37,32 @@ type liveProc struct {
 	stdin   io.WriteCloser
 }
 
-// Server holds feed state and live crew processes.
+// pending is a crew permission request awaiting an allow/deny decision.
+type pending struct {
+	id      string
+	persona string
+	tool    string
+	ch      chan string // receives "allow" or "deny"
+}
+
+// Server holds feed state, live crew processes, and pending permission requests.
 type Server struct {
 	port     int
 	mu       sync.Mutex
 	events   []Event
 	live     map[string]*liveProc
+	pendings map[string]*pending
 	stopOnce sync.Once
 	stopCh   chan struct{}
 }
 
 // New constructs an empty server.
 func New() *Server {
-	return &Server{live: map[string]*liveProc{}, stopCh: make(chan struct{})}
+	return &Server{
+		live:     map[string]*liveProc{},
+		pendings: map[string]*pending{},
+		stopCh:   make(chan struct{}),
+	}
 }
 
 func (s *Server) addEvent(e Event) {
@@ -87,6 +100,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /events", s.handleEvents)
 	mux.HandleFunc("POST /tell/{persona}", s.handleTell)
 	mux.HandleFunc("POST /hook/{persona}/{event}", s.handleHook)
+	mux.HandleFunc("GET /pending", s.handlePending)
+	mux.HandleFunc("POST /resolve/{id}", s.handleResolve)
 	mux.HandleFunc("GET /feed", s.handleFeed)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
 	mux.HandleFunc("POST /register", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
@@ -163,38 +178,140 @@ func (s *Server) handleTell(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// handleHook receives a Claude Code hook callback (e.g. PreToolUse) and records
-// it in the feed. Returning 200 with an empty object means "proceed" — we
-// observe, we don't block.
+// handleHook receives a Claude Code hook callback. Observe events (PreToolUse,
+// PostToolUse) are recorded and acknowledged immediately; PermissionRequest is
+// a blocking decision and is delegated to handlePermission.
 func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	persona := r.PathValue("persona")
 	event := r.PathValue("event")
 	var payload map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&payload)
+
 	text, _ := payload["tool_name"].(string)
 	if text == "" {
 		text = "(no tool_name)"
 	}
 	s.addEvent(Event{Persona: persona, Type: "hook:" + event, Text: text})
 	w.Header().Set("Content-Type", "application/json")
+
+	// In headless -p mode there is no separate PermissionRequest event: the
+	// PreToolUse hook *is* the gate. It returns a permissionDecision of
+	// allow/deny. For risky tools we block on a human decision; everything else
+	// is auto-allowed. (An empty 200 would be treated as allow — never do that
+	// for a gated tool.)
+	if event == "PreToolUse" {
+		decision := "allow"
+		if gatedTool(text) {
+			decision = s.awaitDecision(persona, text)
+		}
+		out := map[string]any{
+			"hookSpecificOutput": map[string]any{
+				"hookEventName":      "PreToolUse",
+				"permissionDecision": decision,
+			},
+		}
+		if decision == "deny" {
+			out["hookSpecificOutput"].(map[string]any)["permissionDecisionReason"] = "denied via shipmates lead/captain"
+		}
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("{}"))
+}
+
+// gatedTool reports whether a tool requires human approval. For now: shell
+// execution. (Future: drive this from per-persona permission policy.)
+func gatedTool(tool string) bool {
+	switch tool {
+	case "Bash", "PowerShell":
+		return true
+	default:
+		return false
+	}
+}
+
+// awaitDecision registers a pending request, blocks until a human resolves it
+// (allow/deny) or it times out (deny), and returns the decision.
+func (s *Server) awaitDecision(persona, tool string) string {
+	id := project.NewUUID()[:8]
+	p := &pending{id: id, persona: persona, tool: tool, ch: make(chan string, 1)}
+
+	s.mu.Lock()
+	s.pendings[id] = p
+	s.mu.Unlock()
+	s.addEvent(Event{Persona: persona, Type: "permission?", Text: fmt.Sprintf("%s wants %s — approve: shipmates allow %s (or deny %s)", persona, tool, id, id)})
+
+	var decision string
+	select {
+	case decision = <-p.ch:
+	case <-time.After(110 * time.Second):
+		decision = "deny"
+	}
+
+	s.mu.Lock()
+	delete(s.pendings, id)
+	s.mu.Unlock()
+	s.addEvent(Event{Persona: persona, Type: "permission:" + decision, Text: tool})
+	return decision
+}
+
+// handlePending lists permission requests currently awaiting a decision.
+func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pendings) == 0 {
+		fmt.Fprintln(w, "(none)")
+		return
+	}
+	for id, p := range s.pendings {
+		fmt.Fprintf(w, "%s  %s wants %s\n", id, p.persona, p.tool)
+	}
+}
+
+// handleResolve delivers an allow/deny decision to a waiting permission request.
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Behavior string `json:"behavior"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	if body.Behavior != "allow" && body.Behavior != "deny" {
+		http.Error(w, "behavior must be allow|deny", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	p := s.pendings[id]
+	s.mu.Unlock()
+	if p == nil {
+		http.Error(w, "no such pending request", http.StatusNotFound)
+		return
+	}
+	p.ch <- body.Behavior
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // hookSettings builds a --settings JSON string that routes a crew member's
 // tool-use hooks back to this server, tagged with the persona.
 func (s *Server) hookSettings(persona string) string {
-	httpHook := func(event string) map[string]any {
-		return map[string]any{
-			"hooks": []map[string]any{
-				{"type": "http", "url": fmt.Sprintf("http://127.0.0.1:%d/hook/%s/%s", s.port, persona, event)},
-			},
-		}
+	url := func(event string) string {
+		return fmt.Sprintf("http://127.0.0.1:%d/hook/%s/%s", s.port, persona, event)
+	}
+	// PreToolUse is the gate (it may block on a human decision), so give it a
+	// generous timeout. PostToolUse is observe-only.
+	preTool := map[string]any{
+		"hooks": []map[string]any{{"type": "http", "url": url("PreToolUse"), "timeout": 120}},
+	}
+	postTool := map[string]any{
+		"hooks": []map[string]any{{"type": "http", "url": url("PostToolUse")}},
 	}
 	cfg := map[string]any{
 		"hooks": map[string]any{
-			"PreToolUse":  []map[string]any{httpHook("PreToolUse")},
-			"PostToolUse": []map[string]any{httpHook("PostToolUse")},
+			"PreToolUse":  []map[string]any{preTool},
+			"PostToolUse": []map[string]any{postTool},
 		},
 	}
 	b, _ := json.Marshal(cfg)
