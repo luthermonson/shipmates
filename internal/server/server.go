@@ -54,7 +54,16 @@ type Server struct {
 	pendings map[string]*pending
 	stopOnce sync.Once
 	stopCh   chan struct{}
+
+	refs         int       // active /register count
+	lastActivity time.Time // last register/deregister/event (guarded by s.mu)
 }
+
+// idleTimeout bounds the server's life: it is spawned by an ephemeral `tell`
+// with no persistent parent, so there's no parent-process watchdog — this idle
+// timeout is the lifecycle bound. After this much inactivity (no registers,
+// deregisters, or feed events) the server shuts itself down.
+const idleTimeout = 5 * time.Minute
 
 // New constructs an empty server.
 func New() *Server {
@@ -69,6 +78,7 @@ func (s *Server) addEvent(e Event) {
 	e.Time = time.Now().Format(time.RFC3339)
 	s.mu.Lock()
 	s.events = append(s.events, e)
+	s.lastActivity = time.Now()
 	s.mu.Unlock()
 	slog.Debug("event", "persona", e.Persona, "type", e.Type)
 }
@@ -82,6 +92,10 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	s.port = port
+
+	s.mu.Lock()
+	s.lastActivity = time.Now() // seed so the idle watcher never fires before activity
+	s.mu.Unlock()
 
 	if err := os.MkdirAll(project.SessionsDir(), 0o755); err != nil {
 		return err
@@ -104,8 +118,22 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /resolve/{id}", s.handleResolve)
 	mux.HandleFunc("GET /feed", s.handleFeed)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
-	mux.HandleFunc("POST /register", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	mux.HandleFunc("POST /deregister", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	mux.HandleFunc("POST /register", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.refs++
+		s.lastActivity = time.Now()
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /deregister", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		if s.refs > 0 {
+			s.refs--
+		}
+		s.lastActivity = time.Now()
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	httpSrv := &http.Server{Handler: mux}
 	go func() {
@@ -114,6 +142,28 @@ func (s *Server) Run(ctx context.Context) error {
 		shCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shCtx)
+	}()
+
+	// Idle-timeout auto-shutdown: once nothing has happened for idleTimeout,
+	// trigger the same graceful shutdown as POST /shutdown.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.stopCh:
+				return
+			case <-ticker.C:
+				s.mu.Lock()
+				idle := time.Since(s.lastActivity)
+				s.mu.Unlock()
+				if idle > idleTimeout {
+					slog.Info("idle timeout reached, shutting down", "idle", idle)
+					s.stopOnce.Do(func() { close(s.stopCh) })
+					return
+				}
+			}
+		}
 	}()
 
 	slog.Info("shipmates server listening", "port", port, "pid", os.Getpid())
@@ -201,7 +251,7 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	// for a gated tool.)
 	if event == "PreToolUse" {
 		decision := "allow"
-		if gatedTool(text) {
+		if gatedTool(text) && !personaPermissive(persona) {
 			decision = s.awaitDecision(persona, text)
 		}
 		out := map[string]any{
@@ -220,8 +270,9 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("{}"))
 }
 
-// gatedTool reports whether a tool requires human approval. For now: shell
-// execution. (Future: drive this from per-persona permission policy.)
+// gatedTool reports whether a tool category requires human approval — shell
+// execution. Whether gating actually applies also depends on the persona's
+// permission mode (see personaPermissive).
 func gatedTool(tool string) bool {
 	switch tool {
 	case "Bash", "PowerShell":
@@ -229,6 +280,17 @@ func gatedTool(tool string) bool {
 	default:
 		return false
 	}
+}
+
+// personaPermissive reports whether the persona's effective permission mode
+// skips human gating entirely. On resolver error we fail closed (treat as not
+// permissive) so gating defaults to the prior behavior.
+func personaPermissive(persona string) bool {
+	cfg, err := project.ResolvePersonaConfig(persona)
+	if err != nil {
+		return false
+	}
+	return cfg.DangerouslySkipPermissions || cfg.Mode == "bypassPermissions"
 }
 
 // awaitDecision registers a pending request, blocks until a human resolves it

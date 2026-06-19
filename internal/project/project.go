@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -71,8 +72,21 @@ type Config struct {
 	// writes the repo name here; an empty value means "no prefix" (session
 	// names are just the persona name). Configurable so two checkouts of the
 	// same repo (or same-named projects) don't collide on session handles.
-	SessionPrefix string `yaml:"sessionPrefix"`
-	SharedMemory  bool   `yaml:"sharedMemory"`
+	SessionPrefix string                  `yaml:"sessionPrefix"`
+	SharedMemory  bool                    `yaml:"sharedMemory"`
+	Crew          map[string]CrewOverride `yaml:"crew"`
+}
+
+// CrewOverride is a crew-level override of a persona's frontmatter config, keyed
+// by persona name under shipmates.yaml's `crew:` map. A field only overrides
+// when it's set: a non-empty Mode, a present RemoteControl node, or a non-nil
+// DangerouslySkipPermissions wins over the persona's own frontmatter.
+type CrewOverride struct {
+	Permissions struct {
+		Mode string `yaml:"mode"`
+	} `yaml:"permissions"`
+	RemoteControl              yaml.Node `yaml:"remoteControl"`
+	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
 }
 
 // LoadConfig reads shipmates.yaml, returning a zero Config if it's absent.
@@ -109,6 +123,111 @@ func SessionName(persona string) string {
 		return p + "-" + persona
 	}
 	return persona
+}
+
+// PersonaConfig is the fully-resolved launch config for a persona: its
+// frontmatter overlaid with any crew-level override from shipmates.yaml.
+type PersonaConfig struct {
+	Mode                       string // ask|acceptEdits|bypassPermissions|plan|""
+	RemoteControl              string // resolved --remote-control value; "" = off
+	DangerouslySkipPermissions bool
+}
+
+// personaFrontmatter is the subset of a persona's YAML frontmatter that affects
+// how its session is launched. RemoteControl may be a bool or a string, so it's
+// captured as a yaml.Node and decoded on demand.
+type personaFrontmatter struct {
+	Permissions struct {
+		Mode string `yaml:"mode"`
+	} `yaml:"permissions"`
+	RemoteControl              yaml.Node `yaml:"remoteControl"`
+	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
+}
+
+// ResolvePersonaConfig reads the installed persona's frontmatter, overlays any
+// crew-level override from shipmates.yaml, and resolves the result. A missing
+// persona file yields a zero PersonaConfig and nil error.
+func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
+	var cfg PersonaConfig
+
+	raw, err := os.ReadFile(AgentPath(persona))
+	if errors.Is(err, fs.ErrNotExist) {
+		return cfg, nil
+	}
+	if err != nil {
+		return cfg, err
+	}
+
+	fm, err := parsePersonaFrontmatter(raw)
+	if err != nil {
+		return cfg, fmt.Errorf("parse %s: %w", AgentPath(persona), err)
+	}
+
+	cfg.Mode = strings.TrimSpace(fm.Permissions.Mode)
+	rcNode := fm.RemoteControl
+	if fm.DangerouslySkipPermissions != nil {
+		cfg.DangerouslySkipPermissions = *fm.DangerouslySkipPermissions
+	}
+
+	conf, err := LoadConfig()
+	if err != nil {
+		return cfg, err
+	}
+	if ov, ok := conf.Crew[persona]; ok {
+		if m := strings.TrimSpace(ov.Permissions.Mode); m != "" {
+			cfg.Mode = m
+		}
+		if ov.RemoteControl.Kind != 0 {
+			rcNode = ov.RemoteControl
+		}
+		if ov.DangerouslySkipPermissions != nil {
+			cfg.DangerouslySkipPermissions = *ov.DangerouslySkipPermissions
+		}
+	}
+
+	cfg.RemoteControl = resolveRemoteControl(rcNode, SessionName(persona))
+	return cfg, nil
+}
+
+// parsePersonaFrontmatter isolates the YAML frontmatter block and unmarshals the
+// launch-relevant fields. (render.go's parseFrontmatter drops nested maps like
+// permissions, so it can't supply these.)
+func parsePersonaFrontmatter(raw []byte) (personaFrontmatter, error) {
+	var fm personaFrontmatter
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	text = strings.TrimLeft(text, "\n")
+	if !strings.HasPrefix(text, "---\n") {
+		return fm, nil
+	}
+	rest := text[len("---\n"):]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return fm, nil
+	}
+	if err := yaml.Unmarshal([]byte(rest[:end]), &fm); err != nil {
+		return fm, err
+	}
+	return fm, nil
+}
+
+// resolveRemoteControl turns a remoteControl node into a --remote-control value:
+// bool true => sessionName; a non-empty string => that string; false/absent => "".
+func resolveRemoteControl(node yaml.Node, sessionName string) string {
+	if node.Kind != yaml.ScalarNode {
+		return ""
+	}
+	var b bool
+	if err := node.Decode(&b); err == nil {
+		if b {
+			return sessionName
+		}
+		return ""
+	}
+	var s string
+	if err := node.Decode(&s); err == nil {
+		return strings.TrimSpace(s)
+	}
+	return ""
 }
 
 // NewUUID returns a random v4 UUID string using only the standard library.

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
@@ -26,14 +29,17 @@ type frontmatter struct {
 // subagent files natively. They degrade gracefully: the memory-load
 // instructions are dropped (no memory dynamics) and the body is condensed.
 //
-// Phase 1 prints to stdout so the user can redirect into the destination file
-// (e.g. `shipmates render security --target cursor > .cursor/rules/security.mdc`).
+// By default it prints to stdout; with --write it writes to each target's
+// canonical destination instead.
 func Render(cat *catalog.Catalog) *cli.Command {
 	return &cli.Command{
 		Name:      "render",
 		Usage:     "render a persona for a thin target (agents-md|cursor|windsurf)",
 		ArgsUsage: "<persona>",
-		Flags:     []cli.Flag{&cli.StringFlag{Name: "target", Required: true}},
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "target", Required: true},
+			&cli.BoolFlag{Name: "write", Usage: "write to the target's canonical file instead of stdout"},
+		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			name := c.Args().First()
 			if name == "" {
@@ -53,8 +59,9 @@ func Render(cat *catalog.Catalog) *cli.Command {
 				fm.Name = name
 			}
 
+			target := c.String("target")
 			var out string
-			switch c.String("target") {
+			switch target {
 			case "agents-md":
 				out = renderAgentsMD(fm, body)
 			case "cursor":
@@ -62,13 +69,84 @@ func Render(cat *catalog.Catalog) *cli.Command {
 			case "windsurf":
 				out = renderWindsurf(fm, body)
 			default:
-				return fmt.Errorf("unknown target %q (want: agents-md|cursor|windsurf)", c.String("target"))
+				return fmt.Errorf("unknown target %q (want: agents-md|cursor|windsurf)", target)
 			}
 
+			if c.Bool("write") {
+				return writeRender(target, name, out)
+			}
 			fmt.Print(out)
 			return nil
 		},
 	}
+}
+
+// writeRender persists a rendered thin target to its canonical destination.
+//   - cursor:    .cursor/rules/<persona>.mdc — standalone per-persona rule, overwritten.
+//   - agents-md: a marked section in ./AGENTS.md.
+//   - windsurf:  a marked section in ./.windsurf/rules.md.
+//
+// The append/update targets are idempotent: re-rendering replaces the persona's
+// own marked block and leaves everything else untouched.
+func writeRender(target, persona, content string) error {
+	switch target {
+	case "cursor":
+		path := filepath.Join(".cursor", "rules", persona+".mdc")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		slog.Info("wrote thin target", "target", target, "persona", persona, "path", path)
+		return nil
+	case "agents-md":
+		return upsertMarkedSection("AGENTS.md", persona, content)
+	case "windsurf":
+		return upsertMarkedSection(filepath.Join(".windsurf", "rules.md"), persona, content)
+	default:
+		return fmt.Errorf("unknown target %q (want: agents-md|cursor|windsurf)", target)
+	}
+}
+
+// upsertMarkedSection inserts or replaces a per-persona block delimited by
+// HTML-comment markers within path, creating the file (and parent dirs) if
+// needed. Content outside the markers is preserved verbatim.
+func upsertMarkedSection(path, persona, content string) error {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", dir, err)
+		}
+	}
+
+	startMarker := fmt.Sprintf("<!-- shipmates:%s:start -->", persona)
+	endMarker := fmt.Sprintf("<!-- shipmates:%s:end -->", persona)
+	block := startMarker + "\n" + strings.TrimRight(content, "\n") + "\n" + endMarker + "\n"
+
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	text := strings.ReplaceAll(string(existing), "\r\n", "\n")
+
+	var updated string
+	start := strings.Index(text, startMarker)
+	end := strings.Index(text, endMarker)
+	switch {
+	case start != -1 && end != -1 && end > start:
+		updated = text[:start] + block + text[end+len(endMarker):]
+		updated = strings.TrimRight(updated, "\n") + "\n"
+	case text == "":
+		updated = block
+	default:
+		updated = strings.TrimRight(text, "\n") + "\n\n" + block
+	}
+
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	slog.Info("wrote thin target", "persona", persona, "path", path)
+	return nil
 }
 
 // splitPersona separates a persona file into its parsed frontmatter and body.
@@ -98,9 +176,7 @@ func splitPersona(raw []byte) (frontmatter, string) {
 }
 
 // parseFrontmatter does a minimal, dependency-free parse of the flat scalar
-// fields and the one block-sequence (domainGlob) that thin targets use. It
-// ignores nested maps (permissions) and unrecognized fields — exactly the
-// "drop memory dynamics" behavior we want.
+// fields and the one block-sequence (domainGlob) that thin targets use.
 func parseFrontmatter(s string) frontmatter {
 	var fm frontmatter
 	lines := strings.Split(s, "\n")
@@ -111,7 +187,7 @@ func parseFrontmatter(s string) frontmatter {
 			continue
 		}
 		if line != strings.TrimLeft(line, " \t") {
-			continue // skip nested (indented) keys
+			continue
 		}
 		key, val, ok := strings.Cut(line, ":")
 		if !ok {

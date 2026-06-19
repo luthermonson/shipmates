@@ -115,4 +115,17 @@ Shipmates fills exactly one gap: **persona + persistent project memory + opinion
 
 Early but working. The Go CLI is implemented — `init`, `add`, `list`, `update`, `remove`, `render`, `ask`, `tell`, `feed`, `pending`/`allow`/`deny`, `open`, `fanout`, and the coordination `server`. The lead↔crew loop (dispatch → live steer → observe tool use → human-in-the-loop approval) is verified end-to-end against Claude Code. Six starter personas ship in the embedded catalog.
 
-Not yet done: published binaries, `shipmates.yaml` crew-level config overrides, and harness exports beyond Claude Code (Cursor/Windsurf renders are minimal). Dependencies are intentionally tiny — `urfave/cli` and `yaml.v3`, everything else standard library.
+Per-project config lives in `shipmates.yaml`: a `crew:` map overrides each persona's permission mode, `dangerouslySkipPermissions`, and `remoteControl` (overrides win over the persona file's frontmatter). `render --write` exports thin targets to their canonical files (`.cursor/rules/<p>.mdc`, marked sections in `AGENTS.md` / `.windsurf/rules.md`). Dependencies are intentionally tiny — `urfave/cli` and `yaml.v3`, everything else standard library.
+
+Still pending: published binaries (release tooling is wired — see below), fuller harness exports, and server-lifecycle edge cases (the coordination server self-terminates after 5 minutes idle).
+
+## Releasing
+
+Releases are automated with [GoReleaser](https://goreleaser.com) (v2) and GitHub Actions. Tag a commit and push the tag:
+
+```sh
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+Pushing a `vX.Y.Z` tag triggers CI, which cross-builds binaries (linux/darwin/windows × amd64/arm64), archives them, generates checksums, and publishes a GitHub Release with the version embedded via `-ldflags`. Dry-run locally with `goreleaser release --snapshot --clean` (requires GoReleaser v2).
