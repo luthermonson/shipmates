@@ -9,6 +9,7 @@ tmp/
 # OS junk
 .DS_Store
 Thumbs.db
+*~
 
 # Go (for future Go CLI)
 *.exe

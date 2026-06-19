@@ -1,6 +1,6 @@
 # Shipmates — Architecture Diagrams
 
-Companion to [`architecture.md`](architecture.md). Three views: system topology, the delegation + hook lifecycle, and the install/update flow.
+Companion to [`architecture.md`](architecture.md). Four views: system topology, the delegation + hook lifecycle, the install/update overview, and the upgrade path in detail.
 
 ---
 
@@ -138,6 +138,72 @@ flowchart TB
     classDef sacred fill:#eef,stroke:#446
     class MemDir sacred
 ```
+
+---
+
+## 4. Upgrade path (end-to-end)
+
+What [diagram #3](#3-install--update-flow-embedded-catalog) glosses over. Starts at "user dropped in a new `shipmates` binary" and ends at "manifest rewritten, summary printed." Covers the full per-file decision tree, the conflict-prompt UX (TTY *and* non-TTY), orphan flagging, and the memory dir's untouchable status — the contract being: `shipmates update` is safe to run anytime, and the worst it can do to your work is ask you a question.
+
+Distribution of the new binary itself (`brew upgrade`, `winget upgrade`, `go install ...@latest`, raw `curl`) is out of scope — the diagram starts the moment a newer binary is on `$PATH`.
+
+```mermaid
+flowchart TB
+    Bin(["distribute new binary<br/>(brew, winget, curl, go install)<br/>distribution: out of scope"])
+    Cmd["shipmates update"]
+    Bin --> Cmd
+
+    Cmd --> ReadMan["read .shipmates/manifest.json<br/>last catalog ver + baseline SHA per file"]
+    ReadMan --> Ver{"binary catalog ver<br/>same as manifest?"}
+    Ver -->|same| Done0(["nothing to do, exit 0"])
+    Ver -->|newer| Iter["for each file in manifest"]
+
+    Iter --> Disk{"on disk?"}
+    Disk -->|missing| ReAdd["restore from catalog<br/>was previously added"]
+    Disk -->|present| Edit{"disk SHA same as<br/>baseline SHA?"}
+
+    Edit -->|unedited| CatA{"catalog SHA<br/>changed?"}
+    CatA -->|no| Skip1["no-op"]
+    CatA -->|yes| Over["overwrite with shipped<br/>bump baseline SHA"]
+
+    Edit -->|user-edited| CatB{"catalog SHA<br/>changed?"}
+    CatB -->|no| Skip2["leave alone<br/>user customization"]
+    CatB -->|yes| Conflict[/"CONFLICT<br/>render unified diff"/]
+
+    Conflict --> TTY{"stdout is TTY?"}
+    TTY -->|no| NonTTY{"--accept flag?"}
+    NonTTY -->|none or ours| Keep["keep yours<br/>default in CI"]
+    NonTTY -->|theirs or --force| Take["take shipped<br/>bump baseline SHA"]
+
+    TTY -->|yes| Prompt{"k keep, t take, s sidecar, d re-diff<br/>a keep-all, T take-all (auto-apply rest)"}
+    Prompt -->|k or a| Keep
+    Prompt -->|t or T| Take
+    Prompt -->|s| Side["write &lt;file&gt;.new sidecar<br/>baseline SHA unchanged"]
+    Prompt -->|d| Conflict
+
+    Iter -. orphan check .-> Orphan{"manifest entry no<br/>longer in catalog?"}
+    Orphan -->|yes| Flag["leave on disk<br/>flag (orphaned) in shipmates list<br/>NEVER auto-delete"]
+
+    Iter -. NEVER touched .-> Mem[("memory/&lt;persona&gt;/<br/>SACRED, user's wisdom")]
+
+    Over --> Finish
+    ReAdd --> Finish
+    Take --> Finish
+    Keep --> Finish
+    Skip1 --> Finish
+    Skip2 --> Finish
+    Side --> Finish
+    Flag --> Finish
+
+    Finish["rewrite manifest.json<br/>bump catalog ver<br/>bump SHAs for files taken"] --> Summary(["summary: X updated, Y kept,<br/>Z conflicts, N orphans"])
+
+    classDef sacred fill:#eef,stroke:#446
+    classDef conflict fill:#fee,stroke:#a44
+    class Mem sacred
+    class Conflict conflict
+```
+
+> **Three invariants worth naming.** (1) The memory dir is never read or written by `update` — accumulated learnings survive every upgrade unconditionally. (2) Orphaned files (in your manifest, removed from a newer catalog) are flagged but never deleted — removal is always a human decision. (3) Per-file *baseline SHAs* are only bumped for files actually overwritten or taken; "keep yours" leaves the baseline alone so a later catalog update can still detect the original divergence. The manifest's overall *catalog version* bumps once per successful run regardless, so you can always tell which shipped version your project was last reconciled against.
 
 ---
 

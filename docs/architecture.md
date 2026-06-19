@@ -312,11 +312,33 @@ Server stays up across back-to-back delegations (warm path). It shuts down when 
 | `POST /deregister` | crew `SessionEnd` hook | ref-count-- |
 | `POST /events` | crew `PreToolUse`, `PostToolUse`, `Stop`, `MessageDisplay` hooks | activity firehose |
 | `POST /permission/<persona>/<id>` | crew `PermissionRequest` hook | **blocking** allow/deny |
+| `POST /tell/<persona>` | lead (via `shipmates tell`) | inject a message into a live crew process's stdin |
 | `GET /feed` | lead (via Bash) | tail recent activity |
 | `GET /pending` | lead | currently-waiting permission requests |
 | `POST /resolve/<id>` | lead / external relay | answer a pending permission |
 | `GET /health` | wrapper script | wait-for-ready |
 | `POST /shutdown` | wrapper or `SessionEnd` hook | graceful drain + exit |
+
+**Talking to a live crew member (`shipmates tell`).** The server brokers messages in both directions: crew→server via hooks, and **lead→crew** via `shipmates tell`. The lead never touches stream-json:
+
+```
+shipmates tell security "double-check PR 10 for auth regressions"
+  └─ CLI reads .shipmates/sessions/server.port
+  └─ POST /tell/security  { "message": "double-check PR 10 ..." }
+       └─ server wraps it as a stream-json user message:
+          {"type":"user","message":{"role":"user",
+            "content":[{"type":"text","text":"double-check PR 10 ..."}]}}
+       └─ writes that line to the live `security` process's stdin
+       └─ crew receives it (even mid-work — verified) and streams
+          its response back out, which the server tees to /feed
+```
+
+This requires the crew member to be running as a **live stream-json process** (`claude -p --input-format stream-json --output-format stream-json`), held open by the server, rather than a one-shot. Two execution models coexist:
+
+- **One-shot** (`shipmates ask <persona> "..."`): transient `--resume` subprocess, one turn, exits. Cheap, fire-and-forget.
+- **Live** (`shipmates open-crew <persona>` then `shipmates tell <persona> "..."`): server spawns and holds a persistent stream-json process you can steer conversationally while it works. The server owns its stdin/stdout.
+
+Mid-work messages are received and processed in the same session (verified June 2026); a `tell` is queued/steered rather than hard-cancelling the in-flight turn.
 
 **Signal handling & lifecycle teardown.**
 
@@ -473,6 +495,7 @@ What we ship to find out if anyone cares. Time budget: 1-2 weeks.
    - `shipmates render <persona> --target <agents-md|cursor|windsurf>` — render a thin-target version
    - `shipmates open <persona>` — launch a long-running interactive session for that persona (uses recorded `--session-id`)
    - `shipmates ask <persona> "<prompt>"` — one-shot delegation through the lead-spawned server
+   - `shipmates tell <persona> "<message>"` — send a string to a live crew process (CLI → JSON → server → crew stdin); talk to it while it works
    - `shipmates fanout <p1,p2,…> "<prompt>"` — parallel delegations
    - `shipmates server stop` — graceful server shutdown (invoked by lead's `SessionEnd` hook)
 
