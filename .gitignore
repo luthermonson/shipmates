@@ -1,0 +1,21 @@
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Workspace scratch
+tmp/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Go (for future Go CLI)
+*.exe
+*.test
+*.out
+/dist/
+/build/
+
+# Node (for any future tooling)
+node_modules/

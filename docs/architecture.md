@@ -8,7 +8,7 @@
 
 You install a small set of role-specialized AI personas into your project. Each one accumulates context about *your* codebase — patterns, decisions, rejected approaches, gotchas — every time you talk to them. Over weeks they get qualitatively better at reviewing, planning, and pushing back on your work because they remember the project's history.
 
-The on-ramp is a single persona running as a Claude Code subagent. The full pattern is a *crew* — multiple personas plus a human-AI partnership in the captain's chair — coordinating work for a project.
+The on-ramp is a single persona running as a Claude Code subagent. The full pattern is a *crew* — multiple personas plus a human-AI partnership in the lead's chair — coordinating work for a project.
 
 ## The core insight
 
@@ -44,7 +44,7 @@ The vocabulary the project will use consistently. Each term means one thing.
 | **Persona** | A role-specialized AI identity. Defined as a single Claude Code subagent file (`.claude/agents/<name>.md`) with shipmates-specific frontmatter conventions. Has a name (default, fully renamable), a byline, a description, a domain glob, and a body containing role + expertise + default behaviors. |
 | **Memory** | Per-project persistent context for a persona. Lives as markdown files in `.shipmates/memory/<persona>/`; auto-loaded into the persona's context on session start; written to by the persona as it learns. |
 | **Crew** | The assembled set of personas working on one project. Listed in `shipmates.yaml`. May be one persona (solo subagent mode) or many (full fleet mode). |
-| **Captain** | The human + AI partnership in the chair. Optional but recommended. The captain has its own long-running session, doesn't claim work, files issues for the crew, pushes back when other personas drift. |
+| **Lead** | The human + AI partnership in the chair. Optional but recommended. The lead has its own long-running session, doesn't claim work, files issues for the crew, pushes back when other personas drift. Rename to "captain," "skipper," "PM," or whatever fits your team — the role is what matters. |
 | **Articles** | The rendered persona file installed in a project — the persona's "contract." Lives at `.claude/agents/<name>.md` so Claude Code's existing subagent machinery sees it natively. |
 
 ## Architecture
@@ -68,12 +68,12 @@ Example: a Security persona
 name: security-sam
 description: Application security review and dependency hygiene.
 byline: "Security-Sam here, …"
-domain_glob:
+domainGlob:
   - "**/*.yaml"
   - "Dockerfile"
   - "package*.json"
   - "go.mod"
-memory_dir: .shipmates/memory/security-sam
+memoryDir: .shipmates/memory/security-sam
 ---
 
 # Role
@@ -114,8 +114,8 @@ Before suggesting a new pattern, reference relevant memory.
 |---|:---:|---|
 | `name`, `description` | yes | Standard subagent file fields, read by Claude Code |
 | `byline` | shipmates | Persona's GitHub-comment / chat-message prefix in fleet mode |
-| `domain_glob` | shipmates | Files this persona considers their territory (for review routing) |
-| `memory_dir` | shipmates | Where this persona's persistent memory lives |
+| `domainGlob` | shipmates | Files this persona considers their territory (for review routing) |
+| `memoryDir` | shipmates | Where this persona's persistent memory lives |
 | `tools` | optional | Standard subagent allowlist if you want to restrict tool access |
 
 Personas that don't care about fleet mode (memory + byline) just drop those fields and remain valid Claude Code subagent files.
@@ -145,20 +145,20 @@ Because the primary target IS the source format, there's no compile pipeline for
 | Target | What happens | When you'd use it |
 |---|---|---|
 | **Claude Code subagent** | The persona file IS the artifact. Vendor into `.claude/agents/<name>.md`. Memory dir seeded alongside. | Default. Solo subagent mode and full fleet mode both work from this. |
-| **Crew member** (full fleet) | Same persona file PLUS a `shipmates.yaml` entry, CLAUDE.md identity-section snippet, and a GitHub label suggestion for routing | Multi-agent project with captain-and-crew pattern. |
+| **Crew member** (full fleet) | Same persona file PLUS a `shipmates.yaml` entry, CLAUDE.md identity-section snippet, and a GitHub label suggestion for routing | Multi-agent project with lead-and-crew pattern. |
 | **AGENTS.md section** (Phase 1) | Render a section in `AGENTS.md` summarizing the persona for tools that respect the multi-vendor convention | For non-Claude-Code tools that read AGENTS.md as a fallback. |
 | **Cursor rule** (Phase 2) | Render `.cursor/rules/<name>.mdc` — degraded; static rules, no memory dynamics | Cursor users. |
 | **Windsurf rule** (Phase 2) | Render `.windsurf/rules.md` section | Windsurf users. |
 
 Thin targets degrade gracefully: drop the memory-load instructions, condense the markdown body into a static rules section.
 
-### Captain-and-crew pattern
+### Lead-and-crew pattern
 
 The opinionated full-fleet shape. Optional — solo subagents work without it — but documented as the recommended "advanced" mode.
 
 ```
         ┌─────────────────────────────────────┐
-        │  Captain (human + AI partner)       │
+        │  Lead (human + AI partner)          │
         │  - Has its own long-running session │
         │  - Doesn't claim work               │
         │  - Files issues, sets direction     │
@@ -181,9 +181,9 @@ The opinionated full-fleet shape. Optional — solo subagents work without it �
     └────────────┘        └────────────┘  └────────────┘
 ```
 
-The captain is the strategic layer (decides what's worth doing). The routing layer is the dispatch primitive (who's working what). The crew personas are the executors, each with accumulated context for their domain.
+The lead is the strategic layer (decides what's worth doing). The routing layer is the dispatch primitive (who's working what). The crew personas are the executors, each with accumulated context for their domain.
 
-Shipmates doesn't ship the routing layer — that's Code Conductor / Agent Teams / whatever the user picks. Shipmates ships the persona files, the memory infrastructure, and the captain primitives.
+Shipmates doesn't ship the routing layer — that's Code Conductor / Agent Teams / whatever the user picks. Shipmates ships the persona files, the memory infrastructure, and the lead primitives.
 
 ### Persona lifecycle
 
@@ -203,11 +203,241 @@ uninstall → persona file removed from .claude/agents/; memory dir
 
 The memory dir is the persona's accumulated wisdom about your project. Treat it the way you'd treat a senior engineer's notes — don't blow it away just because you're updating their tool.
 
+### Embedded catalog & update flow
+
+The whole catalog — persona files, memory seeds, slash commands, the settings.json snippet — is **embedded into the Go binary at build time** via `//go:embed`. There is no runtime catalog fetch, no separate catalog repo to pin, no network dependency. The binary version is the catalog version.
+
+**Repo layout (source of truth):**
+
+```
+catalog/
+  personas/
+    lead/
+      agent.md          → vendored to .claude/agents/lead.md
+      memory-seeds/     → copied to .shipmates/memory/lead/ on first install
+    architect/
+    security/
+    ...
+  commands/
+    standup.md          → vendored to .claude/commands/standup.md
+    review.md
+  skills/               (optional: .claude/skills/<name>/ for distribution)
+  settings/
+    hooks.json.tmpl     → merged into the project's settings.json
+```
+
+In the Go source:
+
+```go
+//go:embed catalog
+var catalog embed.FS
+```
+
+**Update flow.** `shipmates update` reads every embedded file, computes its SHA, and compares against `.shipmates/manifest.json` (recorded at install time). Four cases:
+
+| Case | Action |
+|---|---|
+| File missing in project | Add it (only for personas/commands the user previously `add`'d; orphans stay gone) |
+| Present, unchanged from baseline | Overwrite with new shipped version; update manifest |
+| Present, user-edited, catalog unchanged | Leave alone |
+| Present, user-edited AND catalog updated | **Prompt with diff** (see below) |
+
+**Conflict prompt.** When a file has diverged AND a new catalog version exists, render a unified diff between the user's current file and the new shipped version, then prompt:
+
+```
+Conflict: .claude/agents/security.md
+  Your version (sha: a3f8…) diverges from baseline (sha: 1e4c…).
+  Catalog has a new version (sha: 7b29…).
+
+  --- your version
+  +++ shipped 1.4.0
+  @@ -12,7 +12,9 @@
+  -## Expertise
+  +## Domain expertise
+   …
+
+  [k] keep your version              (default)
+  [t] take the new shipped version
+  [s] save shipped as security.md.new (sidecar; merge manually)
+  [d] re-show diff
+  [a] keep yours for all remaining conflicts
+  [T] take theirs for all remaining conflicts
+```
+
+Diff renderer is an in-process unified diff (e.g. `sergi/go-diff`), ANSI-colored when stdout is a TTY, plain otherwise. No external `git` dependency.
+
+**Non-TTY behavior.** In CI / piped runs, default to **keep yours** for every conflict and exit with a summary. Never silently stomp user changes in non-interactive mode. `--accept ours|theirs` (or `--force`) resolves all conflicts non-interactively when the caller knows what they want.
+
+**Memory is sacred.** `shipmates update` never touches `.shipmates/memory/<persona>/`. Memory seeds are copied **only on first `shipmates add <persona>`** and never overwritten thereafter — the persona's accumulated knowledge is the user's, not ours. Updates to seed templates only affect *new* installs.
+
+**Orphans.** If a persona or command is removed from the catalog in a future binary version, the user's installed copy stays. `shipmates list` flags it as `(orphaned)`. They can `shipmates remove` it themselves; we never delete user files unprompted.
+
+**Versioning.** `shipmates --version` prints the binary/catalog version (same value). `.shipmates/manifest.json` records the version at last successful `update`, so the CLI can detect "you're on 1.4 but your project was last updated against 1.2" and offer to bring it current.
+
+### Lead-server protocol
+
+When the lead session needs live coordination with one or more crew, it spawns a transient local HTTP server. **One shared server per project**, lifetime bounded by lead-session presence + worker activity. Memory remains file-based; the server is transient IPC for live coordination, not persistent state.
+
+**Lifecycle.**
+
+```
+lead session starts
+  └─ first `shipmates ask <persona>` call:
+       1. server up? if no, pick a free port (bind 127.0.0.1:0),
+          write .shipmates/sessions/server.port + server.pid
+       2. wait for GET /health
+       3. ref-count++
+       4. exec  claude -p --session-id <uuid> --agent <persona>
+                --settings <inlined snippet with HTTP hooks
+                  pointing at the recorded port>
+                "<prompt>"
+       5. wait for crew exit
+       6. ref-count--
+       7. if ref-count == 0: POST /shutdown
+```
+
+Server stays up across back-to-back delegations (warm path). It shuts down when no crew is running and lead's `SessionEnd` fires — or via watchdog if lead died ungracefully.
+
+**Endpoints.**
+
+| Endpoint | Caller | Purpose |
+|---|---|---|
+| `POST /register` | crew `SessionStart` hook | register run, ref-count++ |
+| `POST /deregister` | crew `SessionEnd` hook | ref-count-- |
+| `POST /events` | crew `PreToolUse`, `PostToolUse`, `Stop`, `MessageDisplay` hooks | activity firehose |
+| `POST /permission/<persona>/<id>` | crew `PermissionRequest` hook | **blocking** allow/deny |
+| `GET /feed` | lead (via Bash) | tail recent activity |
+| `GET /pending` | lead | currently-waiting permission requests |
+| `POST /resolve/<id>` | lead / external relay | answer a pending permission |
+| `GET /health` | wrapper script | wait-for-ready |
+| `POST /shutdown` | wrapper or `SessionEnd` hook | graceful drain + exit |
+
+**Signal handling & lifecycle teardown.**
+
+The server has to die when the lead session dies — including ungraceful deaths (Ctrl-C, crash, kill -9, OOM, terminal closed). Two complementary mechanisms:
+
+1. **Primary: `SessionEnd` hook.** Lead's `settings.json` registers a `SessionEnd` hook that runs `shipmates server stop`, which POSTs `/shutdown` and escalates to OS kill if the server didn't exit within the drain window. Handles `/exit`, `Ctrl-D`, and (we believe) `Ctrl-C`.
+
+2. **Backup: parent-watchdog inside the server.** At spawn time, server records lead's PID. A goroutine polls every ~3s:
+   - Unix: `kill(pid, 0)` returns `ESRCH` → parent dead → drain → exit
+   - Windows: `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, …, pid)` returning `ERROR_INVALID_PARAMETER` → parent dead → drain → exit
+
+The watchdog is unconditional and handles every "ungraceful death" case regardless of whether `SessionEnd` fired.
+
+**Per-platform signal handling inside the server.**
+
+| Platform | Catch | Action |
+|---|---|---|
+| Linux/macOS | `SIGTERM`, `SIGINT` | drain (~3s): respond to pending permission requests with `deny`, flush event log, close listener, exit 0 |
+| Windows | `os.Interrupt` (Go maps `CTRL_C_EVENT` → `os.Interrupt`; `CTRL_BREAK_EVENT` → `syscall.SIGBREAK`) | same drain |
+
+**Windows quirk: spawn detached.** Spawn `shipmates-server` with `CREATE_NEW_PROCESS_GROUP` so the user's Ctrl-C doesn't double-deliver to the server via console event broadcast. Server's only kill paths become the `SessionEnd` hook and the parent-watchdog. Predictable behavior on the platform that least supports "just SIGTERM it."
+
+Optional hardening (Phase 2 unless we hit problems): assign the server to a Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Kernel kills the server when the parent handle closes — belt-and-suspenders for "what if the watchdog itself wedges."
+
+**Port allocation.** Server binds `127.0.0.1:0`; kernel picks a free port. Port is written to `.shipmates/sessions/server.port`. The hook config inlined into each crew's `--settings` reads from there so two shipmates projects on the same machine don't collide.
+
+**Crash recovery for ref counts.** If a crew member is killed mid-run, its `SessionEnd` hook never fires and the server holds a phantom ref forever. Two safety nets:
+
+- Each crew run heartbeats on every `PostToolUse` (effectively a "still alive" ping); server expires refs whose last heartbeat is older than N seconds (default 30).
+- Overall idle timeout: if no events received in M minutes (default 5), server shuts down regardless of ref count.
+
+### Per-persona permission policy
+
+Different personas warrant different levels of trust. A `tester` running on a developer's laptop might run freely; a `security` persona on a production-adjacent box should ask before every mutating action. Shipmates handles this with a **thin translation layer** over Claude Code's existing permission machinery — we do not invent a parallel allowlist vocabulary.
+
+**Where allow/deny lists live: `.claude/settings.json`, unchanged.** Crew subprocesses inherit the project's `permissions.allow` / `permissions.deny` from Claude Code's normal user→project→local settings cascade. The same allowlist your interactive sessions use. Shipmates does not duplicate or override this.
+
+**What shipmates adds: two per-persona knobs.**
+
+| Knob | Effect when shipmates spawns crew |
+|---|---|
+| `mode` | sets `--permission-mode <default\|acceptEdits\|bypassPermissions\|plan>` |
+| `dangerouslySkipPermissions` | sets `--dangerously-skip-permissions` (trust-the-agent escape hatch) |
+
+That's it. Allow/deny patterns stay in `.claude/settings.json` because that's where Claude Code already reads them and where the team's other tooling already writes them.
+
+**Layered policy resolution.** Last writer wins:
+
+1. **Persona default** (catalog frontmatter)
+2. **Project override** (`shipmates.yaml`)
+3. **Local override** (`.shipmates/local-policies.yaml`, gitignored — per-developer trust)
+
+```yaml
+# persona frontmatter (catalog default)
+permissions:
+  mode: acceptEdits
+
+# shipmates.yaml (project override)
+crew:
+  backend:  { dangerouslySkipPermissions: true }
+  security: { mode: ask }
+
+# .shipmates/local-policies.yaml (gitignored, per developer)
+crew:
+  security: { dangerouslySkipPermissions: true }   # I trust it on my own box
+```
+
+**Catalog default modes** — `acceptEdits` for anything that edits code, `ask` for non-executors and strategic personas:
+
+| Persona | Default mode | Why |
+|---|---|---|
+| lead | `ask` | rarely executes; defensive when it does |
+| architect | `acceptEdits` | edits docs/READMEs constantly; Bash still asks |
+| security | `acceptEdits` | edits configs/lockfiles in audits; Bash still asks |
+| frontend | `acceptEdits` | UI iteration churns files |
+| backend | `acceptEdits` | edits handlers all day; Bash for migrations asks |
+| tester | `acceptEdits` | test edits constantly; Bash still asks |
+
+Defaulting all executors to `ask` would create approval fatigue (captain auto-clicks yes; gating becomes theater). `acceptEdits` lets file edits flow while still gating `Bash`, `WebFetch`, and other side-effecting tools — which is where the real risk lives.
+
+**Composition at spawn time.**
+
+```
+shipmates ask security "review the diff"
+  └─ resolve mode: persona default → shipmates.yaml → local-policies.yaml
+  └─ exec claude
+        --agent security
+        --session-id <uuid>
+        --permission-mode acceptEdits                # from resolved policy
+        [--dangerously-skip-permissions]             # if dangerouslySkipPermissions
+        --settings <json: HTTP hooks ONLY>
+        "review the diff"
+
+  Crew subprocess loads:
+    - user/project/local .claude/settings.json     (cascade) → allowlist respected
+    - our --settings additive payload              (hooks)   → server visibility
+```
+
+**`PermissionRequest` hook is conditional.** Registered only when there's something to ask — i.e., not in `dangerouslySkipPermissions` mode. In skip-permissions mode, the hook never fires inside Claude Code; we still emit `PostToolUse` events to `/events` so the captain can see what got auto-run. The escape hatch is "don't block me," not "hide what's happening."
+
+**One verification before code lands.** `--settings <json>` must be **additive** (merges with the discovered settings cascade), not **replacing**. The help text reads "load *additional* settings from," which strongly implies merge — but worth a 30-second test. If it replaces, shipmates has to read the cascade first, deep-merge, and pass the merged JSON.
+
+### Per-persona session options
+
+Beyond permissions, a persona's frontmatter can carry session-spawn options. Currently one knob:
+
+| Knob | Effect when shipmates spawns crew |
+|---|---|
+| `remoteControl` | enables `--remote-control [name]` on `shipmates open <persona>` |
+
+```yaml
+remoteControl: false           # default — off
+remoteControl: true            # on; auto-name = persona name
+remoteControl: "mobile-lead"   # on; custom session name for findability in the app
+```
+
+**Applies to interactive sessions only.** Compatible with `shipmates open <persona>` (long-running interactive); **incompatible** with `shipmates ask <persona>` (one-shot `--print` mode — non-interactive and ephemeral). If the user invokes `shipmates ask <p>` while `<p>` is actively remote-controlled, the wrapper refuses with a clear message ("session is being driven from the app; close it there first").
+
+**Trust posture.** `--remote-control` routes session traffic through **Anthropic-hosted relay infrastructure** so the desktop / mobile app can drive it. That's a meaningfully different trust posture than the hooks-only path (which is all local IPC). Shipmates surfaces this in the `shipmates open` output when remoteControl is on, so users opt in knowingly.
+
+**Catalog defaults.** Off for every persona. Sensible project-level override: `lead: { remoteControl: true }` — lead is the long-running strategic session a user might genuinely want to talk to from their phone.
+
 ## Comparison to existing tools
 
 Honest table.
 
-| Tool | Persona library | Per-project memory | Captain pattern | Plugs into existing orchestrators |
+| Tool | Persona library | Per-project memory | Lead pattern | Plugs into existing orchestrators |
 |---|:---:|:---:|:---:|:---:|
 | claude-skills (51 personas) | ✅ | ❌ | ❌ | ❌ |
 | VoltAgent subagents (100+) | ✅ | ❌ | ❌ | ❌ |
@@ -220,7 +450,7 @@ Honest table.
 | LangGraph / Burr | ❌ (build your own) | ✅ (build your own) | ❌ | n/a |
 | **Shipmates (this project)** | ✅ small opinionated | ✅ persistent per-project | ✅ first-class | ✅ designed to |
 
-The combination is the gap. No existing tool ships persona + persistent project memory + captain pattern + plug-into-existing-orchestrators.
+The combination is the gap. No existing tool ships persona + persistent project memory + lead pattern + plug-into-existing-orchestrators.
 
 ## Phase 1 scope
 
@@ -228,16 +458,20 @@ What we ship to find out if anyone cares. Time budget: 1-2 weeks.
 
 **Deliverables:**
 
-1. **`shipmates` Go CLI binary** (~500 lines, cross-platform: windows/darwin/linux)
-   - `shipmates init` — scaffold `shipmates.yaml` + `.shipmates/memory/` into the current project
+1. **`shipmates` Go CLI binary** (cross-platform: windows/darwin/linux). Catalog is embedded via `//go:embed catalog`, so the binary is the single distribution artifact.
+   - `shipmates init` — scaffold `shipmates.yaml` + `.shipmates/memory/` + manifest into the current project
    - `shipmates add <persona>` — vendor the persona file into `.claude/agents/` + seed its memory dir
-   - `shipmates list` — show installed personas + last-modified time of their memory
-   - `shipmates update <persona>` — pull latest persona file from catalog; preserve memory
+   - `shipmates list` — show installed personas/commands + last-modified time of memory + orphan status
+   - `shipmates update [<persona>]` — refresh installed files from the embedded catalog, with diff-on-conflict prompt; preserves memory
    - `shipmates remove <persona>` — remove persona file from `.claude/agents/`; keep memory unless `--purge`
    - `shipmates render <persona> --target <agents-md|cursor|windsurf>` — render a thin-target version
+   - `shipmates open <persona>` — launch a long-running interactive session for that persona (uses recorded `--session-id`)
+   - `shipmates ask <persona> "<prompt>"` — one-shot delegation through the lead-spawned server
+   - `shipmates fanout <p1,p2,…> "<prompt>"` — parallel delegations
+   - `shipmates server stop` — graceful server shutdown (invoked by lead's `SessionEnd` hook)
 
 2. **Starter persona catalog** — 6 personas, opinionated, each as a real Claude Code subagent markdown file plus a `memory-seeds/` dir of starter context:
-   - `captain` — human + AI partnership template (Mayor pattern)
+   - `lead` — human + AI partnership template (Mayor pattern); rename to `captain` etc. if preferred
    - `architect` — design / cross-cutting / docs
    - `security` — application security + dep hygiene
    - `frontend` — UI / a11y / performance
@@ -248,28 +482,29 @@ What we ship to find out if anyone cares. Time budget: 1-2 weeks.
 
 4. **Two installation modes at launch:**
    - **Solo subagent mode:** `shipmates add security` → file lands in `.claude/agents/`, memory seeded, use via the Agent tool inside any Claude Code session
-   - **Full fleet mode:** `shipmates init --crew captain,architect,security,frontend,backend` → scaffolds the whole captain-and-crew shape
+   - **Full fleet mode:** `shipmates init --crew lead,architect,security,frontend,backend` → scaffolds the whole lead-and-crew shape
 
-5. **A "captain" persona that ships as a Claude Code skill** (`.claude/skills/captain/`) — lets anyone using Claude Code try the captain partnership pattern without adopting the rest of shipmates. The minimum-viable evangelism vehicle.
+5. **A "lead" persona that ships as a Claude Code skill** (`.claude/skills/lead/`) — lets anyone using Claude Code try the lead partnership pattern without adopting the rest of shipmates. The minimum-viable evangelism vehicle.
 
 **Explicitly NOT in Phase 1:**
 
 - Cursor / Windsurf / other harness exports (Phase 2)
 - Memory summarization / pruning
-- A `shipmates serve` daemon (we stay file-based)
+- A *persistent* `shipmates serve` daemon. (The lead-spawned transient server IS Phase 1 — see "Lead-server protocol." We stay file-based for memory; the server is transient IPC only.)
 - Auto-spawn of agents (that's the routing layer's job)
 - The catalog growing past 6 starter personas
 - A web UI
+- Windows Job Object hardening for the server (parent-watchdog covers it; Job Object is Phase 2 if needed)
 
 ## Open design questions
 
 Honest list of things that aren't decided yet.
 
-1. **Memory dir location and git-tracking.** `.shipmates/memory/<persona>/` lives in the project root. Gitignored by default or committed? Arguments both ways: gitignored gives each developer their own learnings (some are personal style); committed gives the team a shared knowledge base (more powerful for code review consistency). Phase 1: ship gitignored-by-default with documented opt-in for shared via a `shipmates.yaml` flag.
+1. **Memory dir location and git-tracking.** `.shipmates/memory/<persona>/` lives in the project root. Gitignored by default or committed? Arguments both ways: gitignored gives each developer their own learnings (some are personal style); committed gives the team a shared knowledge base (more powerful for code review consistency). Phase 1: ship gitignored-by-default with documented opt-in for shared via a `shipmates.yaml` flag. (`.shipmates/manifest.json` should always be committed regardless, so `shipmates update` semantics are consistent across the team.)
 
-2. **Persona conflict resolution.** Two personas claim overlapping `domain_glob`. Which one reviews? Probably: both, and let the conflict surface in their reviews ("Security flagged X; Backend flagged differently"). Better than picking one and silencing the other.
+2. **Persona conflict resolution.** Two personas claim overlapping `domainGlob`. Which one reviews? Probably: both, and let the conflict surface in their reviews ("Security flagged X; Backend flagged differently"). Better than picking one and silencing the other.
 
-3. **Captain integration.** Should the captain pattern be a *persona* in the catalog or a *separate kind of thing* with its own lifecycle? Leaning toward "captain is a persona with `mode: captain` in frontmatter — same plumbing, opinionated defaults that disable claim/work behaviors and emphasize push-back-and-file-issues."
+3. **Lead integration.** Should the lead pattern be a *persona* in the catalog or a *separate kind of thing* with its own lifecycle? Leaning toward "lead is a persona with `mode: lead` in frontmatter — same plumbing, opinionated defaults that disable claim/work behaviors and emphasize push-back-and-file-issues."
 
 4. **Memory format evolution.** Plain markdown is simple but unstructured. Phase 1 stays plain markdown. If we ever need querying ("show me all rejected-pattern memories across all personas"), we'd add a thin index. Defer until the pain shows up.
 
@@ -279,7 +514,29 @@ Honest list of things that aren't decided yet.
 
 7. **Cross-persona memory sharing.** Should personas read each other's memory? E.g., should Architect see what Security has learned? Phase 1: no, isolation by default. Phase 2: optional `shared/` memory subdir personas can read but not all can write.
 
-8. **Where the captain runs.** Captain is a Claude Code session you start. But what's the install/spawn UX? A `shipmates open captain` command that wraps `claude --agent captain --resume captain`? Worth deciding before Phase 1 ships, because it shapes how the captain pattern feels to a new user.
+8. **Where the lead runs.** Lead is a Claude Code session you start. But what's the install/spawn UX? Claude Code's `--resume [value]` takes a session UUID (or treats the value as a picker search term) — it doesn't deterministically resume by name. The cleanest spawn path: shipmates generates a UUID per persona at install time, stores it under `.shipmates/sessions/<persona>.uuid`, and `shipmates open <persona>` runs `claude --session-id <uuid> --agent <persona> --name <persona>`. First run creates the session with that UUID; subsequent runs resume it. Worth confirming `--session-id` resumes-if-exists before Phase 1 ships.
+
+9. **Claude Code hook surface — needs ground-truth verification.** The lead-server protocol assumes Claude Code supports (a) `type: "http"` hooks with URL + headers + timeout, (b) a `PermissionRequest` event whose response can return `{behavior: "allow"|"deny", updatedInput?}`, and (c) ~30+ lifecycle events including `SessionStart`, `SessionEnd`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, `SubagentStop`. These come from a research pass against docs, not the source (CLI is closed; only `CHANGELOG.md` is public). Before committing code, grep `anthropics/claude-code` CHANGELOG for `type: "http"` and `PermissionRequest` to confirm version availability.
+
+10. **Does `SessionEnd` fire on Ctrl-C / SIGINT?** Open. If `SessionEnd` only fires on graceful exit (`/exit`, `Ctrl-D`), then the parent-watchdog becomes the *primary* server-shutdown mechanism rather than a backup — still works, just with ~3s detection latency instead of immediate. If it does fire on SIGINT, immediate shutdown is the common path. Worth testing during Phase 1 implementation.
+
+11. **Permission timeout for sleeping humans.** `PermissionRequest` hook has a finite timeout (~30s default per the docs research). If the captain is asleep / not at the desk when a crew member fires a permission request, the hook times out and Claude denies. Phase 1 default: deny on timeout; captain re-runs the delegation later. Phase 2 options: an "away mode" with a stricter pre-approval policy, or long-poll / SSE if Claude's hook layer ever supports it.
+
+12. **`--settings <json>`: additive or replacing?** The lead-server hook injection and per-persona permission policy both assume the flag *adds to* the discovered user/project/local settings cascade rather than replacing it. The help text reads "load additional settings from," which implies merge — but if it turns out to replace, shipmates must read the cascade itself, deep-merge our payload, and pass the merged JSON. Cheap to verify; cheap to fix either way.
+
+### Claude Code CLI integration
+
+The flags shipmates leans on (from `claude --help`):
+
+| Flag | Use |
+|---|---|
+| `--agent <name>` | Launch a session directly as a persona. `shipmates open <persona>` wraps this. |
+| `--session-id <uuid>` | Stable per-persona session UUIDs let `shipmates open <persona>` resume the same conversation every time. Recorded under `.shipmates/sessions/`. |
+| `--name <name>` | Display name for the session — show the persona name in the prompt box, `/resume` picker, terminal title. |
+| `--add-dir <dirs...>` | If memory ever lives outside cwd, grant the persona tool access. Not needed for the default `.shipmates/memory/<persona>/` layout. |
+| `--plugin-dir <path>` | How the Phase 1 lead-as-skill ships for users who haven't installed the full shipmates CLI. |
+
+Flags shipmates explicitly does **not** rely on: `--resume <value>` (picker search, not a deterministic resume), `--append-system-prompt` (the persona body handles memory-load instructions; no need to inject from CLI), `--bare` (we want default discovery of `.claude/agents/`).
 
 ## Glossary
 
@@ -288,7 +545,7 @@ Honest list of things that aren't decided yet.
 - **Persona:** a role-specialized AI identity. Lives as a Claude Code subagent file (`.claude/agents/<name>.md`) with shipmates frontmatter conventions.
 - **Memory:** per-project persistent context for a persona. Markdown files in `.shipmates/memory/<persona>/`. Auto-loaded on session start; persona writes to it.
 - **Crew:** the assembled personas working on one project. Defined in `shipmates.yaml`.
-- **Captain:** the human + AI partnership at the strategic level. Files issues, sets direction, doesn't ship code.
+- **Lead:** the human + AI partnership at the strategic level. Files issues, sets direction, doesn't ship code. (Rename to "captain," "skipper," etc. to taste.)
 - **Articles:** the rendered persona file installed in a project — the persona's "contract."
 - **Memory seeds:** starter markdown files the catalog ships alongside each persona; copied into the project's memory dir on install so the persona starts with structure, not a blank slate.
 

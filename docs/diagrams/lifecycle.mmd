@@ -1,0 +1,28 @@
+sequenceDiagram
+    actor Human
+    participant Lead as Lead session
+    participant Srv as Lead server
+    participant Crew as security (claude -p, transient)
+    participant Mem as memory/security/
+
+    Human->>Lead: "tell security to double-check PR 10"
+    Note over Lead: server up? if not, spawn it,<br/>write server.port + server.pid
+    Lead->>Srv: GET /health (wait-for-ready)
+    Lead->>Crew: exec claude -p --agent security --session-id uuid "double-check PR 10"
+
+    Crew->>Srv: SessionStart hook → POST /register (ref++)
+    Crew->>Mem: load persona + accumulated memory
+    loop agentic work
+        Crew->>Srv: PreToolUse / PostToolUse → POST /events
+        opt tool needs approval (mode: ask)
+            Crew->>Srv: PermissionRequest hook (BLOCKS)
+            Srv-->>Human: forward prompt (feed / phone / Slack)
+            Human-->>Srv: allow / deny
+            Srv-->>Crew: behavior allow or deny
+        end
+    end
+    Crew->>Mem: write new learnings
+    Crew->>Srv: SessionEnd hook → POST /deregister (ref--)
+    Crew-->>Lead: final response (stdout)
+    Note over Srv: ref==0 → POST /shutdown<br/>(or stays warm for next delegation)
+    Lead-->>Human: summary + what security found

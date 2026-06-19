@@ -1,0 +1,45 @@
+flowchart TB
+    Human(["Human captain<br/>(at desk, or phone via remote-control)"])
+
+    subgraph LeadSession["Lead session — long-running: claude --agent lead"]
+        direction TB
+        LeadAI["Lead persona<br/>strategy · files issues · pushes back<br/>does NOT ship code"]
+        LeadMem[("memory/lead/")]
+        LeadAI -. reads/writes .-> LeadMem
+    end
+
+    Server{{"Lead-spawned HTTP server<br/>127.0.0.1:PORT · transient<br/>/events /permission /feed<br/>/register /resolve /shutdown"}}
+
+    subgraph CrewBox["Crew — transient subprocesses: claude -p (one per delegation)"]
+        direction LR
+        Sec["security"]
+        Arch["architect"]
+        Back["backend"]
+        Front["frontend"]
+        Test["tester"]
+    end
+
+    SecMem[("memory/<br/>security/")]
+    ArchMem[("memory/<br/>architect/")]
+    OtherMem[("memory/<br/>backend · frontend · tester/")]
+
+    Routing[["Routing layer (optional, external)<br/>Code Conductor · Agent Teams"]]
+
+    Human <-->|chat| LeadAI
+    LeadAI -->|"1 . spawns on first delegation"| Server
+    LeadAI -->|"2 . shipmates ask / fanout"| CrewBox
+    CrewBox -->|"hooks: PreToolUse, Stop,<br/>SessionStart/End, PermissionRequest"| Server
+    Server -->|"GET /feed (live activity)"| LeadAI
+    Server -. "PermissionRequest →<br/>approve from phone/Slack" .-> Human
+
+    Sec -. rw .-> SecMem
+    Arch -. rw .-> ArchMem
+    Back -. rw .-> OtherMem
+    Front -. rw .-> OtherMem
+    Test -. rw .-> OtherMem
+
+    LeadAI -. "files issues" .-> Routing
+    Routing -. "dispatches work" .-> CrewBox
+
+    classDef transient stroke-dasharray: 5 5
+    class Server,CrewBox transient
