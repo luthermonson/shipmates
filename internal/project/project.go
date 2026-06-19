@@ -13,6 +13,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -54,7 +56,7 @@ func SessionMarker(persona string) string {
 	return filepath.Join(SessionsDir(), persona+".session")
 }
 
-// RepoName is the current project's directory name, used to namespace sessions.
+// RepoName is the current project's directory name — the default session prefix.
 func RepoName() string {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -63,10 +65,42 @@ func RepoName() string {
 	return filepath.Base(wd)
 }
 
-// SessionName is the stable, collision-resistant --name / --resume handle for a
-// persona's session in this project.
+// Config is the subset of shipmates.yaml that the CLI reads.
+type Config struct {
+	// SessionPrefix namespaces per-persona session names. Defaults to the repo
+	// name when empty. Configurable so two checkouts of the same repo (or
+	// projects with the same dir name) don't collide on session handles.
+	SessionPrefix string `yaml:"sessionPrefix"`
+	SharedMemory  bool   `yaml:"sharedMemory"`
+}
+
+// LoadConfig reads shipmates.yaml, returning a zero Config if it's absent.
+func LoadConfig() (*Config, error) {
+	b, err := os.ReadFile(ConfigName)
+	if errors.Is(err, fs.ErrNotExist) {
+		return &Config{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var c Config
+	if err := yaml.Unmarshal(b, &c); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", ConfigName, err)
+	}
+	return &c, nil
+}
+
+// SessionPrefix is the configured session prefix, or the repo name by default.
+func SessionPrefix() string {
+	if c, err := LoadConfig(); err == nil && c.SessionPrefix != "" {
+		return c.SessionPrefix
+	}
+	return RepoName()
+}
+
+// SessionName is the stable --name / --resume handle for a persona's session.
 func SessionName(persona string) string {
-	return RepoName() + "-" + persona
+	return SessionPrefix() + "-" + persona
 }
 
 // NewUUID returns a random v4 UUID string using only the standard library.

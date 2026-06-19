@@ -19,6 +19,11 @@ const defaultConfig = `# shipmates.yaml — crew configuration for this project
 # Personas live as Claude Code subagent files in .claude/agents/.
 # Per-persona overrides (permission mode, remoteControl, model/effort) go here.
 
+# Prefix for per-persona session names (--name / --resume handles). Defaults to
+# this repo's directory name when unset. Set it to disambiguate two checkouts of
+# the same repo, or projects that share a directory name, on one machine.
+# sessionPrefix: my-project
+
 crew:
   # security:
   #   permissions: { mode: ask }
