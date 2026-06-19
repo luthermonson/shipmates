@@ -39,6 +39,7 @@ type liveProc struct {
 
 // Server holds feed state and live crew processes.
 type Server struct {
+	port     int
 	mu       sync.Mutex
 	events   []Event
 	live     map[string]*liveProc
@@ -67,6 +68,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
+	s.port = port
 
 	if err := os.MkdirAll(project.SessionsDir(), 0o755); err != nil {
 		return err
@@ -84,6 +86,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("POST /events", s.handleEvents)
 	mux.HandleFunc("POST /tell/{persona}", s.handleTell)
+	mux.HandleFunc("POST /hook/{persona}/{event}", s.handleHook)
 	mux.HandleFunc("GET /feed", s.handleFeed)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
 	mux.HandleFunc("POST /register", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
@@ -160,6 +163,44 @@ func (s *Server) handleTell(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// handleHook receives a Claude Code hook callback (e.g. PreToolUse) and records
+// it in the feed. Returning 200 with an empty object means "proceed" — we
+// observe, we don't block.
+func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
+	persona := r.PathValue("persona")
+	event := r.PathValue("event")
+	var payload map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+	text, _ := payload["tool_name"].(string)
+	if text == "" {
+		text = "(no tool_name)"
+	}
+	s.addEvent(Event{Persona: persona, Type: "hook:" + event, Text: text})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("{}"))
+}
+
+// hookSettings builds a --settings JSON string that routes a crew member's
+// tool-use hooks back to this server, tagged with the persona.
+func (s *Server) hookSettings(persona string) string {
+	httpHook := func(event string) map[string]any {
+		return map[string]any{
+			"hooks": []map[string]any{
+				{"type": "http", "url": fmt.Sprintf("http://127.0.0.1:%d/hook/%s/%s", s.port, persona, event)},
+			},
+		}
+	}
+	cfg := map[string]any{
+		"hooks": map[string]any{
+			"PreToolUse":  []map[string]any{httpHook("PreToolUse")},
+			"PostToolUse": []map[string]any{httpHook("PostToolUse")},
+		},
+	}
+	b, _ := json.Marshal(cfg)
+	return string(b)
+}
+
 // ensureLive returns the persona's live process, spawning one if needed.
 func (s *Server) ensureLive(persona string) (*liveProc, error) {
 	s.mu.Lock()
@@ -174,6 +215,7 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		"--output-format", "stream-json",
 		"--verbose", // required by claude when --print is combined with stream-json output
 		"--include-partial-messages",
+		"--settings", s.hookSettings(persona),
 		"--agent", persona,
 		"--name", project.SessionName(persona) + "-live",
 	}
