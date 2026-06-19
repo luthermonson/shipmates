@@ -15,14 +15,17 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-const defaultConfig = `# shipmates.yaml — crew configuration for this project
+// defaultConfig renders the starter shipmates.yaml, baking in the session
+// prefix (the repo name) at init time. Leave sessionPrefix empty for no prefix.
+func defaultConfig(sessionPrefix string) string {
+	return fmt.Sprintf(`# shipmates.yaml — crew configuration for this project
 # Personas live as Claude Code subagent files in .claude/agents/.
 # Per-persona overrides (permission mode, remoteControl, model/effort) go here.
 
-# Prefix for per-persona session names (--name / --resume handles). Defaults to
-# this repo's directory name when unset. Set it to disambiguate two checkouts of
-# the same repo, or projects that share a directory name, on one machine.
-# sessionPrefix: my-project
+# Prefix for per-persona session names (--name / --resume handles), written as
+# this repo's name at init. Leave it empty (sessionPrefix: "") for no prefix, or
+# change it to disambiguate two checkouts of the same repo / same-named projects.
+sessionPrefix: %s
 
 crew:
   # security:
@@ -33,7 +36,8 @@ crew:
 # Set true to commit per-persona memory (shared team knowledge) instead of
 # keeping it gitignored (per-developer learnings).
 sharedMemory: false
-`
+`, sessionPrefix)
+}
 
 // Init scaffolds shipmates into the current project.
 func Init(cat *catalog.Catalog) *cli.Command {
@@ -56,7 +60,7 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			}
 
 			if _, err := os.Stat(project.ConfigName); errors.Is(err, fs.ErrNotExist) {
-				if err := os.WriteFile(project.ConfigName, []byte(defaultConfig), 0o644); err != nil {
+				if err := os.WriteFile(project.ConfigName, []byte(defaultConfig(project.RepoName())), 0o644); err != nil {
 					return err
 				}
 				slog.Info("wrote", "file", project.ConfigName)

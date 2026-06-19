@@ -67,9 +67,10 @@ func RepoName() string {
 
 // Config is the subset of shipmates.yaml that the CLI reads.
 type Config struct {
-	// SessionPrefix namespaces per-persona session names. Defaults to the repo
-	// name when empty. Configurable so two checkouts of the same repo (or
-	// projects with the same dir name) don't collide on session handles.
+	// SessionPrefix namespaces per-persona session names. `shipmates init`
+	// writes the repo name here; an empty value means "no prefix" (session
+	// names are just the persona name). Configurable so two checkouts of the
+	// same repo (or same-named projects) don't collide on session handles.
 	SessionPrefix string `yaml:"sessionPrefix"`
 	SharedMemory  bool   `yaml:"sharedMemory"`
 }
@@ -90,17 +91,24 @@ func LoadConfig() (*Config, error) {
 	return &c, nil
 }
 
-// SessionPrefix is the configured session prefix, or the repo name by default.
+// SessionPrefix is the configured prefix verbatim. Empty means no prefix. The
+// repo-name default is applied once, at `init` time, by writing it into the
+// config — not re-derived here.
 func SessionPrefix() string {
-	if c, err := LoadConfig(); err == nil && c.SessionPrefix != "" {
-		return c.SessionPrefix
+	c, err := LoadConfig()
+	if err != nil {
+		return ""
 	}
-	return RepoName()
+	return c.SessionPrefix
 }
 
 // SessionName is the stable --name / --resume handle for a persona's session.
+// With no configured prefix it's just the persona name.
 func SessionName(persona string) string {
-	return SessionPrefix() + "-" + persona
+	if p := SessionPrefix(); p != "" {
+		return p + "-" + persona
+	}
+	return persona
 }
 
 // NewUUID returns a random v4 UUID string using only the standard library.
