@@ -412,6 +412,12 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}
 
+	// Server-driven ref-count: crew run in `claude -p` mode never fire the
+	// SessionStart hook, so /register is never called. Count the spawn itself.
+	// (s.mu is held by the caller, ensureLive.)
+	s.refs++
+	s.lastActivity = time.Now()
+
 	lp := &liveProc{persona: persona, cmd: cmd, stdin: stdin}
 	s.live[persona] = lp
 	go s.pump(persona, stdout)
@@ -420,6 +426,8 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 }
 
 // pump reads a crew process's stream-json output and tees text into the feed.
+// When the read loop ends (process exited / stdout EOF) it decrements the
+// server-driven ref-count, the counterpart of the increment in ensureLive.
 func (s *Server) pump(persona string, stdout io.Reader) {
 	dec := json.NewDecoder(stdout)
 	for {
@@ -436,6 +444,15 @@ func (s *Server) pump(persona string, stdout io.Reader) {
 			s.addEvent(Event{Persona: persona, Type: "result", Text: "(turn complete)"})
 		}
 	}
+
+	s.mu.Lock()
+	if s.refs > 0 {
+		s.refs--
+	}
+	refs := s.refs
+	s.lastActivity = time.Now()
+	s.mu.Unlock()
+	slog.Info("live crew process ended", "persona", persona, "refs", refs)
 }
 
 func assistantText(obj map[string]any) string {

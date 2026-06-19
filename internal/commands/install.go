@@ -27,11 +27,15 @@ func defaultConfig(sessionPrefix string) string {
 # change it to disambiguate two checkouts of the same repo / same-named projects.
 sessionPrefix: %s
 
-crew:
-  # security:
-  #   permissions: { mode: ask }
-  # backend:
-  #   dangerouslySkipPermissions: true
+# Per-persona overrides. Uncomment the crew key and add child keys to override
+# permission mode, remoteControl, model/effort, etc. Keeping it fully commented
+# means there's no active empty crew key — so appending your own crew block
+# won't create a duplicate top-level key (which yaml.v3 rejects).
+# crew:
+#   security:
+#     permissions: { mode: ask }
+#   backend:
+#     dangerouslySkipPermissions: true
 
 # Set true to commit per-persona memory (shared team knowledge) instead of
 # keeping it gitignored (per-developer learnings).
