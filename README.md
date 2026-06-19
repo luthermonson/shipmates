@@ -12,30 +12,74 @@ The existing catalogs (claude-skills, VoltAgent, Agency Agents) ship **headless 
 
 Shipmates personas have **persistent per-project memory**. They write down what worked, what got rejected, the team's pushback patterns, the rationale behind earlier decisions. On the next session, they read it back. Over weeks, that compounds.
 
-## 30-second quickstart
+## Install
+
+No published binary yet — build from source (Go 1.26+):
 
 ```bash
-# install one persona into the current project
-shipmates init
-shipmates add security
-
-# option A: use it inside any Claude Code session via the Agent tool
-claude  # then: "have security review the diff"
-
-# option B: launch a session directly as that persona
-claude --agent security
+git clone https://github.com/luthermonson/shipmates
+cd shipmates && go build -o shipmates .
 ```
 
-Or jump to the full crew:
+The whole persona catalog is embedded in the binary (`//go:embed`), so the single executable is all you need.
+
+## Quickstart
 
 ```bash
+# scaffold the project and install the full crew
 shipmates init --crew lead,architect,security,frontend,backend,tester
+shipmates list
+```
 
-# open the long-running lead session (stable UUID, resumes every time)
+This vendors persona files into `.claude/agents/<name>.md` (Claude Code reads them natively — no new runtime), seeds each persona's memory at `.shipmates/memory/<name>/`, and writes `shipmates.yaml`. Personas write to their memory dir as they learn your project.
+
+Then use a persona three ways:
+
+```bash
+# 1. one-shot delegation (resumes the persona's session each time, so it remembers)
+shipmates ask security "review the diff for auth regressions"
+
+# 2. a live crew member you can talk to WHILE it works
+shipmates tell security "double-check PR 10"
+shipmates feed                 # watch its activity + replies
+
+# 3. an interactive session as the persona (honors its config)
 shipmates open lead
 ```
 
-This vendors persona files into `.claude/agents/<name>.md` (Claude Code reads them natively — no new runtime) and seeds each persona's memory directory at `.shipmates/memory/<name>/` with starter context. Personas write to that directory as they learn your project.
+Or, inside any Claude Code session, invoke a persona via the Agent tool (e.g. "have security review the diff") or launch directly with `claude --agent security`.
+
+## The live lead-and-crew channel
+
+The standout feature, working end-to-end: a **lead** session spawns a small local coordination server, and you dispatch **crew** that run as live Claude Code processes you can steer and supervise.
+
+```bash
+shipmates tell security "audit the auth middleware"   # auto-spawns server + crew
+shipmates feed                                         # live tool-use + responses
+
+# when a crew member wants to run a risky tool (Bash/PowerShell), it blocks:
+shipmates pending                                      # → "a1b2c3d4  security wants Bash"
+shipmates allow a1b2c3d4                               # approve  (or: shipmates deny <id>)
+```
+
+Crew tool activity streams to `feed` via Claude Code HTTP hooks, and the human-in-the-loop approval is a real blocking gate — proven both ways (allow → tool runs, deny → tool blocked).
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `init [--crew a,b,c]` | scaffold `.shipmates/` + `shipmates.yaml`; optionally install personas |
+| `add` / `remove` | install / uninstall a persona (memory preserved unless `--purge`) |
+| `list` | catalog personas + which are installed |
+| `update [persona]` | refresh installed personas from the embedded catalog (diff-on-conflict; `--accept ours\|theirs`) |
+| `render <p> --target` | export a persona to a thin target (`agents-md` / `cursor` / `windsurf`) |
+| `ask <p> <prompt>` | one-shot delegation; creates then resumes the persona's session |
+| `tell <p> <msg>` | message a live crew process while it works |
+| `feed` | print the coordination server's activity feed |
+| `pending` / `allow` / `deny` | list and resolve crew permission requests |
+| `open <p>` | launch an interactive session as a persona (honors `permissions.mode`, `remoteControl`) |
+| `fanout <a,b> <prompt>` | run the same prompt across personas in parallel |
+| `server stop` | shut down the transient coordination server |
 
 ## The starter crew
 
@@ -69,4 +113,6 @@ Shipmates fills exactly one gap: **persona + persistent project memory + opinion
 
 ## Status
 
-Working draft. Phase 1 scope: Go CLI (~500 LOC) + 6 starter personas + docs. Not shipped yet.
+Early but working. The Go CLI is implemented — `init`, `add`, `list`, `update`, `remove`, `render`, `ask`, `tell`, `feed`, `pending`/`allow`/`deny`, `open`, `fanout`, and the coordination `server`. The lead↔crew loop (dispatch → live steer → observe tool use → human-in-the-loop approval) is verified end-to-end against Claude Code. Six starter personas ship in the embedded catalog.
+
+Not yet done: published binaries, `shipmates.yaml` crew-level config overrides, and harness exports beyond Claude Code (Cursor/Windsurf renders are minimal). Dependencies are intentionally tiny — `urfave/cli` and `yaml.v3`, everything else standard library.
