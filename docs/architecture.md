@@ -282,19 +282,25 @@ When the lead session needs live coordination with one or more crew, it spawns a
 
 ```
 lead session starts
-  └─ first `shipmates ask <persona>` call:
+  └─ `shipmates ask <persona>` call:
        1. server up? if no, pick a free port (bind 127.0.0.1:0),
           write .shipmates/sessions/server.port + server.pid
        2. wait for GET /health
        3. ref-count++
-       4. exec  claude -p --session-id <uuid> --agent <persona>
-                --settings <inlined snippet with HTTP hooks
-                  pointing at the recorded port>
-                "<prompt>"
+       4a. FIRST delegation to this persona (no session yet):
+           exec claude -p --session-id <uuid> --name <repo>-<persona>
+                --agent <persona>
+                --settings <hooks pointing at the recorded port>
+                "<prompt>" < /dev/null
+       4b. SUBSEQUENT delegations (session exists):
+           exec claude -p --resume <repo>-<persona> --agent <persona>
+                --settings <hooks ...> "<prompt>" < /dev/null
        5. wait for crew exit
        6. ref-count--
        7. if ref-count == 0: POST /shutdown
 ```
+
+> **Verified empirically (June 2026).** `--session-id <uuid>` is **create-only** — reusing it errors with "Session ID already in use." To continue a worker's session, use `--resume <value>`, where `<value>` is either the session UUID *or* the `--name` set at creation (both confirmed working in `-p` mode). The resumed session retains full memory of prior turns — a worker recalls what it was told in earlier delegations. **This is turn-based**, not mid-flight injection: each delegation runs one turn and exits; you cannot inject into an in-progress turn, only queue the next one. Also: `claude -p` blocks ~3s waiting on stdin unless you redirect it (`< /dev/null`).
 
 Server stays up across back-to-back delegations (warm path). It shuts down when no crew is running and lead's `SessionEnd` fires — or via watchdog if lead died ungracefully.
 
@@ -514,7 +520,7 @@ Honest list of things that aren't decided yet.
 
 7. **Cross-persona memory sharing.** Should personas read each other's memory? E.g., should Architect see what Security has learned? Phase 1: no, isolation by default. Phase 2: optional `shared/` memory subdir personas can read but not all can write.
 
-8. **Where the lead runs.** Lead is a Claude Code session you start. But what's the install/spawn UX? Claude Code's `--resume [value]` takes a session UUID (or treats the value as a picker search term) — it doesn't deterministically resume by name. The cleanest spawn path: shipmates generates a UUID per persona at install time, stores it under `.shipmates/sessions/<persona>.uuid`, and `shipmates open <persona>` runs `claude --session-id <uuid> --agent <persona> --name <persona>`. First run creates the session with that UUID; subsequent runs resume it. Worth confirming `--session-id` resumes-if-exists before Phase 1 ships.
+8. **Where the lead runs.** ~~Worth confirming `--session-id` resumes-if-exists.~~ **RESOLVED (verified June 2026).** `--session-id` is create-only (reuse errors). The spawn path: first run `claude --session-id <uuid> --name <repo>-<persona> --agent <persona>` to create; every subsequent run `claude --resume <repo>-<persona> --agent <persona>` to continue. `--resume` accepts the `--name` value as its key (confirmed in `-p` mode), so the repo-prefixed name is the stable resume handle and no per-persona UUID file is strictly required for the common path (though recording the UUID as a collision-proof fallback is cheap insurance).
 
 9. **Claude Code hook surface — needs ground-truth verification.** The lead-server protocol assumes Claude Code supports (a) `type: "http"` hooks with URL + headers + timeout, (b) a `PermissionRequest` event whose response can return `{behavior: "allow"|"deny", updatedInput?}`, and (c) ~30+ lifecycle events including `SessionStart`, `SessionEnd`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, `SubagentStop`. These come from a research pass against docs, not the source (CLI is closed; only `CHANGELOG.md` is public). Before committing code, grep `anthropics/claude-code` CHANGELOG for `type: "http"` and `PermissionRequest` to confirm version availability.
 
@@ -531,12 +537,15 @@ The flags shipmates leans on (from `claude --help`):
 | Flag | Use |
 |---|---|
 | `--agent <name>` | Launch a session directly as a persona. `shipmates open <persona>` wraps this. |
-| `--session-id <uuid>` | Stable per-persona session UUIDs let `shipmates open <persona>` resume the same conversation every time. Recorded under `.shipmates/sessions/`. |
-| `--name <name>` | Display name for the session — show the persona name in the prompt box, `/resume` picker, terminal title. |
+| `--session-id <uuid>` | **Create-only.** Sets a known UUID at session creation (first delegation). Reusing it on a later call errors ("already in use"). Recorded under `.shipmates/sessions/`. |
+| `--resume <value>` | **Continue a session.** `<value>` is the session UUID *or* the `--name` set at creation — both verified in `-p` mode. This is how every delegation after the first reaches the worker. Resumed sessions retain full memory of prior turns. |
+| `--name <name>` | Session name — shown in prompt box, `/resume` picker, terminal title, **and usable as the `--resume` key**. Prefix with the repo name to avoid cross-project collisions, e.g. `<repo>-<persona>` → `shipmates-security`. This becomes the stable resume handle, so no per-persona UUID bookkeeping is needed for the common path. |
 | `--add-dir <dirs...>` | If memory ever lives outside cwd, grant the persona tool access. Not needed for the default `.shipmates/memory/<persona>/` layout. |
 | `--plugin-dir <path>` | How the Phase 1 lead-as-skill ships for users who haven't installed the full shipmates CLI. |
 
-Flags shipmates explicitly does **not** rely on: `--resume <value>` (picker search, not a deterministic resume), `--append-system-prompt` (the persona body handles memory-load instructions; no need to inject from CLI), `--bare` (we want default discovery of `.claude/agents/`).
+Gotcha: `claude -p` waits ~3s for stdin before proceeding; shipmates redirects stdin (`< /dev/null`) on every non-interactive spawn to skip the delay.
+
+Flags shipmates explicitly does **not** rely on: `--append-system-prompt` (the persona body handles memory-load instructions; no need to inject from CLI), `--bare` (we want default discovery of `.claude/agents/`).
 
 ## Glossary
 

@@ -1,17 +1,17 @@
 flowchart TB
     Human(["Human captain<br/>(at desk, or phone via remote-control)"])
 
-    subgraph LeadSession["Lead session — long-running: claude --agent lead"]
+    subgraph LeadSession["LEAD — long-running session: claude --agent lead"]
         direction TB
-        LeadAI["Lead persona<br/>strategy · files issues · pushes back<br/>does NOT ship code"]
+        LeadAI["Lead persona — the orchestrator<br/>strategy · files issues · pushes back<br/>does NOT ship code"]
         LeadMem[("memory/lead/")]
+        Server{{"HTTP server (lead spawns and owns it)<br/>127.0.0.1:PORT · transient · dies when lead dies<br/>/events /permission /feed /register /shutdown"}}
         LeadAI -. reads/writes .-> LeadMem
+        LeadAI ==>|"spawns and owns"| Server
     end
 
-    Server{{"Lead-spawned HTTP server<br/>127.0.0.1:PORT · transient<br/>/events /permission /feed<br/>/register /resolve /shutdown"}}
-
-    subgraph CrewBox["Crew — transient subprocesses: claude -p (one per delegation)"]
-        direction LR
+    subgraph CrewBox["CREW — transient one-shot subprocesses: claude -p"]
+        direction TB
         Sec["security"]
         Arch["architect"]
         Back["backend"]
@@ -21,22 +21,24 @@ flowchart TB
 
     SecMem[("memory/<br/>security/")]
     ArchMem[("memory/<br/>architect/")]
-    OtherMem[("memory/<br/>backend · frontend · tester/")]
+    BackMem[("memory/<br/>backend/")]
+    FrontMem[("memory/<br/>frontend/")]
+    TestMem[("memory/<br/>tester/")]
 
     Routing[["Routing layer (optional, external)<br/>Code Conductor · Agent Teams"]]
 
+    Human ~~~ CrewBox
     Human <-->|chat| LeadAI
-    LeadAI -->|"1 . spawns on first delegation"| Server
-    LeadAI -->|"2 . shipmates ask / fanout"| CrewBox
-    CrewBox -->|"hooks: PreToolUse, Stop,<br/>SessionStart/End, PermissionRequest"| Server
+    LeadAI ==>|"shipmates ask / fanout (spawns crew)"| CrewBox
+    CrewBox -->|"hooks: SessionStart/End,<br/>PreToolUse, Stop, PermissionRequest"| Server
     Server -->|"GET /feed (live activity)"| LeadAI
-    Server -. "PermissionRequest →<br/>approve from phone/Slack" .-> Human
+    Server -. "PermissionRequest → approve from phone / Slack" .-> Human
 
     Sec -. rw .-> SecMem
     Arch -. rw .-> ArchMem
-    Back -. rw .-> OtherMem
-    Front -. rw .-> OtherMem
-    Test -. rw .-> OtherMem
+    Back -. rw .-> BackMem
+    Front -. rw .-> FrontMem
+    Test -. rw .-> TestMem
 
     LeadAI -. "files issues" .-> Routing
     Routing -. "dispatches work" .-> CrewBox
