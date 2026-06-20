@@ -67,6 +67,7 @@ func SessionMarker(persona string) string {
 // callers can detect config drift and start a fresh session automatically.
 type SessionMeta struct {
 	Name       string `json:"name"`
+	ID         string `json:"id"` // the session UUID — resume by this to avoid --resume name ambiguity
 	ConfigHash string `json:"config"`
 }
 
@@ -84,12 +85,12 @@ func ReadSessionMeta(persona string) (meta SessionMeta, ok bool) {
 	return meta, true
 }
 
-// WriteSessionMeta records a persona's session name and config fingerprint.
-func WriteSessionMeta(persona, name, configHash string) error {
+// WriteSessionMeta records a persona's session name, UUID, and config fingerprint.
+func WriteSessionMeta(persona, name, id, configHash string) error {
 	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(SessionMeta{Name: name, ConfigHash: configHash}, "", "  ")
+	b, err := json.MarshalIndent(SessionMeta{Name: name, ID: id, ConfigHash: configHash}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -115,6 +116,7 @@ type Config struct {
 	SharedMemory   bool                    `yaml:"sharedMemory"`
 	Routing        string                  `yaml:"routing"`
 	RoutingOptions RoutingOptions          `yaml:"routingOptions"`
+	RoutingOnBoot  bool                    `yaml:"routingOnBoot"`
 	Crew           map[string]CrewOverride `yaml:"crew"`
 }
 
@@ -241,6 +243,23 @@ type personaFrontmatter struct {
 	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
 	Model                      string    `yaml:"model"`
 	Effort                     string    `yaml:"effort"`
+	ShipmatesPersona           *bool     `yaml:"shipmatesPersona"`
+}
+
+// IsFleetPersonaFile reports whether a persona file is a shipmates fleet member
+// (true unless its frontmatter sets `shipmatesPersona: false`). Lets non-fleet
+// agents in .claude/agents/ (e.g. a project-Q&A subagent) opt out of membership
+// walks and `routing apply --all`.
+func IsFleetPersonaFile(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	fm, err := parsePersonaFrontmatter(raw)
+	if err != nil {
+		return true
+	}
+	return fm.ShipmatesPersona == nil || *fm.ShipmatesPersona
 }
 
 // ResolvePersonaConfig reads the installed persona's frontmatter, overlays any

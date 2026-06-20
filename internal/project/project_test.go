@@ -266,15 +266,15 @@ func TestSessionMetaRoundTrip(t *testing.T) {
 		t.Fatal("ReadSessionMeta ok=true before any session exists")
 	}
 
-	if err := WriteSessionMeta("bosun", "repo-bosun", "abc123"); err != nil {
+	if err := WriteSessionMeta("bosun", "repo-bosun", "uuid-1", "abc123"); err != nil {
 		t.Fatalf("WriteSessionMeta: %v", err)
 	}
 	meta, ok := ReadSessionMeta("bosun")
 	if !ok {
 		t.Fatal("ReadSessionMeta ok=false after write")
 	}
-	if meta.Name != "repo-bosun" || meta.ConfigHash != "abc123" {
-		t.Fatalf("meta = %+v, want {repo-bosun abc123}", meta)
+	if meta.Name != "repo-bosun" || meta.ID != "uuid-1" || meta.ConfigHash != "abc123" {
+		t.Fatalf("meta = %+v, want {repo-bosun uuid-1 abc123}", meta)
 	}
 
 	// Legacy plain-name marker: read as name with empty hash (suppresses auto-fresh).

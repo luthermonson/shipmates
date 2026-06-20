@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 
@@ -38,28 +37,8 @@ func Open() *cli.Command {
 				return err
 			}
 
-			cfg, err := project.ResolvePersonaConfig(persona)
-			if err != nil {
-				return err
-			}
-
-			name := project.SessionName(persona)
-			fp := cfg.Fingerprint()
-
-			meta, have := project.ReadSessionMeta(persona)
-			fresh := c.Bool("fresh")
-			if have && !fresh && meta.ConfigHash != "" && meta.ConfigHash != fp {
-				fresh = true
-				slog.Info("persona config changed since last session; starting fresh", "persona", persona)
-			}
-
-			var args []string
-			if have && !fresh {
-				args = []string{"--resume", name, "--agent", persona}
-			} else {
-				args = []string{"--session-id", project.NewUUID(), "--name", name, "--agent", persona}
-			}
-
+			cfg, idArgs, id, name, fp := sessionLaunch(persona, c.Bool("fresh"))
+			args := append([]string{}, idArgs...) // interactive: no -p
 			args = append(args, cfg.LaunchFlags(true)...)
 			if cfg.RemoteControl != "" {
 				args = append(args, "--remote-control", cfg.RemoteControl)
@@ -75,7 +54,7 @@ func Open() *cli.Command {
 			if err := cmd.Run(); err != nil {
 				return err
 			}
-			return project.WriteSessionMeta(persona, name, fp)
+			return project.WriteSessionMeta(persona, name, id, fp)
 		},
 	}
 }

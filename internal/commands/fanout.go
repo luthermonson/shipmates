@@ -91,19 +91,8 @@ func oneShotDelegate(ctx context.Context, persona, prompt string) ([]byte, error
 		return nil, fmt.Errorf("persona %q is not installed", persona)
 	}
 
-	name := project.SessionName(persona)
-	cfg, _ := project.ResolvePersonaConfig(persona)
-	fp := cfg.Fingerprint()
-
-	meta, have := project.ReadSessionMeta(persona)
-	fresh := have && meta.ConfigHash != "" && meta.ConfigHash != fp
-
-	var args []string
-	if have && !fresh {
-		args = []string{"-p", "--resume", name, "--agent", persona}
-	} else {
-		args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
-	}
+	cfg, idArgs, id, name, fp := sessionLaunch(persona, false)
+	args := append([]string{"-p"}, idArgs...)
 	args = append(args, cfg.LaunchFlags(true)...)
 	args = append(args, prompt)
 
@@ -115,7 +104,7 @@ func oneShotDelegate(ctx context.Context, persona, prompt string) ([]byte, error
 	if err := cmd.Run(); err != nil {
 		return buf.Bytes(), err
 	}
-	if err := project.WriteSessionMeta(persona, name, fp); err != nil {
+	if err := project.WriteSessionMeta(persona, name, id, fp); err != nil {
 		return buf.Bytes(), err
 	}
 	return buf.Bytes(), nil

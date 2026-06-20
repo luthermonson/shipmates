@@ -52,6 +52,10 @@ sessionPrefix: %s
 # routingOptions:        # both default true (private-fleet conventions)
 #   bylines: false       # "<persona> here" intros on gh comments — off for open source
 #   labels: false        # persona-name labels as a work queue — off for open source
+# routingOnBoot: true    # default false. true => personas get a one-line "run
+#                        # /sync-routing on boot" instruction instead of the full
+#                        # block embedded — keeps persona files tiny, one source
+#                        # of truth. Requires the /sync-routing command (installed).
 
 # Set true to commit per-persona memory (shared team knowledge) instead of
 # keeping it gitignored (per-developer learnings).
@@ -165,15 +169,51 @@ func composeAgent(cat *catalog.Catalog, base []byte) ([]byte, error) {
 	if conf.Routing == "" {
 		return base, nil
 	}
+
+	var block []byte
+	if conf.RoutingOnBoot {
+		// Slash-command-on-boot: keep persona files tiny; the worker loads the
+		// rules at session start via the /sync-routing command.
+		block = []byte("On session start, immediately run `/sync-routing` to load this project's routing conventions, then proceed.")
+	} else {
+		b, err := renderRoutingBlock(cat)
+		if err != nil {
+			return nil, err
+		}
+		if b == nil { // unknown routing name — leave the base unchanged
+			return base, nil
+		}
+		block = b
+	}
+
+	var b bytes.Buffer
+	b.Write(bytes.TrimRight(base, "\n"))
+	fmt.Fprintf(&b, "\n\n<!-- shipmates:routing:%s -->\n", conf.Routing)
+	b.Write(bytes.TrimRight(block, "\n"))
+	fmt.Fprintf(&b, "\n<!-- /shipmates:routing:%s -->\n", conf.Routing)
+	return b.Bytes(), nil
+}
+
+// renderRoutingBlock renders the active routing template (per shipmates.yaml's
+// routing: + routingOptions:). Returns nil if no routing is configured or the
+// named template doesn't exist. Single source of truth for the block, shared by
+// composeAgent (full mode) and `shipmates routing show` / the /sync-routing
+// command.
+func renderRoutingBlock(cat *catalog.Catalog) ([]byte, error) {
+	conf, err := project.LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if conf.Routing == "" {
+		return nil, nil
+	}
 	raw, err := cat.RoutingFile(conf.Routing)
 	if errors.Is(err, fs.ErrNotExist) {
-		return base, nil
+		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-
-	// The routing block is a template; render it with the project's options.
 	tmpl, err := template.New("routing").Parse(string(raw))
 	if err != nil {
 		return nil, fmt.Errorf("parse routing template %s: %w", conf.Routing, err)
@@ -183,14 +223,7 @@ func composeAgent(cat *catalog.Catalog, base []byte) ([]byte, error) {
 	if err := tmpl.Execute(&rendered, struct{ Bylines, Labels bool }{bylines, labels}); err != nil {
 		return nil, fmt.Errorf("render routing template %s: %w", conf.Routing, err)
 	}
-	block := collapseBlankLines(rendered.Bytes())
-
-	var b bytes.Buffer
-	b.Write(bytes.TrimRight(base, "\n"))
-	fmt.Fprintf(&b, "\n\n<!-- shipmates:routing:%s -->\n", conf.Routing)
-	b.Write(bytes.TrimRight(block, "\n"))
-	fmt.Fprintf(&b, "\n<!-- /shipmates:routing:%s -->\n", conf.Routing)
-	return b.Bytes(), nil
+	return collapseBlankLines(rendered.Bytes()), nil
 }
 
 // collapseBlankLines squeezes runs of 3+ newlines down to 2, cleaning up the

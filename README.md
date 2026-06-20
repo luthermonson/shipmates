@@ -88,8 +88,10 @@ Crew tool activity streams to `feed` via Claude Code HTTP hooks, and the human-i
 | `open <p>` | launch an interactive session as a persona (honors `permissions.mode`, `model`, `effort`, `remoteControl`) |
 | `fanout <a,b> <prompt>` | run the same prompt across personas in parallel |
 | `drain <p>` | dispatch a persona to drain its work queue, then exit (`--cap N`) |
+| `drain-many <p...> \| --all` | drain several personas in parallel (`--max-concurrent N`) |
 | `autonomous --print-charter` | print a lead scheduler charter to feed into cron / CronCreate / Actions |
 | `routing apply <file>... \| --all` | compose the routing block into custom (non-catalog) persona files |
+| `routing show` | print the active routing block (what `/sync-routing` loads) |
 | `server stop` | shut down the transient coordination server |
 
 Opt-in **GitHub routing** (`routing: github` in `shipmates.yaml`) composes claim-by-label / worktree-per-issue / verdict-merge-gate conventions into crew personas; `routingOptions: { bylines, labels }` toggle the private-fleet bits off for open-source. The `/standup` slash command ships in the catalog and installs to `.claude/commands/`.

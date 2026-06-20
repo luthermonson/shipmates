@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
@@ -64,7 +65,9 @@ func routingStateRead() string {
 	}
 }
 
-// installedPersonas lists persona names present in .claude/agents/.
+// installedPersonas lists fleet persona names present in .claude/agents/,
+// excluding files that opt out via `shipmatesPersona: false` (e.g. a non-fleet
+// project-Q&A subagent).
 func installedPersonas() ([]string, error) {
 	matches, err := filepath.Glob(filepath.Join(project.AgentsDir, "*.md"))
 	if err != nil {
@@ -72,6 +75,9 @@ func installedPersonas() ([]string, error) {
 	}
 	var names []string
 	for _, m := range matches {
+		if !project.IsFleetPersonaFile(m) {
+			continue
+		}
 		names = append(names, strings.TrimSuffix(filepath.Base(m), ".md"))
 	}
 	sort.Strings(names)
@@ -112,6 +118,89 @@ func Drain(cat *catalog.Catalog) *cli.Command {
 				charter += "\n\n" + extra
 			}
 			return dispatch(ctx, persona, charter, c.Bool("fresh"))
+		},
+	}
+}
+
+// DrainMany drains several personas' queues in parallel (bounded concurrency),
+// each through the same drain charter as `drain`. Output is captured per persona
+// and printed under headers once all finish.
+func DrainMany(cat *catalog.Catalog) *cli.Command {
+	return &cli.Command{
+		Name:      "drain-many",
+		Usage:     "drain several personas' queues in parallel",
+		ArgsUsage: "<persona>...",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "all", Usage: "drain every fleet persona"},
+			&cli.IntFlag{Name: "cap", Value: 5, Usage: "per-persona issue cap"},
+			&cli.IntFlag{Name: "max-concurrent", Value: 4, Usage: "max personas draining at once"},
+		},
+		Action: func(ctx context.Context, c *cli.Command) error {
+			personas := c.Args().Slice()
+			if c.Bool("all") {
+				p, err := installedPersonas()
+				if err != nil {
+					return err
+				}
+				personas = p
+			}
+			if len(personas) == 0 {
+				return errors.New("usage: shipmates drain-many <persona>... (or --all)")
+			}
+
+			max := c.Int("max-concurrent")
+			if max < 1 {
+				max = len(personas)
+			}
+			sem := make(chan struct{}, max)
+			results := make([]fanoutResult, len(personas))
+			var wg sync.WaitGroup
+			for i, persona := range personas {
+				wg.Add(1)
+				go func(i int, persona string) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+
+					if _, err := os.Stat(project.AgentPath(persona)); err != nil {
+						results[i] = fanoutResult{persona: persona, err: fmt.Errorf("persona %q is not installed", persona)}
+						return
+					}
+					charter, err := renderCharter(cat, "drain", map[string]any{
+						"Persona":     persona,
+						"Cap":         c.Int("cap"),
+						"RoutingFlow": routingFlow(),
+					})
+					if err != nil {
+						results[i] = fanoutResult{persona: persona, err: err}
+						return
+					}
+					var buf bytes.Buffer
+					err = dispatchTo(ctx, persona, charter, false, &buf, &buf)
+					results[i] = fanoutResult{persona: persona, output: buf.Bytes(), err: err}
+				}(i, persona)
+			}
+			wg.Wait()
+
+			failures := 0
+			for _, r := range results {
+				fmt.Printf("==== %s ====\n", r.persona)
+				if len(r.output) > 0 {
+					_, _ = os.Stdout.Write(r.output)
+					if !bytes.HasSuffix(r.output, []byte("\n")) {
+						fmt.Println()
+					}
+				}
+				if r.err != nil {
+					failures++
+					fmt.Printf("error: %v\n", r.err)
+				}
+				fmt.Println()
+			}
+			if failures == len(results) {
+				return fmt.Errorf("all %d drains failed", len(results))
+			}
+			return nil
 		},
 	}
 }

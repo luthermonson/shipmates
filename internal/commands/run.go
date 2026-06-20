@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -40,33 +40,25 @@ func Ask() *cli.Command {
 // drift or when fresh is requested), apply launch flags, run, and record the
 // session. Shared by `ask` and `drain`. Output streams to the terminal.
 func dispatch(ctx context.Context, persona, prompt string, fresh bool) error {
-	name := project.SessionName(persona)
-	cfg, _ := project.ResolvePersonaConfig(persona)
-	fp := cfg.Fingerprint()
+	return dispatchTo(ctx, persona, prompt, fresh, os.Stdout, os.Stderr)
+}
 
-	meta, have := project.ReadSessionMeta(persona)
-	if have && !fresh && meta.ConfigHash != "" && meta.ConfigHash != fp {
-		fresh = true
-		slog.Info("persona config changed since last session; starting fresh", "persona", persona)
-	}
-
-	var args []string
-	if have && !fresh {
-		args = []string{"-p", "--resume", name, "--agent", persona}
-	} else {
-		args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
-	}
+// dispatchTo is dispatch with caller-supplied output writers, so parallel
+// callers (drain-many) can capture each persona's output into its own buffer.
+func dispatchTo(ctx context.Context, persona, prompt string, fresh bool, stdout, stderr io.Writer) error {
+	cfg, idArgs, id, name, fp := sessionLaunch(persona, fresh)
+	args := append([]string{"-p"}, idArgs...)
 	args = append(args, cfg.LaunchFlags(true)...)
 	args = append(args, prompt)
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Stdin = strings.NewReader("") // immediate EOF — skip claude's ~3s stdin wait
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	return project.WriteSessionMeta(persona, name, fp)
+	return project.WriteSessionMeta(persona, name, id, fp)
 }
 
 // Tell sends a plain-string message to a live crew process via the server. The

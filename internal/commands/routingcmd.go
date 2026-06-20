@@ -43,7 +43,11 @@ func Routing(cat *catalog.Catalog) *cli.Command {
 						if err != nil {
 							return err
 						}
-						files = m
+						for _, f := range m {
+							if project.IsFleetPersonaFile(f) { // skip non-fleet agents (shipmatesPersona: false)
+								files = append(files, f)
+							}
+						}
 					}
 					if len(files) == 0 {
 						return errors.New("usage: shipmates routing apply <persona-file>... (or --all)")
@@ -64,6 +68,21 @@ func Routing(cat *catalog.Catalog) *cli.Command {
 						slog.Info("applied routing block", "file", f, "routing", conf.Routing)
 					}
 					return nil
+				},
+			},
+			{
+				Name:  "show",
+				Usage: "print the active routing block (per routing: + routingOptions:)",
+				Action: func(ctx context.Context, c *cli.Command) error {
+					block, err := renderRoutingBlock(cat)
+					if err != nil {
+						return err
+					}
+					if block == nil {
+						return errors.New("no routing declared in shipmates.yaml (set e.g. `routing: github`)")
+					}
+					_, err = os.Stdout.Write(block)
+					return err
 				},
 			},
 		},
