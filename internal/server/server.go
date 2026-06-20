@@ -399,12 +399,9 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		"--name", project.SessionName(persona) + "-live",
 	}
 	if cfg, err := project.ResolvePersonaConfig(persona); err == nil {
-		if cfg.Model != "" {
-			args = append(args, "--model", cfg.Model)
-		}
-		if cfg.Effort != "" {
-			args = append(args, "--effort", cfg.Effort)
-		}
+		// Live-server path mediates permission via the PreToolUse gate, so it
+		// passes model/effort only (permission=false).
+		args = append(args, cfg.LaunchFlags(false)...)
 	}
 	cmd := exec.Command("claude", args...)
 	stdin, err := cmd.StdinPipe()

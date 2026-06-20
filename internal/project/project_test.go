@@ -3,6 +3,7 @@ package project
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"testing"
 )
@@ -227,6 +228,34 @@ func TestPersonaConfigFingerprint(t *testing.T) {
 		if c.Fingerprint() != base.Fingerprint() {
 			t.Errorf("per-invocation change %d wrongly altered fingerprint", i)
 		}
+	}
+}
+
+func TestLaunchFlags(t *testing.T) {
+	cfg := PersonaConfig{
+		Mode:                       "acceptEdits",
+		Model:                      "opus",
+		Effort:                     "high",
+		DangerouslySkipPermissions: true,
+		RemoteControl:              "handle", // never a launch flag (caller handles it)
+	}
+
+	with := cfg.LaunchFlags(true)
+	wantWith := []string{"--dangerously-skip-permissions", "--permission-mode", "acceptEdits", "--model", "opus", "--effort", "high"}
+	if !reflect.DeepEqual(with, wantWith) {
+		t.Errorf("LaunchFlags(true) = %v, want %v", with, wantWith)
+	}
+
+	// permission=false (live-server path) drops the permission knobs, keeps model/effort.
+	without := cfg.LaunchFlags(false)
+	wantWithout := []string{"--model", "opus", "--effort", "high"}
+	if !reflect.DeepEqual(without, wantWithout) {
+		t.Errorf("LaunchFlags(false) = %v, want %v", without, wantWithout)
+	}
+
+	// Empty config yields no flags.
+	if f := (PersonaConfig{}).LaunchFlags(true); len(f) != 0 {
+		t.Errorf("empty LaunchFlags(true) = %v, want none", f)
 	}
 }
 

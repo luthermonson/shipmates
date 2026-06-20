@@ -60,18 +60,7 @@ func Open() *cli.Command {
 				args = []string{"--session-id", project.NewUUID(), "--name", name, "--agent", persona}
 			}
 
-			if cfg.DangerouslySkipPermissions {
-				args = append(args, "--dangerously-skip-permissions")
-			}
-			if cfg.Mode != "" {
-				args = append(args, "--permission-mode", cfg.Mode)
-			}
-			if cfg.Model != "" {
-				args = append(args, "--model", cfg.Model)
-			}
-			if cfg.Effort != "" {
-				args = append(args, "--effort", cfg.Effort)
-			}
+			args = append(args, cfg.LaunchFlags(true)...)
 			if cfg.RemoteControl != "" {
 				args = append(args, "--remote-control", cfg.RemoteControl)
 				fmt.Fprintf(os.Stderr,

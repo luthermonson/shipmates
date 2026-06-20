@@ -181,6 +181,31 @@ func (c PersonaConfig) Fingerprint() string {
 	return SHA([]byte(fmt.Sprintf("model=%s|effort=%s", c.Model, c.Effort)))
 }
 
+// LaunchFlags returns the claude CLI flags derived from this config — the single
+// source of truth so every spawn site (ask/tell/open/fanout/live server) stays
+// consistent. permission controls whether the permission knobs are included:
+// pass true for direct one-shot/interactive spawns, false for the live-server
+// path (which mediates permission via its PreToolUse gate instead). remoteControl
+// (--remote-control) is interactive-only and handled by the caller (open).
+func (c PersonaConfig) LaunchFlags(permission bool) []string {
+	var f []string
+	if permission {
+		if c.DangerouslySkipPermissions {
+			f = append(f, "--dangerously-skip-permissions")
+		}
+		if c.Mode != "" {
+			f = append(f, "--permission-mode", c.Mode)
+		}
+	}
+	if c.Model != "" {
+		f = append(f, "--model", c.Model)
+	}
+	if c.Effort != "" {
+		f = append(f, "--effort", c.Effort)
+	}
+	return f
+}
+
 // personaFrontmatter is the subset of a persona's YAML frontmatter that affects
 // how its session is launched. RemoteControl may be a bool or a string, so it's
 // captured as a yaml.Node and decoded on demand.

@@ -48,18 +48,7 @@ func Ask() *cli.Command {
 			} else {
 				args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
 			}
-			if cfg.DangerouslySkipPermissions {
-				args = append(args, "--dangerously-skip-permissions")
-			}
-			if cfg.Mode != "" {
-				args = append(args, "--permission-mode", cfg.Mode)
-			}
-			if cfg.Model != "" {
-				args = append(args, "--model", cfg.Model)
-			}
-			if cfg.Effort != "" {
-				args = append(args, "--effort", cfg.Effort)
-			}
+			args = append(args, cfg.LaunchFlags(true)...)
 			args = append(args, prompt)
 
 			cmd := exec.CommandContext(ctx, "claude", args...)
