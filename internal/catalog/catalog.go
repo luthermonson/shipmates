@@ -49,6 +49,12 @@ func (c *Catalog) AgentFile(name string) ([]byte, error) {
 	return fs.ReadFile(c.fsys, path.Join("catalog", name, ".claude", "agents", name+".md"))
 }
 
+// RoutingFile returns a routing-convention block by name (catalog/routing/<name>.md).
+// Returns fs.ErrNotExist if there's no such routing template.
+func (c *Catalog) RoutingFile(name string) ([]byte, error) {
+	return fs.ReadFile(c.fsys, path.Join("catalog", "routing", name+".md"))
+}
+
 // MemorySeeds returns the starter memory files for a persona, keyed by base
 // filename. Returns an empty map if the persona ships no seeds.
 func (c *Catalog) MemorySeeds(name string) (map[string][]byte, error) {

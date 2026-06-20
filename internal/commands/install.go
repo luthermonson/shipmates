@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -40,6 +41,13 @@ sessionPrefix: %s
 #     model: claude-haiku-4-5-20251001   # run this persona on a cheaper/faster model
 #   architect:
 #     effort: high                       # low|medium|high|xhigh|max
+
+# Routing substrate. Set to "github" to append GitHub issues/PRs routing
+# conventions (claim-by-label, worktree-per-issue, Closes #n, verdict merge
+# gate, cleanup ceremony) to every crew persona at install/update time. Leave
+# empty to stay routing-agnostic (default). Run "shipmates update" after
+# changing this to (re)compose installed personas.
+# routing: github
 
 # Set true to commit per-persona memory (shared team knowledge) instead of
 # keeping it gitignored (per-developer learnings).
@@ -137,15 +145,47 @@ func List(cat *catalog.Catalog) *cli.Command {
 	}
 }
 
+// composeAgent returns the persona's agent file with the project's routing
+// block appended (wrapped in markers) when shipmates.yaml declares a routing
+// layer. Composition is deterministic so `update` can recompose and diff
+// against what was installed. With no routing declared (or an unknown routing
+// name) the base file is returned unchanged.
+func composeAgent(cat *catalog.Catalog, base []byte) ([]byte, error) {
+	conf, err := project.LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if conf.Routing == "" {
+		return base, nil
+	}
+	block, err := cat.RoutingFile(conf.Routing)
+	if errors.Is(err, fs.ErrNotExist) {
+		return base, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var b bytes.Buffer
+	b.Write(bytes.TrimRight(base, "\n"))
+	fmt.Fprintf(&b, "\n\n<!-- shipmates:routing:%s -->\n", conf.Routing)
+	b.Write(bytes.TrimRight(block, "\n"))
+	fmt.Fprintf(&b, "\n<!-- /shipmates:routing:%s -->\n", conf.Routing)
+	return b.Bytes(), nil
+}
+
 // addPersona is the shared install routine used by `add` and `init --crew`.
 func addPersona(cat *catalog.Catalog, name string) error {
 	if !cat.Has(name) {
 		return fmt.Errorf("unknown persona %q", name)
 	}
 
-	agent, err := cat.AgentFile(name)
+	base, err := cat.AgentFile(name)
 	if err != nil {
 		return fmt.Errorf("read agent file: %w", err)
+	}
+	agent, err := composeAgent(cat, base)
+	if err != nil {
+		return err
 	}
 
 	m, err := project.LoadManifest()

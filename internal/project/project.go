@@ -108,6 +108,7 @@ type Config struct {
 	// same repo (or same-named projects) don't collide on session handles.
 	SessionPrefix string                  `yaml:"sessionPrefix"`
 	SharedMemory  bool                    `yaml:"sharedMemory"`
+	Routing       string                  `yaml:"routing"`
 	Crew          map[string]CrewOverride `yaml:"crew"`
 }
 

@@ -77,9 +77,13 @@ func runUpdate(cat *catalog.Catalog, only, accept string) error {
 	for _, name := range names {
 		dst := project.AgentPath(name)
 		baseline, recorded := m.Files[dst]
-		catBytes, err := cat.AgentFile(name)
+		base, err := cat.AgentFile(name)
 		if err != nil {
 			return fmt.Errorf("read catalog agent %s: %w", name, err)
+		}
+		catBytes, err := composeAgent(cat, base)
+		if err != nil {
+			return err
 		}
 		catSHA := project.SHA(catBytes)
 
