@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -20,6 +21,9 @@ func Ask() *cli.Command {
 		Name:      "ask",
 		Usage:     "one-shot delegation to a persona (turn-based; resumes its session)",
 		ArgsUsage: "<persona> <prompt>",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "fresh", Usage: "start a new session instead of resuming (applies config changes like model/effort)"},
+		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			persona := c.Args().First()
 			prompt := strings.TrimSpace(strings.Join(c.Args().Tail(), " "))
@@ -28,21 +32,27 @@ func Ask() *cli.Command {
 			}
 
 			name := project.SessionName(persona)
-			marker := project.SessionMarker(persona)
+			cfg, _ := project.ResolvePersonaConfig(persona)
+			fp := cfg.Fingerprint()
+
+			meta, have := project.ReadSessionMeta(persona)
+			fresh := c.Bool("fresh")
+			if have && !fresh && meta.ConfigHash != "" && meta.ConfigHash != fp {
+				fresh = true
+				slog.Info("persona config changed since last session; starting fresh", "persona", persona)
+			}
 
 			var args []string
-			if _, err := os.Stat(marker); err == nil {
+			if have && !fresh {
 				args = []string{"-p", "--resume", name, "--agent", persona}
 			} else {
 				args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
 			}
-			if cfg, err := project.ResolvePersonaConfig(persona); err == nil {
-				if cfg.Model != "" {
-					args = append(args, "--model", cfg.Model)
-				}
-				if cfg.Effort != "" {
-					args = append(args, "--effort", cfg.Effort)
-				}
+			if cfg.Model != "" {
+				args = append(args, "--model", cfg.Model)
+			}
+			if cfg.Effort != "" {
+				args = append(args, "--effort", cfg.Effort)
 			}
 			args = append(args, prompt)
 
@@ -53,11 +63,7 @@ func Ask() *cli.Command {
 			if err := cmd.Run(); err != nil {
 				return err
 			}
-
-			if err := os.MkdirAll(project.SessionsDir(), 0o755); err != nil {
-				return err
-			}
-			return os.WriteFile(marker, []byte(name), 0o644)
+			return project.WriteSessionMeta(persona, name, fp)
 		},
 	}
 }

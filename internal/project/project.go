@@ -57,6 +57,40 @@ func SessionMarker(persona string) string {
 	return filepath.Join(SessionsDir(), persona+".session")
 }
 
+// SessionMeta is the per-persona session record stored at SessionMarker. It
+// tracks the session name and the config fingerprint at creation time, so
+// callers can detect config drift and start a fresh session automatically.
+type SessionMeta struct {
+	Name       string `json:"name"`
+	ConfigHash string `json:"config"`
+}
+
+// ReadSessionMeta loads a persona's session record. ok is false if no session
+// exists yet. A legacy plain-name marker is read as a name with empty hash
+// (which suppresses auto-fresh — we don't abandon a pre-upgrade session).
+func ReadSessionMeta(persona string) (meta SessionMeta, ok bool) {
+	b, err := os.ReadFile(SessionMarker(persona))
+	if err != nil {
+		return SessionMeta{}, false
+	}
+	if err := json.Unmarshal(b, &meta); err != nil {
+		return SessionMeta{Name: strings.TrimSpace(string(b))}, true
+	}
+	return meta, true
+}
+
+// WriteSessionMeta records a persona's session name and config fingerprint.
+func WriteSessionMeta(persona, name, configHash string) error {
+	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(SessionMeta{Name: name, ConfigHash: configHash}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(SessionMarker(persona), b, 0o644)
+}
+
 // RepoName is the current project's directory name — the default session prefix.
 func RepoName() string {
 	wd, err := os.Getwd()
@@ -135,6 +169,14 @@ type PersonaConfig struct {
 	DangerouslySkipPermissions bool
 	Model                      string // --model value; "" = claude's configured default
 	Effort                     string // --effort value (low|medium|high|xhigh|max); "" = default
+}
+
+// Fingerprint is a stable hash of the launch-relevant config. Callers compare
+// it against the value stored at session creation to detect config drift and
+// auto-start a fresh session when it changes.
+func (c PersonaConfig) Fingerprint() string {
+	return SHA([]byte(fmt.Sprintf("mode=%s|model=%s|effort=%s|dsp=%t|rc=%s",
+		c.Mode, c.Model, c.Effort, c.DangerouslySkipPermissions, c.RemoteControl)))
 }
 
 // personaFrontmatter is the subset of a persona's YAML frontmatter that affects

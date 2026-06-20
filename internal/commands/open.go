@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 
@@ -20,6 +21,9 @@ func Open() *cli.Command {
 		Name:      "open",
 		Usage:     "launch a long-running interactive session for a persona",
 		ArgsUsage: "<persona>",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "fresh", Usage: "start a new session instead of resuming (applies config changes like model/effort)"},
+		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			persona := c.Args().First()
 			if persona == "" {
@@ -40,13 +44,18 @@ func Open() *cli.Command {
 			}
 
 			name := project.SessionName(persona)
-			marker := project.SessionMarker(persona)
+			fp := cfg.Fingerprint()
+
+			meta, have := project.ReadSessionMeta(persona)
+			fresh := c.Bool("fresh")
+			if have && !fresh && meta.ConfigHash != "" && meta.ConfigHash != fp {
+				fresh = true
+				slog.Info("persona config changed since last session; starting fresh", "persona", persona)
+			}
 
 			var args []string
-			resumed := false
-			if _, err := os.Stat(marker); err == nil {
+			if have && !fresh {
 				args = []string{"--resume", name, "--agent", persona}
-				resumed = true
 			} else {
 				args = []string{"--session-id", project.NewUUID(), "--name", name, "--agent", persona}
 			}
@@ -77,14 +86,7 @@ func Open() *cli.Command {
 			if err := cmd.Run(); err != nil {
 				return err
 			}
-
-			if !resumed {
-				if err := os.MkdirAll(project.SessionsDir(), 0o755); err != nil {
-					return err
-				}
-				return os.WriteFile(marker, []byte(name), 0o644)
-			}
-			return nil
+			return project.WriteSessionMeta(persona, name, fp)
 		},
 	}
 }

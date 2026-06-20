@@ -199,6 +199,57 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 	}
 }
 
+func TestPersonaConfigFingerprint(t *testing.T) {
+	base := PersonaConfig{Mode: "ask", Model: "opus", Effort: "high"}
+	if base.Fingerprint() != base.Fingerprint() {
+		t.Fatal("Fingerprint not stable for identical config")
+	}
+	// Each launch-relevant field change must alter the fingerprint.
+	changes := []PersonaConfig{
+		{Mode: "plan", Model: "opus", Effort: "high"},
+		{Mode: "ask", Model: "haiku", Effort: "high"},
+		{Mode: "ask", Model: "opus", Effort: "low"},
+		{Mode: "ask", Model: "opus", Effort: "high", DangerouslySkipPermissions: true},
+		{Mode: "ask", Model: "opus", Effort: "high", RemoteControl: "x"},
+	}
+	for i, c := range changes {
+		if c.Fingerprint() == base.Fingerprint() {
+			t.Errorf("change %d did not alter fingerprint", i)
+		}
+	}
+}
+
+func TestSessionMetaRoundTrip(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	if _, ok := ReadSessionMeta("bosun"); ok {
+		t.Fatal("ReadSessionMeta ok=true before any session exists")
+	}
+
+	if err := WriteSessionMeta("bosun", "repo-bosun", "abc123"); err != nil {
+		t.Fatalf("WriteSessionMeta: %v", err)
+	}
+	meta, ok := ReadSessionMeta("bosun")
+	if !ok {
+		t.Fatal("ReadSessionMeta ok=false after write")
+	}
+	if meta.Name != "repo-bosun" || meta.ConfigHash != "abc123" {
+		t.Fatalf("meta = %+v, want {repo-bosun abc123}", meta)
+	}
+
+	// Legacy plain-name marker: read as name with empty hash (suppresses auto-fresh).
+	if err := os.WriteFile(SessionMarker("legacy"), []byte("repo-legacy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lm, ok := ReadSessionMeta("legacy")
+	if !ok {
+		t.Fatal("legacy marker not read as existing")
+	}
+	if lm.Name != "repo-legacy" || lm.ConfigHash != "" {
+		t.Fatalf("legacy meta = %+v, want name=repo-legacy, empty hash", lm)
+	}
+}
+
 func TestNewUUID(t *testing.T) {
 	re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	seen := map[string]bool{}

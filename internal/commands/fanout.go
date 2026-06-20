@@ -92,23 +92,23 @@ func oneShotDelegate(ctx context.Context, persona, prompt string) ([]byte, error
 	}
 
 	name := project.SessionName(persona)
-	marker := project.SessionMarker(persona)
+	cfg, _ := project.ResolvePersonaConfig(persona)
+	fp := cfg.Fingerprint()
+
+	meta, have := project.ReadSessionMeta(persona)
+	fresh := have && meta.ConfigHash != "" && meta.ConfigHash != fp
 
 	var args []string
-	creating := false
-	if _, err := os.Stat(marker); err == nil {
+	if have && !fresh {
 		args = []string{"-p", "--resume", name, "--agent", persona}
 	} else {
-		creating = true
 		args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
 	}
-	if cfg, err := project.ResolvePersonaConfig(persona); err == nil {
-		if cfg.Model != "" {
-			args = append(args, "--model", cfg.Model)
-		}
-		if cfg.Effort != "" {
-			args = append(args, "--effort", cfg.Effort)
-		}
+	if cfg.Model != "" {
+		args = append(args, "--model", cfg.Model)
+	}
+	if cfg.Effort != "" {
+		args = append(args, "--effort", cfg.Effort)
 	}
 	args = append(args, prompt)
 
@@ -120,14 +120,8 @@ func oneShotDelegate(ctx context.Context, persona, prompt string) ([]byte, error
 	if err := cmd.Run(); err != nil {
 		return buf.Bytes(), err
 	}
-
-	if creating {
-		if err := os.MkdirAll(project.SessionsDir(), 0o755); err != nil {
-			return buf.Bytes(), err
-		}
-		if err := os.WriteFile(marker, []byte(name), 0o644); err != nil {
-			return buf.Bytes(), err
-		}
+	if err := project.WriteSessionMeta(persona, name, fp); err != nil {
+		return buf.Bytes(), err
 	}
 	return buf.Bytes(), nil
 }
