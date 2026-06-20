@@ -205,43 +205,23 @@ func DrainMany(cat *catalog.Catalog) *cli.Command {
 	}
 }
 
-// Autonomous prints a lead scheduler charter to feed into a scheduler (cron,
-// Claude Code CronCreate, GitHub Actions, systemd timer, …). Shipmates stays
-// harness-neutral: it renders the prompt; you wire the schedule.
+// Autonomous renders the lead scheduler charter and prints it. Shipmates stays
+// harness-neutral and can't wire the schedule itself: Claude Code's durable cron
+// only persists when created from an interactive session (a headless `claude -p`
+// cron is session-only and evaporates), so the actual scheduling is done by
+// running the /autonomous slash command in an interactive lead session.
 func Autonomous(cat *catalog.Catalog) *cli.Command {
 	return &cli.Command{
 		Name:  "autonomous",
-		Usage: "print a lead scheduler charter to feed into your scheduler",
+		Usage: "print the lead scheduler charter (wire it via the /autonomous slash command)",
 		Flags: []cli.Flag{
-			&cli.BoolFlag{Name: "print-charter", Usage: "print the scheduler charter (currently the only mode)"},
+			&cli.BoolFlag{Name: "print-charter", Usage: "print the charter to stdout"},
 			&cli.StringFlag{Name: "persona", Value: "lead", Usage: "the lead/scheduler persona"},
 			&cli.StringFlag{Name: "cadence", Value: "5min,10,15,20,30", Usage: "backoff cadence ladder"},
 			&cli.IntFlag{Name: "cap", Value: 3, Usage: "max drain per persona per cycle"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
-			if !c.Bool("print-charter") {
-				return errors.New("only --print-charter is supported — pipe its output into your scheduler")
-			}
-			lead := c.String("persona")
-
-			all, err := installedPersonas()
-			if err != nil {
-				return err
-			}
-			var crew []string
-			for _, p := range all {
-				if p != lead {
-					crew = append(crew, p)
-				}
-			}
-
-			charter, err := renderCharter(cat, "autonomous", map[string]any{
-				"Lead":        lead,
-				"CrewList":    strings.Join(crew, ", "),
-				"Cap":         c.Int("cap"),
-				"Cadence":     c.String("cadence"),
-				"RoutingRead": routingStateRead(),
-			})
+			charter, err := autonomousCharter(cat, c.String("persona"), c.String("cadence"), c.Int("cap"))
 			if err != nil {
 				return err
 			}
@@ -250,3 +230,26 @@ func Autonomous(cat *catalog.Catalog) *cli.Command {
 		},
 	}
 }
+
+// autonomousCharter renders the scheduler charter for the given lead, with the
+// crew read from the installed fleet personas (excluding the lead).
+func autonomousCharter(cat *catalog.Catalog, lead, cadence string, cap int) (string, error) {
+	all, err := installedPersonas()
+	if err != nil {
+		return "", err
+	}
+	var crew []string
+	for _, p := range all {
+		if p != lead {
+			crew = append(crew, p)
+		}
+	}
+	return renderCharter(cat, "autonomous", map[string]any{
+		"Lead":        lead,
+		"CrewList":    strings.Join(crew, ", "),
+		"Cap":         cap,
+		"Cadence":     cadence,
+		"RoutingRead": routingStateRead(),
+	})
+}
+
