@@ -43,40 +43,31 @@ const (
 	resSidecar                   // write catalog version to <file>.new
 )
 
-// runUpdate applies the four-case logic from docs/architecture.md to each
-// installed persona's agent file. Memory is never touched.
+// runUpdate refreshes installed personas and slash commands from the embedded
+// catalog, applying the four-case logic (see reconcileFile). Memory is never
+// touched.
 func runUpdate(cat *catalog.Catalog, only, accept string) error {
 	m, err := project.LoadManifest()
 	if err != nil {
 		return err
 	}
 
-	interactive := accept == "" && isInteractive()
-
-	var stickyAll bool
-	var stickyRes resolution
+	st := &updateState{
+		in:          bufio.NewScanner(os.Stdin),
+		interactive: accept == "" && isInteractive(),
+	}
 	switch accept {
 	case "ours":
-		stickyAll, stickyRes = true, resKeep
+		st.stickyAll, st.stickyRes = true, resKeep
 	case "theirs":
-		stickyAll, stickyRes = true, resTake
+		st.stickyAll, st.stickyRes = true, resTake
 	}
 
 	names, err := personasToUpdate(cat, m, only)
 	if err != nil {
 		return err
 	}
-	if len(names) == 0 {
-		slog.Info("nothing installed to update")
-		return nil
-	}
-
-	in := bufio.NewScanner(os.Stdin)
-	var updated, kept, added, conflicts, skipped int
-
 	for _, name := range names {
-		dst := project.AgentPath(name)
-		baseline, recorded := m.Files[dst]
 		base, err := cat.AgentFile(name)
 		if err != nil {
 			return fmt.Errorf("read catalog agent %s: %w", name, err)
@@ -85,88 +76,25 @@ func runUpdate(cat *catalog.Catalog, only, accept string) error {
 		if err != nil {
 			return err
 		}
-		catSHA := project.SHA(catBytes)
-
-		onDisk, statErr := os.ReadFile(dst)
-		missing := errors.Is(statErr, os.ErrNotExist)
-		if statErr != nil && !missing {
-			return fmt.Errorf("read %s: %w", dst, statErr)
+		if err := reconcileFile(m, st, project.AgentPath(name), catBytes, "persona"); err != nil {
+			return err
 		}
+	}
 
-		if missing {
-			if !recorded {
-				continue // orphan / never installed
-			}
-			if err := writeAgent(dst, catBytes); err != nil {
-				return err
-			}
-			m.Files[dst] = catSHA
-			slog.Info("re-added missing persona", "persona", name, "path", dst)
-			added++
-			continue
+	// Slash commands are project-level; refresh them too (not narrowed by `only`).
+	if only == "" {
+		cmds, err := cat.Commands()
+		if err != nil {
+			return err
 		}
-
-		diskSHA := project.SHA(onDisk)
-
-		if !recorded || diskSHA == baseline {
-			if diskSHA == catSHA {
-				skipped++ // already current
-				continue
-			}
-			if err := writeAgent(dst, catBytes); err != nil {
-				return err
-			}
-			m.Files[dst] = catSHA
-			slog.Info("updated persona", "persona", name, "path", dst)
-			updated++
-			continue
-		}
-
-		// User-edited (diskSHA != baseline).
-		if catSHA == baseline {
-			slog.Debug("user-edited, catalog unchanged; leaving alone", "path", dst)
-			kept++
-			continue
-		}
-
-		// CONFLICT: both diverged.
-		conflicts++
-		res := stickyRes
-		if !stickyAll {
-			if !interactive {
-				slog.Warn("conflict (non-interactive); keeping your version",
-					"path", dst, "yours", short(diskSHA), "baseline", short(baseline), "shipped", short(catSHA))
-				kept++
-				continue
-			}
-			r, all, err := promptConflict(in, dst, onDisk, catBytes, diskSHA, baseline, catSHA)
+		for _, name := range cmds {
+			catBytes, err := cat.CommandFile(name)
 			if err != nil {
 				return err
 			}
-			res = r
-			if all {
-				stickyAll, stickyRes = true, r
-			}
-		}
-
-		switch res {
-		case resTake:
-			if err := writeAgent(dst, catBytes); err != nil {
+			if err := reconcileFile(m, st, project.CommandPath(name), catBytes, "command"); err != nil {
 				return err
 			}
-			m.Files[dst] = catSHA
-			slog.Info("took shipped version", "path", dst)
-			updated++
-		case resSidecar:
-			side := dst + ".new"
-			if err := writeAgent(side, catBytes); err != nil {
-				return err
-			}
-			slog.Info("wrote sidecar; merge manually", "path", side)
-			kept++
-		default: // resKeep
-			slog.Info("kept your version", "path", dst)
-			kept++
 		}
 	}
 
@@ -174,8 +102,108 @@ func runUpdate(cat *catalog.Catalog, only, accept string) error {
 		return err
 	}
 	slog.Info("update complete",
-		"updated", updated, "added", added, "kept", kept,
-		"conflicts", conflicts, "alreadyCurrent", skipped)
+		"updated", st.updated, "added", st.added, "kept", st.kept,
+		"conflicts", st.conflicts, "alreadyCurrent", st.skipped)
+	return nil
+}
+
+// updateState carries the running counters and sticky conflict resolution
+// across the files reconciled in one `update` run.
+type updateState struct {
+	in                                       *bufio.Scanner
+	interactive                              bool
+	stickyAll                                bool
+	stickyRes                                resolution
+	updated, kept, added, conflicts, skipped int
+}
+
+// reconcileFile applies the four-case update logic to one shipmates-managed
+// file (persona or command): re-add if missing-but-recorded, overwrite if
+// unchanged-by-user, leave user edits when the catalog is unchanged, and
+// diff-prompt when both diverged.
+func reconcileFile(m *project.Manifest, st *updateState, dst string, catBytes []byte, label string) error {
+	catSHA := project.SHA(catBytes)
+	baseline, recorded := m.Files[dst]
+
+	onDisk, statErr := os.ReadFile(dst)
+	missing := errors.Is(statErr, os.ErrNotExist)
+	if statErr != nil && !missing {
+		return fmt.Errorf("read %s: %w", dst, statErr)
+	}
+
+	if missing {
+		if !recorded {
+			return nil // never installed
+		}
+		if err := writeManaged(dst, catBytes); err != nil {
+			return err
+		}
+		m.Files[dst] = catSHA
+		slog.Info("re-added missing "+label, "path", dst)
+		st.added++
+		return nil
+	}
+
+	diskSHA := project.SHA(onDisk)
+	if !recorded || diskSHA == baseline {
+		if diskSHA == catSHA {
+			st.skipped++
+			return nil
+		}
+		if err := writeManaged(dst, catBytes); err != nil {
+			return err
+		}
+		m.Files[dst] = catSHA
+		slog.Info("updated "+label, "path", dst)
+		st.updated++
+		return nil
+	}
+
+	if catSHA == baseline {
+		slog.Debug("user-edited, catalog unchanged; leaving alone", "path", dst)
+		st.kept++
+		return nil
+	}
+
+	// CONFLICT: both diverged.
+	st.conflicts++
+	res := st.stickyRes
+	if !st.stickyAll {
+		if !st.interactive {
+			slog.Warn("conflict (non-interactive); keeping your version",
+				"path", dst, "yours", short(diskSHA), "baseline", short(baseline), "shipped", short(catSHA))
+			st.kept++
+			return nil
+		}
+		r, all, err := promptConflict(st.in, dst, onDisk, catBytes, diskSHA, baseline, catSHA)
+		if err != nil {
+			return err
+		}
+		res = r
+		if all {
+			st.stickyAll, st.stickyRes = true, r
+		}
+	}
+
+	switch res {
+	case resTake:
+		if err := writeManaged(dst, catBytes); err != nil {
+			return err
+		}
+		m.Files[dst] = catSHA
+		slog.Info("took shipped version", "path", dst)
+		st.updated++
+	case resSidecar:
+		side := dst + ".new"
+		if err := writeManaged(side, catBytes); err != nil {
+			return err
+		}
+		slog.Info("wrote sidecar; merge manually", "path", side)
+		st.kept++
+	default:
+		slog.Info("kept your version", "path", dst)
+		st.kept++
+	}
 	return nil
 }
 
@@ -206,8 +234,8 @@ func personasToUpdate(cat *catalog.Catalog, m *project.Manifest, only string) ([
 	return out, nil
 }
 
-// writeAgent writes an agent file, creating parent dirs as needed.
-func writeAgent(dst string, b []byte) error {
+// writeManaged writes a shipmates-managed file, creating parent dirs as needed.
+func writeManaged(dst string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}

@@ -86,6 +86,9 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			if err != nil {
 				return err
 			}
+			if err := installCommands(cat, m); err != nil {
+				return err
+			}
 			if err := m.Save(); err != nil {
 				return err
 			}
@@ -171,6 +174,35 @@ func composeAgent(cat *catalog.Catalog, base []byte) ([]byte, error) {
 	b.Write(bytes.TrimRight(block, "\n"))
 	fmt.Fprintf(&b, "\n<!-- /shipmates:routing:%s -->\n", conf.Routing)
 	return b.Bytes(), nil
+}
+
+// installCommands vendors the catalog's slash commands into .claude/commands/,
+// recording each in the manifest. Existing command files that differ from what
+// shipmates installed are left untouched (user edits are preserved).
+func installCommands(cat *catalog.Catalog, m *project.Manifest) error {
+	names, err := cat.Commands()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		b, err := cat.CommandFile(name)
+		if err != nil {
+			return err
+		}
+		dst := project.CommandPath(name)
+		if existing, err := os.ReadFile(dst); err == nil && project.SHA(existing) != m.Files[dst] {
+			continue // user-edited or pre-existing — don't clobber
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dst, b, 0o644); err != nil {
+			return err
+		}
+		m.Files[dst] = project.SHA(b)
+		slog.Info("installed command", "command", name, "path", dst)
+	}
+	return nil
 }
 
 // applyRouting upserts the active routing block into an arbitrary persona file

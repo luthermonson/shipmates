@@ -38,6 +38,11 @@ func AgentPath(persona string) string {
 	return filepath.Join(AgentsDir, persona+".md")
 }
 
+// CommandPath is where a slash command is vendored for Claude Code.
+func CommandPath(name string) string {
+	return filepath.Join(CommandsDir, name+".md")
+}
+
 // ManifestPath is the location of the install manifest.
 func ManifestPath() string {
 	return filepath.Join(Dir, ManifestName)

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"strings"
 )
 
 // Catalog reads personas from an embedded (or any) filesystem rooted such that
@@ -47,6 +48,28 @@ func (c *Catalog) Has(name string) bool {
 // AgentFile returns the raw bytes of a persona's subagent markdown file.
 func (c *Catalog) AgentFile(name string) ([]byte, error) {
 	return fs.ReadFile(c.fsys, path.Join("catalog", name, ".claude", "agents", name+".md"))
+}
+
+// Commands returns the sorted names of slash commands in the catalog
+// (catalog/commands/*.md). Empty if the catalog ships no commands.
+func (c *Catalog) Commands() ([]string, error) {
+	entries, err := fs.ReadDir(c.fsys, "catalog/commands")
+	if err != nil {
+		return nil, nil // no commands dir is fine
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			names = append(names, strings.TrimSuffix(e.Name(), ".md"))
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// CommandFile returns a slash command's markdown (catalog/commands/<name>.md).
+func (c *Catalog) CommandFile(name string) ([]byte, error) {
+	return fs.ReadFile(c.fsys, path.Join("catalog", "commands", name+".md"))
 }
 
 // RoutingFile returns a routing-convention block by name (catalog/routing/<name>.md).
