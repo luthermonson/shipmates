@@ -36,8 +36,13 @@ func Ask() *cli.Command {
 			} else {
 				args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
 			}
-			if cfg, err := project.ResolvePersonaConfig(persona); err == nil && cfg.Model != "" {
-				args = append(args, "--model", cfg.Model)
+			if cfg, err := project.ResolvePersonaConfig(persona); err == nil {
+				if cfg.Model != "" {
+					args = append(args, "--model", cfg.Model)
+				}
+				if cfg.Effort != "" {
+					args = append(args, "--effort", cfg.Effort)
+				}
 			}
 			args = append(args, prompt)
 

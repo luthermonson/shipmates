@@ -138,7 +138,7 @@ func writeAgent(t *testing.T, persona, frontmatter string) {
 func TestResolvePersonaConfigFrontmatterOnly(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeAgent(t, "bosun",
-		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\n")
+		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\neffort: high\n")
 
 	cfg, err := ResolvePersonaConfig("bosun")
 	if err != nil {
@@ -156,12 +156,15 @@ func TestResolvePersonaConfigFrontmatterOnly(t *testing.T) {
 	if cfg.Model != "claude-opus-4-7" {
 		t.Errorf("Model = %q, want claude-opus-4-7", cfg.Model)
 	}
+	if cfg.Effort != "high" {
+		t.Errorf("Effort = %q, want high", cfg.Effort)
+	}
 }
 
 func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeAgent(t, "bosun",
-		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\n")
+		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\neffort: high\n")
 
 	cfgYAML := "crew:\n" +
 		"  bosun:\n" +
@@ -169,7 +172,8 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 		"      mode: plan\n" +
 		"    remoteControl: custom-handle\n" +
 		"    dangerouslySkipPermissions: false\n" +
-		"    model: claude-haiku-4-5-20251001\n"
+		"    model: claude-haiku-4-5-20251001\n" +
+		"    effort: max\n"
 	if err := os.WriteFile(ConfigName, []byte(cfgYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +193,9 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 	}
 	if got.Model != "claude-haiku-4-5-20251001" {
 		t.Errorf("Model = %q, want claude-haiku-4-5-20251001 (override should win)", got.Model)
+	}
+	if got.Effort != "max" {
+		t.Errorf("Effort = %q, want max (override should win)", got.Effort)
 	}
 }
 

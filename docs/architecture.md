@@ -449,6 +449,7 @@ Beyond permissions, a persona's frontmatter (overridable per project via `shipma
 |---|---|
 | `remoteControl` | enables `--remote-control [name]` on `shipmates open <persona>` |
 | `model` | passes `--model <model>` to every spawn of this persona (`ask`, `tell`, `open`, `fanout`, live server) — run cheap personas (e.g. `tester`) on a faster model and deep ones (`architect`) on a stronger one. Empty = claude's configured default. |
+| `effort` | passes `--effort <low\|medium\|high\|xhigh\|max>` to every spawn of this persona — dial reasoning depth per role (e.g. `architect: high`, `tester: low`). Empty = claude's default. |
 
 ```yaml
 remoteControl: false           # default — off

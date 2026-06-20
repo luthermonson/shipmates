@@ -398,8 +398,13 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		"--agent", persona,
 		"--name", project.SessionName(persona) + "-live",
 	}
-	if cfg, err := project.ResolvePersonaConfig(persona); err == nil && cfg.Model != "" {
-		args = append(args, "--model", cfg.Model)
+	if cfg, err := project.ResolvePersonaConfig(persona); err == nil {
+		if cfg.Model != "" {
+			args = append(args, "--model", cfg.Model)
+		}
+		if cfg.Effort != "" {
+			args = append(args, "--effort", cfg.Effort)
+		}
 	}
 	cmd := exec.Command("claude", args...)
 	stdin, err := cmd.StdinPipe()

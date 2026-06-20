@@ -38,6 +38,8 @@ sessionPrefix: %s
 #     dangerouslySkipPermissions: true
 #   tester:
 #     model: claude-haiku-4-5-20251001   # run this persona on a cheaper/faster model
+#   architect:
+#     effort: high                       # low|medium|high|xhigh|max
 
 # Set true to commit per-persona memory (shared team knowledge) instead of
 # keeping it gitignored (per-developer learnings).

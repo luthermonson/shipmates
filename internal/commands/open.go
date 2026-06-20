@@ -60,6 +60,9 @@ func Open() *cli.Command {
 			if cfg.Model != "" {
 				args = append(args, "--model", cfg.Model)
 			}
+			if cfg.Effort != "" {
+				args = append(args, "--effort", cfg.Effort)
+			}
 			if cfg.RemoteControl != "" {
 				args = append(args, "--remote-control", cfg.RemoteControl)
 				fmt.Fprintf(os.Stderr,
