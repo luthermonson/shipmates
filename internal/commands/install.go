@@ -173,6 +173,37 @@ func composeAgent(cat *catalog.Catalog, base []byte) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+// applyRouting upserts the active routing block into an arbitrary persona file
+// (custom or catalog): it strips any existing shipmates routing block, then
+// re-appends the current one. Idempotent — re-run to re-sync after the upstream
+// routing template changes.
+func applyRouting(cat *catalog.Catalog, content []byte) ([]byte, error) {
+	return composeAgent(cat, stripRoutingBlock(content))
+}
+
+// stripRoutingBlock removes a previously-composed <!-- shipmates:routing:* -->
+// … <!-- /shipmates:routing:* --> block (and its trailing newline) if present,
+// leaving everything else untouched.
+func stripRoutingBlock(b []byte) []byte {
+	s := string(b)
+	start := strings.Index(s, "<!-- shipmates:routing:")
+	endMark := "<!-- /shipmates:routing:"
+	end := strings.Index(s, endMark)
+	if start < 0 || end < 0 || end < start {
+		return b
+	}
+	before := strings.TrimRight(s[:start], "\n")
+	after := ""
+	if nl := strings.IndexByte(s[end:], '\n'); nl >= 0 {
+		after = s[end+nl+1:]
+	}
+	out := before
+	if strings.TrimSpace(after) != "" {
+		out = before + "\n\n" + strings.TrimLeft(after, "\n")
+	}
+	return []byte(strings.TrimRight(out, "\n") + "\n")
+}
+
 // addPersona is the shared install routine used by `add` and `init --crew`.
 func addPersona(cat *catalog.Catalog, name string) error {
 	if !cat.Has(name) {

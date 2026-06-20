@@ -38,6 +38,7 @@ func main() {
 			commands.Remove(),
 			commands.Update(cat),
 			commands.Render(cat),
+			commands.Routing(cat),
 			commands.Open(),
 			commands.Ask(),
 			commands.Tell(),
