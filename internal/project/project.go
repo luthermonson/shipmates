@@ -171,12 +171,14 @@ type PersonaConfig struct {
 	Effort                     string // --effort value (low|medium|high|xhigh|max); "" = default
 }
 
-// Fingerprint is a stable hash of the launch-relevant config. Callers compare
-// it against the value stored at session creation to detect config drift and
-// auto-start a fresh session when it changes.
+// Fingerprint is a stable hash of the config settings that are baked into a
+// session at creation and can't change on resume — currently model and effort.
+// Permission mode, dangerouslySkipPermissions, and remoteControl are deliberately
+// excluded: they're passed as flags on every invocation (create AND resume), so
+// changing them applies immediately without abandoning the session. Callers
+// compare this against the value stored at creation to auto-fresh on drift.
 func (c PersonaConfig) Fingerprint() string {
-	return SHA([]byte(fmt.Sprintf("mode=%s|model=%s|effort=%s|dsp=%t|rc=%s",
-		c.Mode, c.Model, c.Effort, c.DangerouslySkipPermissions, c.RemoteControl)))
+	return SHA([]byte(fmt.Sprintf("model=%s|effort=%s", c.Model, c.Effort)))
 }
 
 // personaFrontmatter is the subset of a persona's YAML frontmatter that affects

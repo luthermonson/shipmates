@@ -204,17 +204,28 @@ func TestPersonaConfigFingerprint(t *testing.T) {
 	if base.Fingerprint() != base.Fingerprint() {
 		t.Fatal("Fingerprint not stable for identical config")
 	}
-	// Each launch-relevant field change must alter the fingerprint.
-	changes := []PersonaConfig{
-		{Mode: "plan", Model: "opus", Effort: "high"},
+
+	// Baked settings (model, effort) must change the fingerprint -> auto-fresh.
+	mustDiffer := []PersonaConfig{
 		{Mode: "ask", Model: "haiku", Effort: "high"},
 		{Mode: "ask", Model: "opus", Effort: "low"},
+	}
+	for i, c := range mustDiffer {
+		if c.Fingerprint() == base.Fingerprint() {
+			t.Errorf("baked change %d did not alter fingerprint", i)
+		}
+	}
+
+	// Per-invocation settings (mode, dangerouslySkipPermissions, remoteControl)
+	// are passed every call, so they must NOT change the fingerprint (no fresh).
+	mustMatch := []PersonaConfig{
+		{Mode: "plan", Model: "opus", Effort: "high"},
 		{Mode: "ask", Model: "opus", Effort: "high", DangerouslySkipPermissions: true},
 		{Mode: "ask", Model: "opus", Effort: "high", RemoteControl: "x"},
 	}
-	for i, c := range changes {
-		if c.Fingerprint() == base.Fingerprint() {
-			t.Errorf("change %d did not alter fingerprint", i)
+	for i, c := range mustMatch {
+		if c.Fingerprint() != base.Fingerprint() {
+			t.Errorf("per-invocation change %d wrongly altered fingerprint", i)
 		}
 	}
 }
