@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/project"
@@ -48,6 +49,9 @@ sessionPrefix: %s
 # empty to stay routing-agnostic (default). Run "shipmates update" after
 # changing this to (re)compose installed personas.
 # routing: github
+# routingOptions:        # both default true (private-fleet conventions)
+#   bylines: false       # "<persona> here" intros on gh comments — off for open source
+#   labels: false        # persona-name labels as a work queue — off for open source
 
 # Set true to commit per-persona memory (shared team knowledge) instead of
 # keeping it gitignored (per-developer learnings).
@@ -161,19 +165,42 @@ func composeAgent(cat *catalog.Catalog, base []byte) ([]byte, error) {
 	if conf.Routing == "" {
 		return base, nil
 	}
-	block, err := cat.RoutingFile(conf.Routing)
+	raw, err := cat.RoutingFile(conf.Routing)
 	if errors.Is(err, fs.ErrNotExist) {
 		return base, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+
+	// The routing block is a template; render it with the project's options.
+	tmpl, err := template.New("routing").Parse(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("parse routing template %s: %w", conf.Routing, err)
+	}
+	bylines, labels := conf.RoutingOptions.Resolved()
+	var rendered bytes.Buffer
+	if err := tmpl.Execute(&rendered, struct{ Bylines, Labels bool }{bylines, labels}); err != nil {
+		return nil, fmt.Errorf("render routing template %s: %w", conf.Routing, err)
+	}
+	block := collapseBlankLines(rendered.Bytes())
+
 	var b bytes.Buffer
 	b.Write(bytes.TrimRight(base, "\n"))
 	fmt.Fprintf(&b, "\n\n<!-- shipmates:routing:%s -->\n", conf.Routing)
 	b.Write(bytes.TrimRight(block, "\n"))
 	fmt.Fprintf(&b, "\n<!-- /shipmates:routing:%s -->\n", conf.Routing)
 	return b.Bytes(), nil
+}
+
+// collapseBlankLines squeezes runs of 3+ newlines down to 2, cleaning up the
+// gaps that template conditionals leave behind.
+func collapseBlankLines(b []byte) []byte {
+	s := string(b)
+	for strings.Contains(s, "\n\n\n") {
+		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
+	}
+	return []byte(strings.TrimSpace(s) + "\n")
 }
 
 // installCommands vendors the catalog's slash commands into .claude/commands/,

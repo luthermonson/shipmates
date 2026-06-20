@@ -47,6 +47,8 @@ func main() {
 			commands.Allow(),
 			commands.Deny(),
 			commands.Fanout(),
+			commands.Drain(cat),
+			commands.Autonomous(cat),
 			commands.Server(),
 		},
 	}

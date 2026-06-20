@@ -111,10 +111,28 @@ type Config struct {
 	// writes the repo name here; an empty value means "no prefix" (session
 	// names are just the persona name). Configurable so two checkouts of the
 	// same repo (or same-named projects) don't collide on session handles.
-	SessionPrefix string                  `yaml:"sessionPrefix"`
-	SharedMemory  bool                    `yaml:"sharedMemory"`
-	Routing       string                  `yaml:"routing"`
-	Crew          map[string]CrewOverride `yaml:"crew"`
+	SessionPrefix  string                  `yaml:"sessionPrefix"`
+	SharedMemory   bool                    `yaml:"sharedMemory"`
+	Routing        string                  `yaml:"routing"`
+	RoutingOptions RoutingOptions          `yaml:"routingOptions"`
+	Crew           map[string]CrewOverride `yaml:"crew"`
+}
+
+// RoutingOptions toggles parts of the routing block that are private-fleet
+// conventions rather than universal: byline intros on GitHub messages, and
+// persona-name labels as a work queue. Both default ON (the fleet case); set
+// them false for open-source contribution where neither applies. Pointers so
+// "absent" is distinguishable from explicit false.
+type RoutingOptions struct {
+	Bylines *bool `yaml:"bylines"`
+	Labels  *bool `yaml:"labels"`
+}
+
+// Resolved returns the effective flags, defaulting absent (nil) to true.
+func (o RoutingOptions) Resolved() (bylines, labels bool) {
+	bylines = o.Bylines == nil || *o.Bylines
+	labels = o.Labels == nil || *o.Labels
+	return
 }
 
 // CrewOverride is a crew-level override of a persona's frontmatter config, keyed

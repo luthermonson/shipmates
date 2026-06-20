@@ -145,11 +145,18 @@ func reconcileFile(m *project.Manifest, st *updateState, dst string, catBytes []
 	}
 
 	diskSHA := project.SHA(onDisk)
-	if !recorded || diskSHA == baseline {
-		if diskSHA == catSHA {
-			st.skipped++
-			return nil
+
+	// Already identical to the catalog — nothing to do (track it if untracked).
+	if diskSHA == catSHA {
+		if !recorded {
+			m.Files[dst] = catSHA
 		}
+		st.skipped++
+		return nil
+	}
+
+	// Shipmates-installed and unchanged by the user → safe to overwrite.
+	if recorded && diskSHA == baseline {
 		if err := writeManaged(dst, catBytes); err != nil {
 			return err
 		}
@@ -159,13 +166,16 @@ func reconcileFile(m *project.Manifest, st *updateState, dst string, catBytes []
 		return nil
 	}
 
-	if catSHA == baseline {
+	// User-edited but the catalog hasn't moved → leave their edits alone.
+	if recorded && catSHA == baseline {
 		slog.Debug("user-edited, catalog unchanged; leaving alone", "path", dst)
 		st.kept++
 		return nil
 	}
 
-	// CONFLICT: both diverged.
+	// CONFLICT — never clobber silently. Either the user edited a shipmates file
+	// AND the catalog moved, OR this is a pre-existing file shipmates didn't
+	// install (unrecorded). Both require the user's decision.
 	st.conflicts++
 	res := st.stickyRes
 	if !st.stickyAll {

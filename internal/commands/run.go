@@ -30,37 +30,43 @@ func Ask() *cli.Command {
 			if persona == "" || prompt == "" {
 				return errors.New("usage: shipmates ask <persona> <prompt>")
 			}
-
-			name := project.SessionName(persona)
-			cfg, _ := project.ResolvePersonaConfig(persona)
-			fp := cfg.Fingerprint()
-
-			meta, have := project.ReadSessionMeta(persona)
-			fresh := c.Bool("fresh")
-			if have && !fresh && meta.ConfigHash != "" && meta.ConfigHash != fp {
-				fresh = true
-				slog.Info("persona config changed since last session; starting fresh", "persona", persona)
-			}
-
-			var args []string
-			if have && !fresh {
-				args = []string{"-p", "--resume", name, "--agent", persona}
-			} else {
-				args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
-			}
-			args = append(args, cfg.LaunchFlags(true)...)
-			args = append(args, prompt)
-
-			cmd := exec.CommandContext(ctx, "claude", args...)
-			cmd.Stdin = strings.NewReader("") // immediate EOF — skip claude's ~3s stdin wait
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				return err
-			}
-			return project.WriteSessionMeta(persona, name, fp)
+			return dispatch(ctx, persona, prompt, c.Bool("fresh"))
 		},
 	}
+}
+
+// dispatch runs a one-shot turn-based delegation: resolve the persona's config,
+// create the session the first time / resume it after (auto-fresh on config
+// drift or when fresh is requested), apply launch flags, run, and record the
+// session. Shared by `ask` and `drain`. Output streams to the terminal.
+func dispatch(ctx context.Context, persona, prompt string, fresh bool) error {
+	name := project.SessionName(persona)
+	cfg, _ := project.ResolvePersonaConfig(persona)
+	fp := cfg.Fingerprint()
+
+	meta, have := project.ReadSessionMeta(persona)
+	if have && !fresh && meta.ConfigHash != "" && meta.ConfigHash != fp {
+		fresh = true
+		slog.Info("persona config changed since last session; starting fresh", "persona", persona)
+	}
+
+	var args []string
+	if have && !fresh {
+		args = []string{"-p", "--resume", name, "--agent", persona}
+	} else {
+		args = []string{"-p", "--session-id", project.NewUUID(), "--name", name, "--agent", persona}
+	}
+	args = append(args, cfg.LaunchFlags(true)...)
+	args = append(args, prompt)
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Stdin = strings.NewReader("") // immediate EOF — skip claude's ~3s stdin wait
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return project.WriteSessionMeta(persona, name, fp)
 }
 
 // Tell sends a plain-string message to a live crew process via the server. The

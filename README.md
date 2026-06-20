@@ -81,13 +81,18 @@ Crew tool activity streams to `feed` via Claude Code HTTP hooks, and the human-i
 | `list` | catalog personas + which are installed |
 | `update [persona]` | refresh installed personas from the embedded catalog (diff-on-conflict; `--accept ours\|theirs`) |
 | `render <p> --target` | export a persona to a thin target (`agents-md` / `cursor` / `windsurf`) |
-| `ask <p> <prompt>` | one-shot delegation; creates then resumes the persona's session |
+| `ask <p> <prompt>` | one-shot delegation; resumes the persona's session (`--fresh` to start new) |
 | `tell <p> <msg>` | message a live crew process while it works |
 | `feed` | print the coordination server's activity feed |
 | `pending` / `allow` / `deny` | list and resolve crew permission requests |
-| `open <p>` | launch an interactive session as a persona (honors `permissions.mode`, `remoteControl`) |
+| `open <p>` | launch an interactive session as a persona (honors `permissions.mode`, `model`, `effort`, `remoteControl`) |
 | `fanout <a,b> <prompt>` | run the same prompt across personas in parallel |
+| `drain <p>` | dispatch a persona to drain its work queue, then exit (`--cap N`) |
+| `autonomous --print-charter` | print a lead scheduler charter to feed into cron / CronCreate / Actions |
+| `routing apply <file>... \| --all` | compose the routing block into custom (non-catalog) persona files |
 | `server stop` | shut down the transient coordination server |
+
+Opt-in **GitHub routing** (`routing: github` in `shipmates.yaml`) composes claim-by-label / worktree-per-issue / verdict-merge-gate conventions into crew personas; `routingOptions: { bylines, labels }` toggle the private-fleet bits off for open-source. The `/standup` slash command ships in the catalog and installs to `.claude/commands/`.
 
 ## The starter crew
 

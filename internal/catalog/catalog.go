@@ -78,6 +78,11 @@ func (c *Catalog) RoutingFile(name string) ([]byte, error) {
 	return fs.ReadFile(c.fsys, path.Join("catalog", "routing", name+".md"))
 }
 
+// CharterFile returns a charter template by name (catalog/charters/<name>.md).
+func (c *Catalog) CharterFile(name string) ([]byte, error) {
+	return fs.ReadFile(c.fsys, path.Join("catalog", "charters", name+".md"))
+}
+
 // MemorySeeds returns the starter memory files for a persona, keyed by base
 // filename. Returns an empty map if the persona ships no seeds.
 func (c *Catalog) MemorySeeds(name string) (map[string][]byte, error) {

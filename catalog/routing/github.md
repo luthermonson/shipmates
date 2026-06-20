@@ -1,7 +1,7 @@
 ## GitHub routing conventions
 
-This project routes work through GitHub issues and PRs. Follow these conventions exactly — they are how the crew coordinates without colliding. All crew commit as the same GitHub user (shared token), so your **byline** is the only thing that disambiguates who is speaking.
-
+This project routes work through GitHub issues and PRs. Follow these conventions exactly — they are how the crew coordinates without colliding.
+{{if .Labels}}
 ### Issues are the work queue
 
 - Your inbox is `gh issue list --label <your-name> --state open`. The label matching your persona name means the work is yours.
@@ -9,14 +9,13 @@ This project routes work through GitHub issues and PRs. Follow these conventions
 
 ### Claiming binds ownership
 
-- Claim an issue by commenting on it, leading with your byline: `<byline> picking this up.`
-- The claim comment **is** the binding signal — `assignees` is meaningless here (shared user), so the byline is authoritative.
-- Once an issue is claimed, do not touch it — even if you see a faster path, or it cross-cuts your lane.
-
+- Claim an issue by commenting on it{{if .Bylines}}, leading with your byline: `<byline> picking this up.`{{else}} to state you're taking it{{end}}.
+- The claim comment **is** the binding signal. Once an issue is claimed, do not touch it — even if you see a faster path, or it cross-cuts your lane.
+{{end}}{{if .Bylines}}
 ### Byline every GitHub message
 
-- Start every comment, issue body, and PR body you write with your byline. It is the only way a human can tell which persona is speaking.
-
+- Start every comment, issue body, and PR body you write with your byline. All crew commit as the same GitHub user, so the byline is the only way a human can tell which persona is speaking.
+{{end}}
 ### One worktree per issue
 
 - Branch off `origin/main` (NOT local `main`, which may lag):
@@ -27,9 +26,9 @@ This project routes work through GitHub issues and PRs. Follow these conventions
 
 - The worktree dir mirrors the branch with the `worktree-` prefix stripped. Multiple in-flight issues → multiple worktrees, no collisions on `main`.
 
-### Open the PR with `Closes #<n>` and your label
+### Open the PR with `Closes #<n>`{{if .Labels}} and your label{{end}}
 
-- `gh pr create --label <your-name> --body-file -` with a body containing `Closes #<n>`. The PR label must match the issue label; a mismatch is a smell worth flagging.
+- `gh pr create{{if .Labels}} --label <your-name>{{end}} --body-file -` with a body containing `Closes #<n>`.{{if .Labels}} The PR label must match the issue label; a mismatch is a smell worth flagging.{{end}}
 - ⚠️ **Close-keyword footgun:** any English use of "fix", "close", or "resolve" followed by ` #N` — in the PR body **or any commit message** — auto-closes issue #N on merge. This causes real bugs. Do not put those words next to a `#number` unless you intend to close it.
 
 ### The merge gate: anchored verdicts
