@@ -22,12 +22,17 @@ import (
 	"github.com/luthermonson/shipmates/internal/project"
 )
 
-// Event is one line in the activity feed.
+// Event is one line in the activity feed. Tool, Input, and ID are populated
+// only for permission events so the UI can render allow/deny actions without
+// parsing the free-form Text.
 type Event struct {
 	Time    string `json:"time"`
 	Persona string `json:"persona"`
 	Type    string `json:"type"`
 	Text    string `json:"text"`
+	Tool    string `json:"tool,omitempty"`
+	Input   string `json:"input,omitempty"` // e.g. the Bash command, the path being written
+	ID      string `json:"id,omitempty"`
 }
 
 // liveProc is a persistent crew process the server can talk to mid-work.
@@ -42,6 +47,7 @@ type pending struct {
 	id      string
 	persona string
 	tool    string
+	input   string // human-friendly summary of tool_input (e.g. the Bash command)
 	ch      chan string // receives "allow" or "deny"
 }
 
@@ -55,15 +61,22 @@ type Server struct {
 	stopOnce sync.Once
 	stopCh   chan struct{}
 
-	refs         int       // active /register count
-	lastActivity time.Time // last register/deregister/event (guarded by s.mu)
+	refs         int           // active /register count
+	lastActivity time.Time     // last register/deregister/event (guarded by s.mu)
+	idleBound    time.Duration // chosen in Run, based on whether a bridge is configured
 }
 
-// idleTimeout bounds the server's life: it is spawned by an ephemeral `tell`
-// with no persistent parent, so there's no parent-process watchdog — this idle
-// timeout is the lifecycle bound. After this much inactivity (no registers,
-// deregisters, or feed events) the server shuts itself down.
-const idleTimeout = 5 * time.Minute
+// idleTimeoutEphemeral is the lifecycle bound for a server spawned by a
+// one-shot tell with no persistent parent: no activity for this long and it
+// self-terminates. Kept short so abandoned scratch processes don't linger.
+const idleTimeoutEphemeral = 5 * time.Minute
+
+// idleTimeoutBridged is the longer bound used when the lead is wired to a
+// central bridge. A bridged lead is actively being watched (and may be
+// woken at any moment by a `bridge tell`), so the aggressive short bound is
+// the wrong default — but we still want SOME bound so a forgotten lead
+// doesn't run forever.
+const idleTimeoutBridged = 1 * time.Hour
 
 // New constructs an empty server.
 func New() *Server {
@@ -111,10 +124,12 @@ func (s *Server) Run(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /events", s.handleEventsJSON)
 	mux.HandleFunc("POST /events", s.handleEvents)
 	mux.HandleFunc("POST /tell/{persona}", s.handleTell)
 	mux.HandleFunc("POST /hook/{persona}/{event}", s.handleHook)
 	mux.HandleFunc("GET /pending", s.handlePending)
+	mux.HandleFunc("GET /pending.json", s.handlePendingJSON)
 	mux.HandleFunc("POST /resolve/{id}", s.handleResolve)
 	mux.HandleFunc("GET /feed", s.handleFeed)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
@@ -156,15 +171,28 @@ func (s *Server) Run(ctx context.Context) error {
 			case <-ticker.C:
 				s.mu.Lock()
 				idle := time.Since(s.lastActivity)
+				bound := s.idleBound
 				s.mu.Unlock()
-				if idle > idleTimeout {
-					slog.Info("idle timeout reached, shutting down", "idle", idle)
+				if idle > bound {
+					slog.Info("idle timeout reached, shutting down", "idle", idle, "bound", bound)
 					s.stopOnce.Do(func() { close(s.stopCh) })
 					return
 				}
 			}
 		}
 	}()
+
+	// Open the outbound bridge connection if one is configured. No-op when not.
+	// The bridge can then dial back through the tunnel to reach this server's
+	// localhost endpoints (which the bridge proxies under its /api/* surface).
+	idleBound := idleTimeoutEphemeral
+	if conf, err := project.LoadConfig(); err == nil {
+		s.startBridge(ctx, conf)
+		if conf != nil && strings.TrimSpace(conf.Bridge.URL) != "" {
+			idleBound = idleTimeoutBridged
+		}
+	}
+	s.idleBound = idleBound
 
 	slog.Info("shipmates server listening", "port", port, "pid", os.Getpid())
 	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -189,6 +217,19 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	for _, e := range s.events {
 		fmt.Fprintf(w, "[%s] %s/%s: %s\n", e.Time, e.Persona, e.Type, e.Text)
 	}
+}
+
+// handleEventsJSON returns the full event slice as JSON. Used by the bridge to
+// poll for new events to mirror into its SQLite store; also handy for any
+// programmatic consumer that wants structured data instead of pre-formatted
+// text lines (which is what handleFeed gives you).
+func (s *Server) handleEventsJSON(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	out := make([]Event, len(s.events))
+	copy(out, s.events)
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +282,9 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	if text == "" {
 		text = "(no tool_name)"
 	}
-	s.addEvent(Event{Persona: persona, Type: "hook:" + event, Text: text})
+	input, _ := payload["tool_input"].(map[string]any)
+	inputSummary := summarizeToolInput(text, input)
+	s.addEvent(Event{Persona: persona, Type: "hook:" + event, Text: text, Tool: text, Input: inputSummary})
 	w.Header().Set("Content-Type", "application/json")
 
 	// In headless -p mode there is no separate PermissionRequest event: the
@@ -252,7 +295,7 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	if event == "PreToolUse" {
 		decision := "allow"
 		if gatedTool(text) && !personaPermissive(persona) {
-			decision = s.awaitDecision(persona, text)
+			decision = s.awaitDecision(persona, text, inputSummary)
 		}
 		out := map[string]any{
 			"hookSpecificOutput": map[string]any{
@@ -294,15 +337,28 @@ func personaPermissive(persona string) bool {
 }
 
 // awaitDecision registers a pending request, blocks until a human resolves it
-// (allow/deny) or it times out (deny), and returns the decision.
-func (s *Server) awaitDecision(persona, tool string) string {
+// (allow/deny) or it times out (deny), and returns the decision. input is a
+// human-readable summary of the tool call (e.g. the Bash command) shown in
+// the UI so the operator can judge before approving.
+func (s *Server) awaitDecision(persona, tool, input string) string {
 	id := project.NewUUID()[:8]
-	p := &pending{id: id, persona: persona, tool: tool, ch: make(chan string, 1)}
+	p := &pending{id: id, persona: persona, tool: tool, input: input, ch: make(chan string, 1)}
 
 	s.mu.Lock()
 	s.pendings[id] = p
 	s.mu.Unlock()
-	s.addEvent(Event{Persona: persona, Type: "permission?", Text: fmt.Sprintf("%s wants %s — approve: shipmates allow %s (or deny %s)", persona, tool, id, id)})
+	text := fmt.Sprintf("%s wants %s", persona, tool)
+	if input != "" {
+		text = fmt.Sprintf("%s wants %s: %s", persona, tool, input)
+	}
+	s.addEvent(Event{
+		Persona: persona,
+		Type:    "permission?",
+		Text:    text,
+		Tool:    tool,
+		Input:   input,
+		ID:      id,
+	})
 
 	var decision string
 	select {
@@ -314,7 +370,7 @@ func (s *Server) awaitDecision(persona, tool string) string {
 	s.mu.Lock()
 	delete(s.pendings, id)
 	s.mu.Unlock()
-	s.addEvent(Event{Persona: persona, Type: "permission:" + decision, Text: tool})
+	s.addEvent(Event{Persona: persona, Type: "permission:" + decision, Text: tool, Tool: tool, ID: id})
 	return decision
 }
 
@@ -329,6 +385,51 @@ func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
 	for id, p := range s.pendings {
 		fmt.Fprintf(w, "%s  %s wants %s\n", id, p.persona, p.tool)
 	}
+}
+
+// handlePendingJSON is the structured form of /pending: an array the bridge
+// can ingest without parsing text. Used by the bridge's /api/pending aggregator
+// to populate the UI's permission pane.
+func (s *Server) handlePendingJSON(w http.ResponseWriter, r *http.Request) {
+	type wire struct {
+		ID      string `json:"id"`
+		Persona string `json:"persona"`
+		Tool    string `json:"tool"`
+		Input   string `json:"input,omitempty"`
+	}
+	s.mu.Lock()
+	out := make([]wire, 0, len(s.pendings))
+	for id, p := range s.pendings {
+		out = append(out, wire{ID: id, Persona: p.persona, Tool: p.tool, Input: p.input})
+	}
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// summarizeToolInput renders a tool's input map as a single-line, human-readable
+// string for the permission UI. Most gated tools (Bash, PowerShell) have a
+// canonical "command" field; file tools have a "file_path". Fallback is a
+// compact JSON dump so the operator at least sees what's being requested.
+func summarizeToolInput(tool string, input map[string]any) string {
+	if input == nil {
+		return ""
+	}
+	switch tool {
+	case "Bash", "PowerShell":
+		if cmd, ok := input["command"].(string); ok {
+			return cmd
+		}
+	case "Read", "Write", "Edit":
+		if p, ok := input["file_path"].(string); ok {
+			return p
+		}
+	}
+	b, err := json.Marshal(input)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // handleResolve delivers an allow/deny decision to a waiting permission request.

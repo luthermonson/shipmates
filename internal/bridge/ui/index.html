@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>shipmates bridge</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>shipmates bridge</h1>
+  <div class="right">
+    <span id="status">connecting…</span>
+    <form id="logout-form" method="POST" action="/logout"><button type="submit" class="link">sign out</button></form>
+  </div>
+</header>
+<main>
+  <aside id="leads">
+    <h2>leads</h2>
+    <ul id="leads-list"><li class="empty">no leads connected</li></ul>
+  </aside>
+  <section id="feed">
+    <div id="feed-header">
+      <h2 id="feed-title">select a lead</h2>
+      <small id="feed-meta"></small>
+    </div>
+    <pre id="feed-body"></pre>
+    <div id="pending-pane" hidden></div>
+    <form id="tell-form" autocomplete="off">
+      <input id="tell-persona" placeholder="persona" required>
+      <input id="tell-message" placeholder="message…" required>
+      <button type="submit">tell</button>
+    </form>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
