@@ -6,21 +6,21 @@ import (
 	"testing/fstest"
 )
 
-// fakeCatalog builds an in-memory catalog FS with two personas. "bosun" ships an
-// agent file plus two memory seeds; "navigator" ships only an agent file.
+// fakeCatalog builds an in-memory catalog FS with two personas. "lead" ships an
+// agent file plus two memory seeds; "tester" ships only an agent file.
 func fakeCatalog() fstest.MapFS {
 	return fstest.MapFS{
-		"catalog/bosun/.claude/agents/bosun.md": {
-			Data: []byte("---\nname: bosun\n---\nbosun body\n"),
+		"catalog/lead/.claude/agents/lead.md": {
+			Data: []byte("---\nname: lead\n---\nlead body\n"),
 		},
-		"catalog/bosun/memory-seeds/seed.md": {
+		"catalog/lead/memory-seeds/seed.md": {
 			Data: []byte("seed one\n"),
 		},
-		"catalog/bosun/memory-seeds/log.md": {
+		"catalog/lead/memory-seeds/log.md": {
 			Data: []byte("seed two\n"),
 		},
-		"catalog/navigator/.claude/agents/navigator.md": {
-			Data: []byte("---\nname: navigator\n---\nnav body\n"),
+		"catalog/tester/.claude/agents/tester.md": {
+			Data: []byte("---\nname: tester\n---\ntester body\n"),
 		},
 	}
 }
@@ -31,7 +31,7 @@ func TestPersonasSorted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Personas: %v", err)
 	}
-	want := []string{"bosun", "navigator"}
+	want := []string{"lead", "tester"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Personas() = %v, want %v (sorted)", got, want)
 	}
@@ -43,8 +43,8 @@ func TestHas(t *testing.T) {
 		name string
 		want bool
 	}{
-		{"bosun", true},
-		{"navigator", true},
+		{"lead", true},
+		{"tester", true},
 		{"ghost", false},
 	}
 	for _, tt := range tests {
@@ -58,13 +58,13 @@ func TestHas(t *testing.T) {
 
 func TestAgentFile(t *testing.T) {
 	c := New(fakeCatalog())
-	got, err := c.AgentFile("bosun")
+	got, err := c.AgentFile("lead")
 	if err != nil {
 		t.Fatalf("AgentFile: %v", err)
 	}
-	want := "---\nname: bosun\n---\nbosun body\n"
+	want := "---\nname: lead\n---\nlead body\n"
 	if string(got) != want {
-		t.Fatalf("AgentFile(bosun) = %q, want %q", got, want)
+		t.Fatalf("AgentFile(lead) = %q, want %q", got, want)
 	}
 
 	if _, err := c.AgentFile("ghost"); err == nil {
@@ -75,7 +75,7 @@ func TestAgentFile(t *testing.T) {
 func TestMemorySeeds(t *testing.T) {
 	c := New(fakeCatalog())
 
-	seeds, err := c.MemorySeeds("bosun")
+	seeds, err := c.MemorySeeds("lead")
 	if err != nil {
 		t.Fatalf("MemorySeeds: %v", err)
 	}
@@ -84,17 +84,17 @@ func TestMemorySeeds(t *testing.T) {
 		"log.md":  []byte("seed two\n"),
 	}
 	if !reflect.DeepEqual(seeds, want) {
-		t.Fatalf("MemorySeeds(bosun) = %v, want %v", seeds, want)
+		t.Fatalf("MemorySeeds(lead) = %v, want %v", seeds, want)
 	}
 
-	none, err := c.MemorySeeds("navigator")
+	none, err := c.MemorySeeds("tester")
 	if err != nil {
-		t.Fatalf("MemorySeeds(navigator): %v", err)
+		t.Fatalf("MemorySeeds(tester): %v", err)
 	}
 	if none == nil {
-		t.Fatal("MemorySeeds(navigator) = nil, want empty map")
+		t.Fatal("MemorySeeds(tester) = nil, want empty map")
 	}
 	if len(none) != 0 {
-		t.Fatalf("MemorySeeds(navigator) len = %d, want 0", len(none))
+		t.Fatalf("MemorySeeds(tester) len = %d, want 0", len(none))
 	}
 }
