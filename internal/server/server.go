@@ -57,7 +57,10 @@ type Server struct {
 	mu       sync.Mutex
 	events   []Event
 	live     map[string]*liveProc
+	ptys     map[string]*ptyProc
 	pendings map[string]*pending
+	lastSeen map[string]time.Time // persona -> last event time (for /status.json)
+	exited   map[string]bool      // personas whose live process ended (for /status.json)
 	stopOnce sync.Once
 	stopCh   chan struct{}
 
@@ -82,7 +85,10 @@ const idleTimeoutBridged = 1 * time.Hour
 func New() *Server {
 	return &Server{
 		live:     map[string]*liveProc{},
+		ptys:     map[string]*ptyProc{},
 		pendings: map[string]*pending{},
+		lastSeen: map[string]time.Time{},
+		exited:   map[string]bool{},
 		stopCh:   make(chan struct{}),
 	}
 }
@@ -92,6 +98,9 @@ func (s *Server) addEvent(e Event) {
 	s.mu.Lock()
 	s.events = append(s.events, e)
 	s.lastActivity = time.Now()
+	if e.Persona != "" {
+		s.lastSeen[e.Persona] = time.Now()
+	}
 	s.mu.Unlock()
 	slog.Debug("event", "persona", e.Persona, "type", e.Type)
 }
@@ -130,6 +139,12 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /hook/{persona}/{event}", s.handleHook)
 	mux.HandleFunc("GET /pending", s.handlePending)
 	mux.HandleFunc("GET /pending.json", s.handlePendingJSON)
+	mux.HandleFunc("GET /status.json", s.handleStatusJSON)
+	mux.HandleFunc("POST /pty/{persona}/start", s.handlePTYStart)
+	mux.HandleFunc("GET /pty/{persona}/stream", s.handlePTYStream)
+	mux.HandleFunc("GET /pty/{persona}/snapshot", s.handlePTYSnapshot)
+	mux.HandleFunc("POST /pty/{persona}/input", s.handlePTYInput)
+	mux.HandleFunc("POST /pty/{persona}/resize", s.handlePTYResize)
 	mux.HandleFunc("POST /resolve/{id}", s.handleResolve)
 	mux.HandleFunc("GET /feed", s.handleFeed)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
@@ -154,6 +169,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		<-s.stopCh
 		s.closeLive()
+		s.closePTYs()
 		shCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shCtx)
@@ -526,6 +542,8 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 
 	lp := &liveProc{persona: persona, cmd: cmd, stdin: stdin}
 	s.live[persona] = lp
+	delete(s.exited, persona) // resurrect: a re-spawned mate is no longer "done"
+	s.lastSeen[persona] = time.Now()
 	go s.pump(persona, stdout)
 	slog.Info("spawned live crew process", "persona", persona, "pid", cmd.Process.Pid)
 	return lp, nil
@@ -557,6 +575,9 @@ func (s *Server) pump(persona string, stdout io.Reader) {
 	}
 	refs := s.refs
 	s.lastActivity = time.Now()
+	delete(s.live, persona)
+	s.exited[persona] = true
+	s.lastSeen[persona] = time.Now()
 	s.mu.Unlock()
 	slog.Info("live crew process ended", "persona", persona, "refs", refs)
 }

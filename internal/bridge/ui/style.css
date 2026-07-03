@@ -167,6 +167,44 @@ aside#leads h2 {
 }
 #leads-list .dot.online { background: var(--good); }
 
+/* mate status chips: red=blocked yellow=working green=idle blue=done */
+#leads-list .mates {
+  margin: 0.25rem 0 0 1.1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+#leads-list .mate {
+  font-size: 0.72rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  color: #fff;
+  opacity: 0.92;
+}
+#leads-list .mate.blocked { background: #b3261e; cursor: pointer; animation: mate-pulse 1.2s ease-in-out infinite; }
+#leads-list .mate.working { background: #7a6400; }
+#leads-list .mate.idle    { background: #1e6f42; }
+#leads-list .mate.done    { background: #1a4f8a; }
+@keyframes mate-pulse {
+  50% { opacity: 0.55; }
+}
+
+/* live terminal pane */
+#term-pane {
+  border-top: 1px solid rgba(255,255,255,0.08);
+  background: #000;
+  padding: 0.4rem 0.6rem 0.6rem;
+}
+#term-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+#term-header small { color: var(--muted); }
+#term-host { min-height: 200px; }
+#term-host .xterm { padding: 2px; }
+
 section#feed {
   flex: 1;
   display: flex;

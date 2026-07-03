@@ -20,6 +20,7 @@ const tellMessage = $("tell-message");
 let selected = null;
 let stream = null;
 let knownLeads = new Map();
+let mateStatus = new Map(); // client_key -> [{persona, status, tool, input, pending_id, since}]
 
 async function refreshLeads() {
   try {
@@ -54,6 +55,26 @@ function renderLeads(data) {
     li.appendChild(document.createTextNode(lead.client_key));
     li.title = `repo=${lead.repo}\npersona=${lead.persona}\nport=${lead.port}\nlast_seen=${lead.last_seen}`;
     li.onclick = () => selectLead(lead.client_key);
+    const mates = mateStatus.get(lead.client_key) || [];
+    if (mates.length > 0) {
+      const row = document.createElement("div");
+      row.className = "mates";
+      for (const m of mates) {
+        const md = document.createElement("span");
+        md.className = "mate " + m.status;
+        md.textContent = m.persona;
+        md.title = m.status === "blocked"
+          ? `${m.persona}: blocked on ${m.tool}${m.input ? " — " + m.input : ""}`
+          : `${m.persona}: ${m.status}${m.since ? " since " + m.since : ""}`;
+        if (m.status === "blocked") {
+          // A blocked mate is actionable: jump to its lead so the pending
+          // pane (filtered to the selected lead) surfaces the approval.
+          md.onclick = (ev) => { ev.stopPropagation(); selectLead(lead.client_key); };
+        }
+        row.appendChild(md);
+      }
+      li.appendChild(row);
+    }
     leadsList.appendChild(li);
   }
 }
@@ -280,8 +301,109 @@ function ping() {
   } catch { /* audio unavailable, silent */ }
 }
 
+// --- mate status dots -------------------------------------------------------
+//
+// Polls /api/status (the bridge fans out to every connected lead's
+// /status.json) and re-renders the lead list so each row shows its mates as
+// colored chips: red=blocked, yellow=working, green=idle, blue=done. Status is
+// derived server-side from hook events and the pending queue — no heuristics.
+
+async function refreshStatus() {
+  try {
+    const r = await fetch("/api/status");
+    if (r.status === 401) { window.location.href = "/login"; return; }
+    if (!r.ok) return;
+    const items = await r.json();
+    const next = new Map();
+    for (const it of items || []) {
+      if (!next.has(it.client_key)) next.set(it.client_key, []);
+      next.get(it.client_key).push(it);
+    }
+    mateStatus = next;
+    renderLeads([...knownLeads.values()]);
+  } catch {
+    // network blip; next tick will retry
+  }
+}
+
 updateTellEnabled(); // initial: form starts disabled until a lead is selected
 refreshLeads();
 setInterval(refreshLeads, 5000);
 refreshPending();
 setInterval(refreshPending, 1500);
+refreshStatus();
+setInterval(refreshStatus, 3000);
+
+// --- live terminal pane -----------------------------------------------------
+//
+// "⌨ term" opens a PTY-hosted mate on the selected lead: POST .../pty/{p}/start
+// spawns (or finds) `claude --agent {p}` under a ConPTY on the lead's machine,
+// then an EventSource on .../stream delivers base64 screen bytes (snapshot =
+// backscroll, data = live) straight into xterm.js. Keystrokes go back via
+// POST .../input, so this is a read-write attach. One terminal at a time.
+
+const termPane = $("term-pane");
+const termHost = $("term-host");
+const termTitle = $("term-title");
+const termCloseBtn = $("term-close");
+const termOpenBtn = $("term-open");
+
+let term = null;       // xterm.js instance
+let termES = null;     // EventSource for the PTY stream
+let termBase = null;   // API base for the attached mate
+
+function b64ToBytes(s) {
+  const bin = atob(s);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function closeTerminal() {
+  if (termES) { termES.close(); termES = null; }
+  if (term) { term.dispose(); term = null; }
+  termBase = null;
+  termHost.innerHTML = "";
+  termPane.hidden = true;
+}
+
+async function openTerminal(key, persona) {
+  closeTerminal();
+  const base = `/api/lead/${encodeURIComponent(key)}/pty/${encodeURIComponent(persona)}`;
+  try {
+    const r = await fetch(`${base}/start`, { method: "POST" });
+    if (r.status === 401) { window.location.href = "/login"; return; }
+    if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+  } catch (err) {
+    appendEvent({ time: nowISO(), persona: "(bridge)", type: "term-error", text: String(err) });
+    return;
+  }
+  termBase = base;
+  termPane.hidden = false;
+  termTitle.textContent = `${persona} @ ${key}`;
+
+  term = new Terminal({ cols: 120, rows: 30, fontSize: 13, scrollback: 5000 });
+  term.open(termHost);
+  term.onData((data) => {
+    // keystrokes from the browser to the mate's PTY; fire-and-forget
+    if (termBase) fetch(`${termBase}/input`, { method: "POST", body: data });
+  });
+  term.focus();
+
+  termES = new EventSource(`${base}/stream`);
+  const write = (m) => { if (term) term.write(b64ToBytes(m.data)); };
+  termES.addEventListener("snapshot", write);
+  termES.addEventListener("data", write);
+  termES.addEventListener("exit", () => {
+    if (term) term.write("\r\n\x1b[2m[mate exited]\x1b[0m\r\n");
+    if (termES) { termES.close(); termES = null; }
+  });
+}
+
+termOpenBtn.onclick = () => {
+  if (!selected) return;
+  const persona = tellPersona.value.trim();
+  if (!persona) { tellPersona.focus(); return; }
+  openTerminal(selected, persona);
+};
+termCloseBtn.onclick = closeTerminal;

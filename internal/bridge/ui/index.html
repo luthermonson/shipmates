@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>shipmates bridge</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/vendor/xterm.min.css">
 </head>
 <body>
 <header>
@@ -25,14 +26,23 @@
       <small id="feed-meta"></small>
     </div>
     <pre id="feed-body"></pre>
+    <div id="term-pane" hidden>
+      <div id="term-header">
+        <small id="term-title"></small>
+        <button id="term-close" class="link" type="button">close</button>
+      </div>
+      <div id="term-host"></div>
+    </div>
     <div id="pending-pane" hidden></div>
     <form id="tell-form" autocomplete="off">
       <input id="tell-persona" placeholder="persona" required>
       <input id="tell-message" placeholder="message…" required>
       <button type="submit">tell</button>
+      <button id="term-open" type="button" title="open a live terminal for this persona on the selected lead">⌨ term</button>
     </form>
   </section>
 </main>
+<script src="/vendor/xterm.min.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
