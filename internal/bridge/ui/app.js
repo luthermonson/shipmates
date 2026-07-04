@@ -204,11 +204,10 @@ function renderFeedTabs() {
     tab.textContent = p;
     tab.onclick = () => {
       feedFilter = p;
-      if (p !== "all") {
-        tellPersona.value = p;
-        tellPersona.dataset.autofill = p;
-        updateFeedTitle();
-      }
+      // "all" is a real tell target too — submit fans out to the whole crew
+      tellPersona.value = p;
+      tellPersona.dataset.autofill = p;
+      updateFeedTitle();
       renderFeedTabs();
       renderFeed();
     };
@@ -261,22 +260,37 @@ tellForm.onsubmit = async (e) => {
   const persona = tellPersona.value.trim();
   const message = tellMessage.value.trim();
   if (!persona || !message) return;
-  try {
+
+  // "all" broadcasts: one tell per crew member, fanned out client-side.
+  let targets = [persona];
+  if (persona === "all") {
+    targets = (mateStatus.get(selected) || []).map((m) => m.persona);
+    if (targets.length === 0) {
+      appendEvent({ time: nowISO(), persona: "(bridge)", type: "tell-error", text: "no crew roster yet — wait for status" });
+      return;
+    }
+  }
+
+  const results = await Promise.allSettled(targets.map(async (p) => {
     const r = await fetch(
-      `/api/lead/${encodeURIComponent(selected)}/tell/${encodeURIComponent(persona)}`,
+      `/api/lead/${encodeURIComponent(selected)}/tell/${encodeURIComponent(p)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message }),
       }
     );
-    if (r.status === 401) { window.location.href = "/login"; return; }
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (r.status === 401) { window.location.href = "/login"; throw new Error("unauthorized"); }
+    if (!r.ok) throw new Error(`${p}: HTTP ${r.status}`);
+  }));
+  const failures = results.filter((r) => r.status === "rejected");
+  if (failures.length === 0) {
     tellMessage.value = "";
-    // no local echo: the server-side tell event arrives through the stream
-    // within a tick; echoing here would double every line
-  } catch (err) {
-    appendEvent({ time: nowISO(), persona: "(bridge)", type: "tell-error", text: String(err) });
+    // no local echo: the server-side tell events arrive through the stream
+  } else {
+    for (const f of failures) {
+      appendEvent({ time: nowISO(), persona: "(bridge)", type: "tell-error", text: String(f.reason) });
+    }
   }
 };
 
