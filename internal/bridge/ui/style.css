@@ -299,7 +299,10 @@ aside#leads h2 {
 #term-scroll {
   position: absolute;
   right: 0.75rem;
-  bottom: calc(1.25rem + env(safe-area-inset-bottom));
+  /* vertically centered, not bottom-anchored — the on-screen keyboard eats
+     the bottom of the pane and took bottom-pinned buttons with it */
+  top: 50%;
+  transform: translateY(-50%);
   display: none;
   flex-direction: column;
   gap: 0.6rem;
