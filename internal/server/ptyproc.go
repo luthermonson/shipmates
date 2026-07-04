@@ -7,6 +7,10 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +34,16 @@ type ptyProc struct {
 	subs    map[int]chan []byte
 	nextSub int
 	closed  bool
+
+	// modes latches DEC private mode state (CSI ? Pm h/l) seen in the output
+	// stream — alt-screen 1049, alternate-scroll 1007, bracketed paste 2004,
+	// mouse tracking, cursor visibility, etc. The TUI sets these once at
+	// startup; once that scrolls out of the ring, a late attacher's snapshot
+	// alone leaves its terminal in default mode (wheel dead, paste wrong).
+	// subscribe() replays the latched state ahead of the snapshot, the same
+	// trick tmux uses on attach.
+	modes     map[int]bool
+	scanCarry []byte // tail of the previous chunk, so split sequences still match
 }
 
 // ptyRingCap is the per-mate backscroll: enough for a screenful of heavy TUI
@@ -85,6 +99,7 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 		cmd:     cmd,
 		ring:    newRing(ptyRingCap),
 		subs:    map[int]chan []byte{},
+		modes:   map[int]bool{},
 	}
 	s.ptys[persona] = p
 	delete(s.exited, persona)
@@ -107,6 +122,7 @@ func (s *Server) pumpPTY(p *ptyProc) {
 			copy(chunk, b[:n])
 			p.mu.Lock()
 			p.ring.Write(chunk)
+			p.trackModes(chunk)
 			for _, ch := range p.subs {
 				select {
 				case ch <- chunk:
@@ -153,13 +169,64 @@ func (s *Server) pumpPTY(p *ptyProc) {
 	s.mu.Unlock()
 }
 
-// subscribe registers a viewer: returns the backscroll snapshot, a channel of
-// future chunks, and an unsubscribe func. The channel closes when the mate
-// exits.
+// modeSeq matches DEC private mode set/reset: ESC [ ? Pm h|l (Pm may be a
+// semicolon list). Compiled once; used under the ptyProc mutex.
+var modeSeq = regexp.MustCompile(`\x1b\[\?([0-9;]+)([hl])`)
+
+// trackModes latches the most recent h/l state of every DEC private mode seen
+// in the output stream. Caller holds p.mu. A small carry stitches sequences
+// split across read-chunk boundaries.
+func (p *ptyProc) trackModes(chunk []byte) {
+	buf := chunk
+	if len(p.scanCarry) > 0 {
+		buf = append(append([]byte{}, p.scanCarry...), chunk...)
+	}
+	for _, m := range modeSeq.FindAllSubmatch(buf, -1) {
+		set := m[2][0] == 'h'
+		for _, num := range strings.Split(string(m[1]), ";") {
+			if n, err := strconv.Atoi(num); err == nil {
+				p.modes[n] = set
+			}
+		}
+	}
+	// keep a tail shorter than the smallest full sequence so a split one
+	// re-matches on the next chunk without double-counting completed ones
+	const carry = 15
+	if len(buf) > carry {
+		buf = buf[len(buf)-carry:]
+	}
+	p.scanCarry = append(p.scanCarry[:0], buf...)
+}
+
+// modePrefix renders the latched mode state as a replayable byte sequence.
+// Caller holds p.mu.
+func (p *ptyProc) modePrefix() []byte {
+	if len(p.modes) == 0 {
+		return nil
+	}
+	nums := make([]int, 0, len(p.modes))
+	for n := range p.modes {
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+	var b []byte
+	for _, n := range nums {
+		hl := byte('l')
+		if p.modes[n] {
+			hl = 'h'
+		}
+		b = append(b, fmt.Sprintf("\x1b[?%d%c", n, hl)...)
+	}
+	return b
+}
+
+// subscribe registers a viewer: returns the backscroll snapshot (prefixed with
+// the latched terminal-mode state), a channel of future chunks, and an
+// unsubscribe func. The channel closes when the mate exits.
 func (p *ptyProc) subscribe() (snapshot []byte, ch chan []byte, cancel func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	snapshot = p.ring.Snapshot()
+	snapshot = append(p.modePrefix(), p.ring.Snapshot()...)
 	ch = make(chan []byte, subBufChunks)
 	if p.closed {
 		close(ch)

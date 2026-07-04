@@ -446,6 +446,16 @@ async function openTerminal(key, persona) {
   term.loadAddon(fit);
   term.open(host);
   term.onData((data) => fetch(`${base}/input`, { method: "POST", body: data }));
+  // Ctrl+V / Cmd+V paste: xterm.js doesn't intercept it by default and the
+  // keystroke would otherwise reach the mate as a literal ^V. term.paste()
+  // honors bracketed-paste mode when the TUI has it enabled.
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") {
+      navigator.clipboard.readText().then((text) => { if (text) term.paste(text); }).catch(() => {});
+      return false;
+    }
+    return true;
+  });
 
   const entry = { key, persona, base, term, fit, es: null, host };
   const es = new EventSource(`${base}/stream`);
