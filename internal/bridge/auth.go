@@ -24,8 +24,17 @@ var publicPaths = map[string]bool{
 	"/login":      true,
 	"/logout":     true,
 	"/style.css":  true,
+	"/app.js":     true,
 	"/favicon.ico": true,
 }
+
+// publicPrefixes are path prefixes reachable without auth — vendored static
+// libraries (xterm.js et al). UI code is not secret (it ships in the public
+// repo); what matters is that asset URLs NEVER answer with the login page —
+// intermediary caches (Cloudflare caches by extension) will happily store an
+// HTML body under a .js URL and serve it to authenticated browsers, which
+// bricks the UI in ways that look like anything but what they are.
+var publicPrefixes = []string{"/vendor/", "/connect"}
 
 // authGate wraps the given mux so /api/* and the UI require either a valid
 // Bearer header OR a session cookie carrying the shared secret. Unauthenticated
@@ -38,9 +47,15 @@ func (b *Server) authGate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if publicPaths[r.URL.Path] || strings.HasPrefix(r.URL.Path, "/connect") {
+		if publicPaths[r.URL.Path] {
 			next.ServeHTTP(w, r)
 			return
+		}
+		for _, p := range publicPrefixes {
+			if strings.HasPrefix(r.URL.Path, p) {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 		if b.authenticated(r) {
 			next.ServeHTTP(w, r)

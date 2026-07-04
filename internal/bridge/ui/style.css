@@ -129,6 +129,100 @@ aside#leads {
   padding: 0.4rem 0;
 }
 
+/* hamburger — hidden on desktop, shown on narrow screens */
+#leads-toggle {
+  display: none;
+  background: none;
+  border: 0;
+  color: var(--text);
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0 0.5rem 0 0;
+  line-height: 1;
+}
+
+/* narrow screens: the leads rail becomes an off-canvas drawer */
+@media (max-width: 640px) {
+  #leads-toggle { display: block; font-size: 1.4rem; padding: 0.3rem 0.9rem 0.3rem 0.1rem; }
+  main { position: relative; }
+  aside#leads {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 20;
+    width: min(80vw, 300px);
+    transform: translateX(-100%);
+    transition: transform 0.18s ease-out;
+    box-shadow: 2px 0 12px rgba(0,0,0,0.5);
+  }
+  body.drawer-open aside#leads { transform: translateX(0); }
+  /* tap-to-dismiss backdrop */
+  #drawer-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 15;
+    background: rgba(0,0,0,0.45);
+  }
+  body.drawer-open #drawer-backdrop { display: block; }
+
+  /* --- touch targets & density ------------------------------------------ */
+  header { padding: 0.75rem 1rem; }
+  header .right { gap: 0.75rem; }
+  button.link { font-size: 0.9rem; padding: 0.5rem 0.4rem; }
+  #leads-list li { padding: 0.8rem 1rem; }
+  #leads-list .mates { gap: 0.45rem; margin-top: 0.4rem; }
+  #leads-list .mate { font-size: 0.85rem; padding: 0.3rem 0.75rem; }
+
+  /* feed: timestamps eat half the line on a phone — drop them, keep who/kind */
+  #feed-body { padding: 0.7rem; font-size: 0.78rem; }
+  #feed-body .ev .ts { display: none; }
+
+  /* tell form: two rows — inputs, then buttons; finger-sized */
+  #tell-form { flex-wrap: wrap; padding: 0.6rem 0.7rem calc(0.6rem + env(safe-area-inset-bottom)); }
+  #tell-persona { width: 34%; flex: 0 0 auto; }
+  #tell-message { flex: 1 1 60%; }
+  #tell-form input { font-size: 1rem; padding: 0.6rem 0.7rem; }
+  #tell-form button {
+    flex: 1 1 40%;
+    font-size: 1rem;
+    padding: 0.65rem 0;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  /* pending pane: full-width finger-sized allow/deny */
+  #pending-pane .row { flex-wrap: wrap; }
+  #pending-pane .meta { flex: 1 1 100%; }
+  #pending-pane button { flex: 1 1 40%; justify-content: center; padding: 0.7rem 0; }
+
+  /* --- terminal: full-screen takeover ------------------------------------ */
+  #term-pane {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    border-top: 0;
+    padding: 0.5rem 0.5rem calc(0.5rem + env(safe-area-inset-bottom));
+  }
+  #term-pane[hidden] { display: none; }
+  #term-header { margin-bottom: 0.5rem; }
+  #term-header button.link {
+    font-size: 1rem;
+    padding: 0.6rem 1.2rem;
+    background: rgba(255,255,255,0.1);
+    border-radius: 8px;
+    color: var(--text);
+  }
+  .term-tab { font-size: 0.9rem; padding: 0.55rem 0.75rem; border-radius: 8px; }
+  .term-tab .x { padding: 0 0.35rem; font-size: 1.05rem; }
+  #term-host { flex: 1; height: auto; min-height: 0; }
+}
+
 aside#leads h2 {
   margin: 0;
   padding: 0.5rem 1rem;
@@ -181,28 +275,90 @@ aside#leads h2 {
   color: #fff;
   opacity: 0.92;
 }
-#leads-list .mate.blocked { background: #b3261e; cursor: pointer; animation: mate-pulse 1.2s ease-in-out infinite; }
+#leads-list .mate { cursor: pointer; }
+#leads-list .mate.blocked { background: #b3261e; animation: mate-pulse 1.2s ease-in-out infinite; }
 #leads-list .mate.working { background: #7a6400; }
 #leads-list .mate.idle    { background: #1e6f42; }
 #leads-list .mate.done    { background: #1a4f8a; }
+#leads-list .mate.off     { background: #3a3f45; color: var(--muted); }
 @keyframes mate-pulse {
   50% { opacity: 0.55; }
 }
 
 /* live terminal pane */
 #term-pane {
+  position: relative; /* anchors the floating scroll buttons */
   border-top: 1px solid rgba(255,255,255,0.08);
   background: #000;
   padding: 0.4rem 0.6rem 0.6rem;
+  max-width: 100%;
+  overflow: hidden; /* the fit addon sizes the terminal to this box */
+}
+
+/* hold-to-scroll buttons — coarse pointers only (desktop has the wheel) */
+#term-scroll {
+  position: absolute;
+  right: 0.75rem;
+  bottom: calc(1.25rem + env(safe-area-inset-bottom));
+  display: none;
+  flex-direction: column;
+  gap: 0.6rem;
+  z-index: 5;
+}
+#term-scroll button {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(22, 27, 34, 0.85);
+  color: var(--text);
+  font-size: 1.05rem;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#term-scroll button:active { background: var(--accent); color: var(--bg); }
+@media (pointer: coarse) and (max-width: 640px) {
+  #term-scroll { display: flex; }
 }
 #term-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 0.5rem;
   margin-bottom: 0.35rem;
 }
-#term-header small { color: var(--muted); }
-#term-host { min-height: 200px; }
+#term-header button.link { flex-shrink: 0; padding: 0.3rem 0.6rem; font-size: 0.9rem; }
+
+/* terminal tabs — horizontally scrollable strip, one tab per open mate */
+#term-tabs {
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+  min-width: 0;
+  scrollbar-width: thin;
+}
+.term-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+}
+.term-tab.active { color: var(--text); border-bottom-color: var(--accent); background: #000; }
+.term-tab .x { padding: 0 0.15rem; opacity: 0.7; }
+.term-tab .x:hover { opacity: 1; color: var(--bad); }
+
+#term-host { height: min(45vh, 420px); }
+#term-host .term-instance { height: 100%; }
 #term-host .xterm { padding: 2px; }
 
 section#feed {

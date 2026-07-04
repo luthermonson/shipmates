@@ -112,7 +112,14 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	// authGate based on path, and the login.html / style.css / app.js assets
 	// are harmless on their own.
 	if sub, err := fs.Sub(uiFS, "ui"); err == nil {
-		mux.Handle("/", http.FileServer(http.FS(sub)))
+		fsrv := http.FileServer(http.FS(sub))
+		// no-cache: the UI ships embedded in the binary and changes on every
+		// deploy; a stale cached app.js against fresh index.html breaks the
+		// page in confusing ways. Revalidating a ~300KB UI per load is cheap.
+		mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-cache")
+			fsrv.ServeHTTP(w, r)
+		}))
 	}
 
 	srv := &http.Server{Addr: addr, Handler: b.authGate(mux)}

@@ -4,11 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>shipmates bridge</title>
-<link rel="stylesheet" href="/style.css">
-<link rel="stylesheet" href="/vendor/xterm.min.css">
+<link rel="stylesheet" href="/style.css?v=2">
+<link rel="stylesheet" href="/vendor/xterm.min.css?v=2">
 </head>
 <body>
 <header>
+  <button id="leads-toggle" type="button" aria-label="toggle leads list">☰</button>
   <h1>shipmates bridge</h1>
   <div class="right">
     <span id="status">connecting…</span>
@@ -16,6 +17,7 @@
   </div>
 </header>
 <main>
+  <div id="drawer-backdrop"></div>
   <aside id="leads">
     <h2>leads</h2>
     <ul id="leads-list"><li class="empty">no leads connected</li></ul>
@@ -28,10 +30,14 @@
     <pre id="feed-body"></pre>
     <div id="term-pane" hidden>
       <div id="term-header">
-        <small id="term-title"></small>
+        <div id="term-tabs"></div>
         <button id="term-close" class="link" type="button">close</button>
       </div>
       <div id="term-host"></div>
+      <div id="term-scroll">
+        <button id="term-scroll-up" type="button" aria-label="scroll up">▲</button>
+        <button id="term-scroll-down" type="button" aria-label="scroll down">▼</button>
+      </div>
     </div>
     <div id="pending-pane" hidden></div>
     <form id="tell-form" autocomplete="off">
@@ -42,7 +48,8 @@
     </form>
   </section>
 </main>
-<script src="/vendor/xterm.min.js"></script>
-<script src="/app.js"></script>
+<script src="/vendor/xterm.min.js?v=2"></script>
+<script src="/vendor/addon-fit.min.js?v=2"></script>
+<script src="/app.js?v=2"></script>
 </body>
 </html>

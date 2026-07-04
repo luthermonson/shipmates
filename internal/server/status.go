@@ -3,8 +3,13 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/project"
 )
 
 // MateStatus is the derived per-persona state served at /status.json. The four
@@ -15,6 +20,7 @@ import (
 //	working — live process with a hook/feed event inside workingWindow
 //	idle    — live process, but nothing heard for over workingWindow
 //	done    — the persona ran in this server's lifetime and its process exited
+//	off     — installed crew member that hasn't run in this server's lifetime
 type MateStatus struct {
 	Persona   string `json:"persona"`
 	Status    string `json:"status"`
@@ -65,6 +71,12 @@ func (s *Server) computeStatus(now time.Time) []MateStatus {
 	for p := range s.exited {
 		personas[p] = true
 	}
+	// Installed-but-never-run crew show as "off" so the whole roster is
+	// visible (and addressable) from the bridge, not just personas with
+	// process history.
+	for _, p := range crewPersonas() {
+		personas[p] = true
+	}
 
 	out := make([]MateStatus, 0, len(personas))
 	for persona := range personas {
@@ -83,8 +95,10 @@ func (s *Server) computeStatus(now time.Time) []MateStatus {
 			} else {
 				st.Status = "idle"
 			}
-		default:
+		case s.exited[persona]:
 			st.Status = "done"
+		default:
+			st.Status = "off"
 		}
 		if t := s.lastSeen[persona]; !t.IsZero() {
 			st.Since = t.Format(time.RFC3339)
@@ -92,5 +106,27 @@ func (s *Server) computeStatus(now time.Time) []MateStatus {
 		out = append(out, st)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Persona < out[j].Persona })
+	return out
+}
+
+// crewPersonas lists installed fleet personas (.claude/agents/*.md, minus
+// files opting out via shipmatesPersona: false). FS read per status poll —
+// a directory listing every few seconds, cheap and always current.
+func crewPersonas() []string {
+	entries, err := os.ReadDir(project.AgentsDir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		if !project.IsFleetPersonaFile(filepath.Join(project.AgentsDir, name)) {
+			continue
+		}
+		out = append(out, strings.TrimSuffix(name, ".md"))
+	}
 	return out
 }

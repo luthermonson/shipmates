@@ -66,11 +66,16 @@ function renderLeads(data) {
         md.title = m.status === "blocked"
           ? `${m.persona}: blocked on ${m.tool}${m.input ? " — " + m.input : ""}`
           : `${m.persona}: ${m.status}${m.since ? " since " + m.since : ""}`;
-        if (m.status === "blocked") {
-          // A blocked mate is actionable: jump to its lead so the pending
-          // pane (filtered to the selected lead) surfaces the approval.
-          md.onclick = (ev) => { ev.stopPropagation(); selectLead(lead.client_key); };
-        }
+        // Every chip is a talk-to affordance: select the lead and target the
+        // persona in the tell form. For blocked mates that also surfaces the
+        // pending pane (it filters to the selected lead).
+        md.onclick = (ev) => {
+          ev.stopPropagation();
+          selectLead(lead.client_key);
+          tellPersona.value = m.persona;
+          tellPersona.dataset.autofill = m.persona;
+          tellMessage.focus();
+        };
         row.appendChild(md);
       }
       li.appendChild(row);
@@ -80,6 +85,7 @@ function renderLeads(data) {
 }
 
 function selectLead(key) {
+  document.body.classList.remove("drawer-open"); // mobile: give the feed full width
   if (selected === key) return;
   selected = key;
   feedBody.innerHTML = "";
@@ -334,23 +340,25 @@ setInterval(refreshPending, 1500);
 refreshStatus();
 setInterval(refreshStatus, 3000);
 
-// --- live terminal pane -----------------------------------------------------
+// --- live terminal pane (multi-session, tabbed) -------------------------------
 //
-// "⌨ term" opens a PTY-hosted mate on the selected lead: POST .../pty/{p}/start
-// spawns (or finds) `claude --agent {p}` under a ConPTY on the lead's machine,
-// then an EventSource on .../stream delivers base64 screen bytes (snapshot =
-// backscroll, data = live) straight into xterm.js. Keystrokes go back via
-// POST .../input, so this is a read-write attach. One terminal at a time.
+// "⌨ term" opens a PTY-hosted mate for whatever persona the tell form targets
+// (tap a mate chip to target it) on the selected lead. Multiple terminals stay
+// open concurrently — each keeps its EventSource + xterm instance alive; tabs
+// on top switch between them. Tab label is persona@ship so you always know
+// which mate you're typing into. The big close button closes the ACTIVE tab.
 
 const termPane = $("term-pane");
 const termHost = $("term-host");
-const termTitle = $("term-title");
+const termTabs = $("term-tabs");
 const termCloseBtn = $("term-close");
 const termOpenBtn = $("term-open");
 
-let term = null;       // xterm.js instance
-let termES = null;     // EventSource for the PTY stream
-let termBase = null;   // API base for the attached mate
+const terms = new Map(); // id -> {key, persona, base, term, fit, es, host}
+let activeTermId = null;
+
+function termSessionId(key, persona) { return key + "::" + persona; }
+function activeTerm() { return terms.get(activeTermId) || null; }
 
 function b64ToBytes(s) {
   const bin = atob(s);
@@ -359,16 +367,66 @@ function b64ToBytes(s) {
   return bytes;
 }
 
-function closeTerminal() {
-  if (termES) { termES.close(); termES = null; }
-  if (term) { term.dispose(); term = null; }
-  termBase = null;
-  termHost.innerHTML = "";
-  termPane.hidden = true;
+function renderTermTabs() {
+  termTabs.innerHTML = "";
+  for (const [id, t] of terms) {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "term-tab" + (id === activeTermId ? " active" : "");
+    const label = document.createElement("span");
+    // persona@ship — ship is the lead name (client_key up to the colon)
+    label.textContent = `${t.persona}@${t.key.split(":")[0]}`;
+    tab.appendChild(label);
+    const x = document.createElement("span");
+    x.className = "x";
+    x.textContent = "×";
+    x.onclick = (ev) => { ev.stopPropagation(); closeTerm(id); };
+    tab.appendChild(x);
+    tab.onclick = () => activateTerm(id);
+    termTabs.appendChild(tab);
+  }
+}
+
+function applyFit(t) {
+  try { t.fit.fit(); } catch { return; }
+  fetch(`${t.base}/resize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cols: t.term.cols, rows: t.term.rows }),
+  });
+}
+
+function activateTerm(id) {
+  const t = terms.get(id);
+  if (!t) return;
+  activeTermId = id;
+  termPane.hidden = false;
+  for (const [oid, o] of terms) o.host.style.display = oid === id ? "block" : "none";
+  renderTermTabs();
+  // fit after the host is visible — hidden elements measure 0×0
+  requestAnimationFrame(() => { applyFit(t); t.term.focus(); });
+}
+
+function closeTerm(id) {
+  const t = terms.get(id);
+  if (!t) return;
+  if (t.es) t.es.close();
+  t.term.dispose();
+  t.host.remove();
+  terms.delete(id);
+  if (activeTermId === id) {
+    activeTermId = null;
+    const next = terms.keys().next();
+    if (!next.done) { activateTerm(next.value); return; }
+    termPane.hidden = true;
+  }
+  renderTermTabs();
 }
 
 async function openTerminal(key, persona) {
-  closeTerminal();
+  const id = termSessionId(key, persona);
+  if (terms.has(id)) { activateTerm(id); return; }
+
   const base = `/api/lead/${encodeURIComponent(key)}/pty/${encodeURIComponent(persona)}`;
   try {
     const r = await fetch(`${base}/start`, { method: "POST" });
@@ -378,27 +436,38 @@ async function openTerminal(key, persona) {
     appendEvent({ time: nowISO(), persona: "(bridge)", type: "term-error", text: String(err) });
     return;
   }
-  termBase = base;
-  termPane.hidden = false;
-  termTitle.textContent = `${persona} @ ${key}`;
 
-  term = new Terminal({ cols: 120, rows: 30, fontSize: 13, scrollback: 5000 });
-  term.open(termHost);
-  term.onData((data) => {
-    // keystrokes from the browser to the mate's PTY; fire-and-forget
-    if (termBase) fetch(`${termBase}/input`, { method: "POST", body: data });
-  });
-  term.focus();
+  const host = document.createElement("div");
+  host.className = "term-instance";
+  termHost.appendChild(host);
 
-  termES = new EventSource(`${base}/stream`);
-  const write = (m) => { if (term) term.write(b64ToBytes(m.data)); };
-  termES.addEventListener("snapshot", write);
-  termES.addEventListener("data", write);
-  termES.addEventListener("exit", () => {
-    if (term) term.write("\r\n\x1b[2m[mate exited]\x1b[0m\r\n");
-    if (termES) { termES.close(); termES = null; }
+  const term = new Terminal({ fontSize: 13, scrollback: 5000 });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(host);
+  term.onData((data) => fetch(`${base}/input`, { method: "POST", body: data }));
+
+  const entry = { key, persona, base, term, fit, es: null, host };
+  const es = new EventSource(`${base}/stream`);
+  entry.es = es;
+  const write = (m) => term.write(b64ToBytes(m.data));
+  es.addEventListener("snapshot", write);
+  es.addEventListener("data", write);
+  es.addEventListener("exit", () => {
+    term.write("\r\n\x1b[2m[mate exited]\x1b[0m\r\n");
+    es.close();
+    entry.es = null;
   });
+
+  terms.set(id, entry);
+  activateTerm(id);
 }
+
+// refit only the visible terminal on window/keyboard resizes
+window.addEventListener("resize", () => {
+  const t = activeTerm();
+  if (t && !termPane.hidden) applyFit(t);
+});
 
 termOpenBtn.onclick = () => {
   if (!selected) return;
@@ -406,4 +475,66 @@ termOpenBtn.onclick = () => {
   if (!persona) { tellPersona.focus(); return; }
   openTerminal(selected, persona);
 };
-termCloseBtn.onclick = closeTerminal;
+termCloseBtn.onclick = () => { if (activeTermId) closeTerm(activeTermId); };
+
+// --- terminal scroll buttons --------------------------------------------------
+//
+// Touch scrolling inside xterm.js is unreliable, so scrolling is explicit:
+// ▲/▼ buttons float bottom-right of the terminal (coarse-pointer devices
+// only — desktop has the wheel). Hold to repeat; speed ramps 1→8 lines per
+// tick the longer you hold. Buffer-aware:
+//   - normal buffer:    local scrollback (no round trip)
+//   - alternate buffer: arrow keys to the mate — TUIs own their scrolling
+//     there, same as desktop alternate-scroll wheel behavior.
+
+const termScrollUp = $("term-scroll-up");
+const termScrollDown = $("term-scroll-down");
+
+function scrollTerm(lines) {
+  const t = activeTerm();
+  if (!t) return;
+  if (t.term.buffer.active.type === "alternate") {
+    const seq = (lines < 0 ? "\x1b[A" : "\x1b[B").repeat(Math.abs(lines));
+    fetch(`${t.base}/input`, { method: "POST", body: seq });
+  } else {
+    t.term.scrollLines(lines);
+  }
+}
+
+let holdTimer = null;
+let holdStart = 0;
+
+function startHold(dir) {
+  stopHold();
+  holdStart = Date.now();
+  const tick = () => {
+    // +1 line/tick every 500ms held, capped at 8/tick (~66 lines/s at max)
+    const speed = Math.min(1 + Math.floor((Date.now() - holdStart) / 500), 8);
+    scrollTerm(dir * speed);
+  };
+  tick();
+  holdTimer = setInterval(tick, 120);
+}
+
+function stopHold() {
+  if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
+}
+
+for (const [btn, dir] of [[termScrollUp, -1], [termScrollDown, 1]]) {
+  btn.addEventListener("pointerdown", (e) => { e.preventDefault(); startHold(dir); });
+  for (const ev of ["pointerup", "pointercancel", "pointerleave"]) {
+    btn.addEventListener(ev, stopHold);
+  }
+}
+
+// --- mobile leads drawer ------------------------------------------------------
+//
+// On narrow screens (<=640px, see style.css) the leads rail is an off-canvas
+// drawer toggled by the header hamburger. Selecting a lead closes it so the
+// feed gets the full width; the backdrop tap dismisses without selecting.
+
+const leadsToggle = $("leads-toggle");
+const drawerBackdrop = $("drawer-backdrop");
+
+leadsToggle.onclick = () => document.body.classList.toggle("drawer-open");
+drawerBackdrop.onclick = () => document.body.classList.remove("drawer-open");
