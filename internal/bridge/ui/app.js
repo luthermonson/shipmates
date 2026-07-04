@@ -419,6 +419,10 @@ function closeTerm(id) {
     const next = terms.keys().next();
     if (!next.done) { activateTerm(next.value); return; }
     termPane.hidden = true;
+    // drop any keyboard-driven viewport pinning
+    termPane.style.top = "";
+    termPane.style.height = "";
+    termPane.style.bottom = "";
   }
   renderTermTabs();
 }
@@ -478,6 +482,35 @@ window.addEventListener("resize", () => {
   const t = activeTerm();
   if (t && !termPane.hidden) applyFit(t);
 });
+
+// Mobile keyboards overlay the page without resizing it, so a fixed inset-0
+// pane stays under the keys. The VisualViewport API reports the actually
+// visible rect; pin the pane to it while the keyboard is up, restore when it
+// drops. Fit is debounced — the keyboard animation fires a burst of resizes
+// and each fit round-trips a PTY resize.
+if (window.visualViewport) {
+  let vvFitTimer = null;
+  const vv = window.visualViewport;
+  const onVV = () => {
+    if (termPane.hidden) return;
+    if (window.matchMedia("(max-width: 640px)").matches) {
+      termPane.style.top = vv.offsetTop + "px";
+      termPane.style.height = vv.height + "px";
+      termPane.style.bottom = "auto";
+    } else {
+      termPane.style.top = "";
+      termPane.style.height = "";
+      termPane.style.bottom = "";
+    }
+    clearTimeout(vvFitTimer);
+    vvFitTimer = setTimeout(() => {
+      const t = activeTerm();
+      if (t && !termPane.hidden) applyFit(t);
+    }, 150);
+  };
+  vv.addEventListener("resize", onVV);
+  vv.addEventListener("scroll", onVV);
+}
 
 termOpenBtn.onclick = () => {
   if (!selected) return;
