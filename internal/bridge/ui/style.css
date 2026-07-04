@@ -150,7 +150,7 @@ aside#leads {
     top: 0;
     left: 0;
     bottom: 0;
-    z-index: 20;
+    z-index: 40; /* above the full-screen terminal (30) */
     width: min(80vw, 300px);
     transform: translateX(-100%);
     transition: transform 0.18s ease-out;
@@ -162,7 +162,7 @@ aside#leads {
     display: none;
     position: fixed;
     inset: 0;
-    z-index: 15;
+    z-index: 35; /* above the terminal, below the drawer */
     background: rgba(0,0,0,0.45);
   }
   body.drawer-open #drawer-backdrop { display: block; }
