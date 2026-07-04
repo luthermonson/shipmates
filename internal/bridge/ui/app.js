@@ -207,10 +207,27 @@ tellForm.onsubmit = async (e) => {
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     tellMessage.value = "";
+    // local echo — instant feedback even if the feed stream is mid-reconnect;
+    // the server-side tell event will follow through the stream
+    appendEvent({ time: nowISO(), persona: persona, type: "tell✓", text: message });
   } catch (err) {
     appendEvent({ time: nowISO(), persona: "(bridge)", type: "tell-error", text: String(err) });
   }
 };
+
+// iOS freezes background tabs and can leave the EventSource as a zombie that
+// never fires onerror or reconnects. When the tab becomes visible again,
+// tear the stream down and reopen it, and refresh the polled panes right away.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (selected) {
+    feedBody.innerHTML = ""; // stream replays history on reconnect — avoid dupes
+    openStream(selected);
+  }
+  refreshLeads();
+  refreshPending();
+  refreshStatus();
+});
 
 // --- pending permission pane ----------------------------------------------
 //
