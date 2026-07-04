@@ -513,6 +513,7 @@ function scrollTerm(lines) {
 
 let holdTimer = null;
 let holdStart = 0;
+let lastDownTap = 0;
 
 function startHold(dir) {
   stopHold();
@@ -530,8 +531,34 @@ function stopHold() {
   if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
 }
 
+// double-tap ▼ = jump to the live bottom. Normal buffer: scrollToBottom().
+// Alternate buffer: End key — most TUIs (claude included) treat it as
+// jump-to-latest; harmless where they don't.
+function jumpToBottom() {
+  const t = activeTerm();
+  if (!t) return;
+  if (t.term.buffer.active.type === "alternate") {
+    fetch(`${t.base}/input`, { method: "POST", body: "\x1b[F" });
+  } else {
+    t.term.scrollToBottom();
+  }
+}
+
 for (const [btn, dir] of [[termScrollUp, -1], [termScrollDown, 1]]) {
-  btn.addEventListener("pointerdown", (e) => { e.preventDefault(); startHold(dir); });
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    if (dir === 1) {
+      const now = Date.now();
+      if (now - lastDownTap < 350) {
+        lastDownTap = 0;
+        stopHold();
+        jumpToBottom();
+        return;
+      }
+      lastDownTap = now;
+    }
+    startHold(dir);
+  });
   for (const ev of ["pointerup", "pointercancel", "pointerleave"]) {
     btn.addEventListener(ev, stopHold);
   }
