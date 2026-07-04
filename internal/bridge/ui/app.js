@@ -75,7 +75,9 @@ function renderLeads(data) {
           tellPersona.value = m.persona;
           tellPersona.dataset.autofill = m.persona;
           updateFeedTitle();
-          tellMessage.focus();
+          // desktop nicety only: on touch, focusing pops the keyboard (and
+          // iOS zooms to the field) when the user may just be looking
+          if (!window.matchMedia("(pointer: coarse)").matches) tellMessage.focus();
         };
         row.appendChild(md);
       }
