@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>shipmates bridge</title>
-<link rel="stylesheet" href="/style.css?v=9">
-<link rel="stylesheet" href="/vendor/xterm.min.css?v=9">
+<link rel="stylesheet" href="/style.css?v=10">
+<link rel="stylesheet" href="/vendor/xterm.min.css?v=10">
 </head>
 <body>
 <header>
@@ -25,7 +25,10 @@
   <section id="feed">
     <div id="feed-header">
       <h2 id="feed-title">select a lead</h2>
-      <small id="feed-meta"></small>
+      <span class="right">
+        <small id="feed-meta"></small>
+        <button id="term-open" type="button" title="open a live terminal for the targeted persona">⌨ term</button>
+      </span>
     </div>
     <pre id="feed-body"></pre>
     <div id="term-pane" hidden>
@@ -44,12 +47,11 @@
       <input id="tell-persona" placeholder="persona" required>
       <input id="tell-message" placeholder="message…" required>
       <button type="submit">tell</button>
-      <button id="term-open" type="button" title="open a live terminal for this persona on the selected lead">⌨ term</button>
     </form>
   </section>
 </main>
-<script src="/vendor/xterm.min.js?v=9"></script>
-<script src="/vendor/addon-fit.min.js?v=9"></script>
-<script src="/app.js?v=9"></script>
+<script src="/vendor/xterm.min.js?v=10"></script>
+<script src="/vendor/addon-fit.min.js?v=10"></script>
+<script src="/app.js?v=10"></script>
 </body>
 </html>

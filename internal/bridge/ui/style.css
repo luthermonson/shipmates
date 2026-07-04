@@ -179,20 +179,22 @@ aside#leads {
   #feed-body { padding: 0.7rem; font-size: 0.78rem; }
   #feed-body .ev .ts { display: none; }
 
-  /* tell form: two rows — inputs, then buttons; finger-sized */
-  #tell-form { flex-wrap: wrap; padding: 0.6rem 0.7rem calc(0.6rem + env(safe-area-inset-bottom)); }
-  #tell-persona { width: 34%; flex: 0 0 auto; }
-  #tell-message { flex: 1 1 60%; }
+  /* tell form: one line — persona, message, tell; finger-sized */
+  #tell-form { flex-wrap: nowrap; padding: 0.6rem 0.7rem calc(0.6rem + env(safe-area-inset-bottom)); }
+  #tell-persona { width: 28%; flex: 0 1 auto; min-width: 0; }
+  #tell-message { flex: 1 1 auto; min-width: 0; }
   #tell-form input { font-size: 1rem; padding: 0.6rem 0.7rem; }
   #tell-form button {
-    flex: 1 1 40%;
+    flex: 0 0 auto;
     font-size: 1rem;
-    padding: 0.65rem 0;
+    padding: 0.65rem 1rem;
     border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
   }
+  /* term lives top-right in the feed header — finger-sized there */
+  #term-open { font-size: 0.95rem; padding: 0.5rem 0.9rem; border-radius: 6px; }
 
   /* pending pane: full-width finger-sized allow/deny */
   #pending-pane .row { flex-wrap: wrap; }
@@ -388,6 +390,20 @@ section#feed {
 }
 
 #feed-meta { color: var(--muted); font-size: 0.75rem; }
+
+#feed-header .right { display: flex; align-items: center; gap: 0.7rem; flex-shrink: 0; }
+
+#term-open {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#term-open:hover { border-color: var(--accent); }
 
 #feed-body {
   flex: 1;
