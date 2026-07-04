@@ -211,17 +211,10 @@ aside#leads {
   #pending-pane .meta { flex: 1 1 100%; }
   #pending-pane button { flex: 1 1 40%; justify-content: center; padding: 0.7rem 0; }
 
-  /* --- terminal: full-screen takeover ------------------------------------ */
+  /* --- terminal: mobile-specific sizing (takeover is now the base rule) --- */
   #term-pane {
-    position: fixed;
-    inset: 0;
-    z-index: 30;
-    display: flex;
-    flex-direction: column;
-    border-top: 0;
     padding: 0.5rem 0.5rem calc(0.5rem + env(safe-area-inset-bottom));
   }
-  #term-pane[hidden] { display: none; }
   #term-header { margin-bottom: 0.5rem; }
   #term-header button.link {
     font-size: 1rem;
@@ -298,15 +291,19 @@ aside#leads h2 {
   50% { opacity: 0.55; }
 }
 
-/* live terminal pane */
+/* live terminal pane — a full-screen takeover on every device: you're either
+   on the bridge or in a terminal, never squinting at both */
 #term-pane {
-  position: relative; /* anchors the floating scroll buttons */
-  border-top: 1px solid rgba(255,255,255,0.08);
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
   background: #000;
-  padding: 0.4rem 0.6rem 0.6rem;
-  max-width: 100%;
+  padding: 0.5rem 0.6rem;
   overflow: hidden; /* the fit addon sizes the terminal to this box */
 }
+#term-pane[hidden] { display: none; }
 
 /* hold-to-scroll buttons — coarse pointers only (desktop has the wheel) */
 #term-scroll {
@@ -373,7 +370,7 @@ aside#leads h2 {
 .term-tab .x { padding: 0 0.15rem; opacity: 0.7; }
 .term-tab .x:hover { opacity: 1; color: var(--bad); }
 
-#term-host { height: min(45vh, 420px); }
+#term-host { flex: 1; min-height: 0; }
 #term-host .term-instance { height: 100%; }
 #term-host .xterm { padding: 2px; }
 
