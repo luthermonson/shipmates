@@ -75,6 +75,9 @@ function renderLeads(data) {
           tellPersona.value = m.persona;
           tellPersona.dataset.autofill = m.persona;
           updateFeedTitle();
+          feedFilter = m.persona; // chip tap = open that agent's conversation
+          renderFeedTabs();
+          renderFeed();
           // desktop nicety only: on touch, focusing pops the keyboard (and
           // iOS zooms to the field) when the user may just be looking
           if (!window.matchMedia("(pointer: coarse)").matches) tellMessage.focus();
@@ -101,6 +104,9 @@ function selectLead(key) {
   if (selected === key) return;
   selected = key;
   feedBody.innerHTML = "";
+  feedEvents = [];
+  feedFilter = "all";
+  renderFeedTabs();
   refreshLeads(); // re-render to update .selected
   const lead = knownLeads.get(key);
   feedMeta.textContent = lead && lead.connected
@@ -166,7 +172,58 @@ function openStream(key) {
   };
 }
 
-function appendEvent(e) {
+// --- per-agent feed tabs ------------------------------------------------------
+//
+// The stream is ship-wide (every persona's events interleave); tabs give each
+// agent its own conversation view, same mental model as the terminal tabs.
+// "all" shows everything; picking a persona filters the feed AND targets the
+// tell form at them. Bridge-status lines ("(bridge)" persona) always show.
+
+const feedTabsEl = $("feed-tabs");
+let feedEvents = [];
+let feedFilter = "all";
+
+function eventMatchesFilter(e) {
+  if (feedFilter === "all") return true;
+  if (e.persona && e.persona.startsWith("(")) return true; // bridge notices
+  return e.persona === feedFilter;
+}
+
+function renderFeedTabs() {
+  feedTabsEl.innerHTML = "";
+  if (!selected) return;
+  const personas = new Set();
+  for (const m of (mateStatus.get(selected) || [])) personas.add(m.persona);
+  for (const e of feedEvents) {
+    if (e.persona && !e.persona.startsWith("(")) personas.add(e.persona);
+  }
+  for (const p of ["all", ...[...personas].sort()]) {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "feed-tab" + (feedFilter === p ? " active" : "");
+    tab.textContent = p;
+    tab.onclick = () => {
+      feedFilter = p;
+      if (p !== "all") {
+        tellPersona.value = p;
+        tellPersona.dataset.autofill = p;
+        updateFeedTitle();
+      }
+      renderFeedTabs();
+      renderFeed();
+    };
+    feedTabsEl.appendChild(tab);
+  }
+}
+
+function renderFeed() {
+  feedBody.innerHTML = "";
+  for (const e of feedEvents) {
+    if (eventMatchesFilter(e)) appendEventDOM(e);
+  }
+}
+
+function appendEventDOM(e) {
   const div = document.createElement("span");
   div.className = "ev" + (e.type && e.type.startsWith("permission") ? " permission" : "");
   div.innerHTML =
@@ -176,6 +233,15 @@ function appendEvent(e) {
     `${escape(e.text || "")}\n`;
   feedBody.appendChild(div);
   feedBody.scrollTop = feedBody.scrollHeight;
+}
+
+function appendEvent(e) {
+  feedEvents.push(e);
+  // a first-seen persona grows the tab strip
+  if (e.persona && !e.persona.startsWith("(") && !feedTabsEl.textContent.includes(e.persona)) {
+    renderFeedTabs();
+  }
+  if (eventMatchesFilter(e)) appendEventDOM(e);
 }
 
 function escape(s) {
@@ -221,6 +287,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
   if (selected) {
     feedBody.innerHTML = ""; // stream replays history on reconnect — avoid dupes
+    feedEvents = [];
     openStream(selected);
   }
   refreshLeads();
@@ -358,6 +425,7 @@ async function refreshStatus() {
     }
     mateStatus = next;
     renderLeads([...knownLeads.values()]);
+    renderFeedTabs(); // roster changes grow/shrink the conversation tabs
   } catch {
     // network blip; next tick will retry
   }

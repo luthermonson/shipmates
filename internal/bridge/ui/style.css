@@ -222,6 +222,7 @@ aside#leads {
   }
   .term-tab { font-size: 0.9rem; padding: 0.55rem 0.75rem; border-radius: 8px; }
   .term-tab .x { padding: 0 0.35rem; font-size: 1.05rem; }
+  .feed-tab { font-size: 0.9rem; padding: 0.45rem 0.9rem; }
   #term-host { flex: 1; height: auto; min-height: 0; }
 }
 
@@ -404,6 +405,30 @@ section#feed {
   white-space: nowrap;
 }
 #term-open:hover { border-color: var(--accent); }
+
+/* per-agent conversation tabs under the feed header */
+#feed-tabs {
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+  padding: 0.4rem 1rem 0.4rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+#feed-tabs:empty { display: none; }
+.feed-tab {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+}
+.feed-tab.active { color: var(--text); border-color: var(--accent); background: var(--bg); }
 
 #feed-body {
   flex: 1;
