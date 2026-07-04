@@ -183,7 +183,7 @@ aside#leads {
   #tell-form { flex-wrap: nowrap; padding: 0.6rem 0.7rem calc(0.6rem + env(safe-area-inset-bottom)); }
   #tell-persona { width: 28%; flex: 0 1 auto; min-width: 0; }
   #tell-message { flex: 1 1 auto; min-width: 0; }
-  #tell-form input { font-size: 1rem; padding: 0.6rem 0.7rem; }
+  #tell-form input, #tell-form select { font-size: 1rem; padding: 0.6rem 0.7rem; }
   #tell-form button {
     flex: 0 0 auto;
     font-size: 1rem;
@@ -461,7 +461,8 @@ section#feed {
   background: var(--panel);
 }
 
-#tell-form input {
+#tell-form input,
+#tell-form select {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);

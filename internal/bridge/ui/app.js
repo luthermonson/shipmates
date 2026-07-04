@@ -72,8 +72,7 @@ function renderLeads(data) {
         md.onclick = (ev) => {
           ev.stopPropagation();
           selectLead(lead.client_key);
-          tellPersona.value = m.persona;
-          tellPersona.dataset.autofill = m.persona;
+          setTellPersona(m.persona);
           updateFeedTitle();
           feedFilter = m.persona; // chip tap = open that agent's conversation
           renderFeedTabs();
@@ -99,6 +98,44 @@ function updateFeedTitle() {
   feedTitle.textContent = persona ? `${persona} @ ${selected}` : selected;
 }
 
+// The tell target is a dropdown built from the roster. setTellPersona ensures
+// the option exists before selecting it (a <select> silently ignores .value
+// assignments for missing options).
+function setTellPersona(p) {
+  if (![...tellPersona.options].some((o) => o.value === p)) {
+    const o = document.createElement("option");
+    o.value = p;
+    o.textContent = p;
+    tellPersona.appendChild(o);
+  }
+  tellPersona.value = p;
+}
+
+function renderTellOptions() {
+  const current = tellPersona.value;
+  const personas = new Set(["all"]);
+  for (const m of (mateStatus.get(selected) || [])) personas.add(m.persona);
+  for (const e of feedEvents) {
+    if (e.persona && !e.persona.startsWith("(")) personas.add(e.persona);
+  }
+  tellPersona.innerHTML = "";
+  for (const p of personas) {
+    const o = document.createElement("option");
+    o.value = p;
+    o.textContent = p;
+    tellPersona.appendChild(o);
+  }
+  tellPersona.value = personas.has(current) ? current : "all";
+}
+
+// dropdown change = conversation switch, mirroring the feed tabs
+tellPersona.addEventListener("change", () => {
+  feedFilter = tellPersona.value;
+  updateFeedTitle();
+  renderFeedTabs();
+  renderFeed();
+});
+
 function selectLead(key) {
   document.body.classList.remove("drawer-open"); // mobile: give the feed full width
   if (selected === key) return;
@@ -112,23 +149,17 @@ function selectLead(key) {
   feedMeta.textContent = lead && lead.connected
     ? `online · port ${lead.port}`
     : "offline";
-  // Default the tell-form persona to whatever the lead announced as its own
-  // persona (the trailing segment of the clientKey). Operator can override to
-  // address a crew member instead. Updated only when empty or when the field
-  // still holds the previous lead's persona — never clobber a manual edit.
-  const defaultPersona = lead && lead.persona ? lead.persona : "";
-  if (!tellPersona.value || tellPersona.value === tellPersona.dataset.autofill) {
-    tellPersona.value = defaultPersona;
-  }
-  tellPersona.dataset.autofill = defaultPersona;
+  // Rebuild the target dropdown for this ship's roster and default it to the
+  // lead's own persona (rosters differ per ship, so carrying the previous
+  // selection across would leave a dangling target).
+  renderTellOptions();
+  setTellPersona(lead && lead.persona ? lead.persona : "all");
   updateFeedTitle();
   updateTellEnabled();
   refreshPending(); // switch the pending pane to this lead immediately
   openStream(key);
 }
 
-// retitle live as the operator retargets — chip taps and manual edits alike
-tellPersona.addEventListener("input", updateFeedTitle);
 
 // updateTellEnabled greys out the tell form when the selected lead is offline
 // or unselected. Stops the operator from firing 504s into a dead tunnel.
@@ -205,8 +236,7 @@ function renderFeedTabs() {
     tab.onclick = () => {
       feedFilter = p;
       // "all" is a real tell target too — submit fans out to the whole crew
-      tellPersona.value = p;
-      tellPersona.dataset.autofill = p;
+      setTellPersona(p);
       updateFeedTitle();
       renderFeedTabs();
       renderFeed();
@@ -442,6 +472,7 @@ async function refreshStatus() {
     mateStatus = next;
     renderLeads([...knownLeads.values()]);
     renderFeedTabs(); // roster changes grow/shrink the conversation tabs
+    renderTellOptions(); // ...and the tell dropdown
   } catch {
     // network blip; next tick will retry
   }
