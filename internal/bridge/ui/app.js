@@ -224,7 +224,9 @@ function renderFeed() {
 
 function appendEventDOM(e) {
   const div = document.createElement("span");
-  div.className = "ev" + (e.type && e.type.startsWith("permission") ? " permission" : "");
+  div.className = "ev"
+    + (e.type && e.type.startsWith("permission") ? " permission" : "")
+    + (e.type === "result" ? " result" : "");
   div.innerHTML =
     `<span class="ts">[${escape(e.time || "")}]</span> ` +
     `<span class="who">${escape(e.persona || "?")}</span>/` +
@@ -625,10 +627,21 @@ if (window.visualViewport) {
   vv.addEventListener("scroll", onVV);
 }
 
-termOpenBtn.onclick = () => {
+termOpenBtn.onclick = async () => {
   if (!selected) return;
   const persona = tellPersona.value.trim();
   if (!persona) { tellPersona.focus(); return; }
+  if (persona === "all") {
+    // "all" is a UI pseudo-target, not an agent — spawning `claude --agent
+    // all` would create a nameless mate. Open a tab per crew member instead.
+    const roster = (mateStatus.get(selected) || []).map((m) => m.persona);
+    if (roster.length === 0) {
+      appendEvent({ time: nowISO(), persona: "(bridge)", type: "term-error", text: "no crew roster yet — wait for status" });
+      return;
+    }
+    for (const p of roster) await openTerminal(selected, p);
+    return;
+  }
   openTerminal(selected, persona);
 };
 termCloseBtn.onclick = () => { if (activeTermId) closeTerm(activeTermId); };

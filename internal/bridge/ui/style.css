@@ -447,6 +447,11 @@ section#feed {
 #feed-body .ev .who { color: var(--accent); }
 #feed-body .ev .kind { color: var(--good); }
 #feed-body .ev.permission .kind { color: var(--bad); }
+/* turn-complete markers: read-receipt volume, not conversation volume */
+#feed-body .ev.result,
+#feed-body .ev.result .ts,
+#feed-body .ev.result .who,
+#feed-body .ev.result .kind { color: var(--muted); opacity: 0.55; font-size: 0.9em; }
 
 #tell-form {
   display: flex;
