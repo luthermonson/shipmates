@@ -10,7 +10,7 @@
 package bridge
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"database/sql"
 	"embed"
@@ -396,38 +396,23 @@ type proxyResp struct {
 	Body   []byte
 }
 
-// readHTTPResponse reads a minimal HTTP/1.1 response off a net.Conn. We can't
-// use http.ReadResponse directly without a *bufio.Reader, which is exactly what
-// it wants — wrap accordingly.
+// readHTTPResponse reads one HTTP/1.1 response off a net.Conn via the stdlib
+// parser, which decodes Transfer-Encoding: chunked. The previous hand-rolled
+// header/body split did not — Go servers only chunk responses that outgrow
+// the 2KB write buffer, so small payloads worked while anything bigger (a
+// grown /events history) returned chunk-size framing glued into the body and
+// broke every JSON consumer downstream.
 func readHTTPResponse(conn net.Conn) (*proxyResp, error) {
-	all, err := io.ReadAll(conn)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
 		return nil, err
 	}
-	// Split headers from body on the first \r\n\r\n.
-	sep := []byte("\r\n\r\n")
-	idx := bytes.Index(all, sep)
-	if idx < 0 {
-		return nil, fmt.Errorf("malformed response: no header/body separator")
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
-	headerBlock := string(all[:idx])
-	body := all[idx+len(sep):]
-
-	// First line: "HTTP/1.1 <code> <text>"
-	firstEnd := strings.Index(headerBlock, "\r\n")
-	statusLine := headerBlock
-	if firstEnd > 0 {
-		statusLine = headerBlock[:firstEnd]
-	}
-	parts := strings.SplitN(statusLine, " ", 3)
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("malformed status line: %q", statusLine)
-	}
-	var code int
-	if _, err := fmt.Sscanf(parts[1], "%d", &code); err != nil {
-		return nil, fmt.Errorf("bad status code: %w", err)
-	}
-	return &proxyResp{Status: code, Body: body}, nil
+	return &proxyResp{Status: resp.StatusCode, Body: body}, nil
 }
 
 func writeProxied(w http.ResponseWriter, status int, body []byte, err error) {
