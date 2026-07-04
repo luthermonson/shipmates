@@ -365,6 +365,10 @@ async function refreshPending() {
   }
 }
 
+// Groups whose detail rows the operator has expanded (persists across the
+// 1.5s re-render poll).
+let expandedPendingGroups = new Set();
+
 function renderPending(items) {
   items = (items || []).filter(it => it.client_key === selected);
   // Ping on any newly-seen id, globally (so cross-lead pendings still alert).
@@ -378,34 +382,97 @@ function renderPending(items) {
     pendingPane.hidden = true;
     pendingPane.innerHTML = "";
     visiblePendings = [];
+    expandedPendingGroups.clear();
     return;
   }
   pendingPane.hidden = false;
   pendingPane.innerHTML = "";
-  visiblePendings = items;
-  items.forEach((it, idx) => {
-    const isTarget = idx === items.length - 1; // bottom-most is the kb target
-    const row = document.createElement("div");
-    row.className = "row" + (isTarget ? " target" : "");
+  visiblePendings = [];
+
+  // group by persona; single requests render as classic rows, 2+ get a
+  // collapsed group header with allow/deny-all and an expandable detail list
+  const groups = new Map();
+  for (const it of items) {
+    if (!groups.has(it.persona)) groups.set(it.persona, []);
+    groups.get(it.persona).push(it);
+  }
+
+  for (const [persona, list] of groups) {
+    if (list.length === 1) {
+      renderPendingRow(list[0]);
+      continue;
+    }
+    const expanded = expandedPendingGroups.has(persona);
+    const head = document.createElement("div");
+    head.className = "row group-head";
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.innerHTML =
-      `<div><span class="who">${escape(it.persona)}</span> wants ` +
-      `<span class="tool">${escape(it.tool)}</span></div>` +
-      (it.input ? `<div class="cmd">${escape(it.input)}</div>` : "");
-    const allow = document.createElement("button");
-    allow.className = "allow";
-    allow.innerHTML = `allow ${isTarget ? '<span class="key">1</span>' : ""}`;
-    allow.onclick = () => resolvePending(it, "allow", row);
-    const deny = document.createElement("button");
-    deny.className = "deny";
-    deny.innerHTML = `deny ${isTarget ? '<span class="key">2</span>' : ""}`;
-    deny.onclick = () => resolvePending(it, "deny", row);
-    row.appendChild(meta);
-    row.appendChild(allow);
-    row.appendChild(deny);
-    pendingPane.appendChild(row);
-  });
+      `<div><span class="who">${escape(persona)}</span> wants ` +
+      `<span class="tool">${list.length} approvals</span></div>`;
+    const toggle = document.createElement("button");
+    toggle.className = "toggle";
+    toggle.textContent = expanded ? "hide ▴" : "show ▾";
+    toggle.onclick = () => {
+      if (expanded) expandedPendingGroups.delete(persona);
+      else expandedPendingGroups.add(persona);
+      refreshPending();
+    };
+    const allowAll = document.createElement("button");
+    allowAll.className = "allow";
+    allowAll.textContent = `allow all`;
+    allowAll.onclick = () => resolveAll(list, "allow", head);
+    const denyAll = document.createElement("button");
+    denyAll.className = "deny";
+    denyAll.textContent = `deny all`;
+    denyAll.onclick = () => resolveAll(list, "deny", head);
+    head.appendChild(meta);
+    head.appendChild(toggle);
+    head.appendChild(allowAll);
+    head.appendChild(denyAll);
+    pendingPane.appendChild(head);
+
+    if (expanded) {
+      for (const it of list) renderPendingRow(it, true);
+    }
+  }
+  // keyboard 1/2 targets the bottom-most individually rendered row
+  const rows = pendingPane.querySelectorAll(".row:not(.group-head)");
+  if (rows.length > 0) rows[rows.length - 1].classList.add("target");
+}
+
+function renderPendingRow(it, indent) {
+  const row = document.createElement("div");
+  row.className = "row" + (indent ? " indent" : "");
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.innerHTML =
+    `<div><span class="who">${escape(it.persona)}</span> wants ` +
+    `<span class="tool">${escape(it.tool)}</span></div>` +
+    (it.input ? `<div class="cmd">${escape(it.input)}</div>` : "");
+  const allow = document.createElement("button");
+  allow.className = "allow";
+  allow.textContent = "allow";
+  allow.onclick = () => resolvePending(it, "allow", row);
+  const deny = document.createElement("button");
+  deny.className = "deny";
+  deny.textContent = "deny";
+  deny.onclick = () => resolvePending(it, "deny", row);
+  row.appendChild(meta);
+  row.appendChild(allow);
+  row.appendChild(deny);
+  pendingPane.appendChild(row);
+  visiblePendings.push(it);
+}
+
+async function resolveAll(list, behavior, head) {
+  head.querySelectorAll("button").forEach(b => b.disabled = true);
+  await Promise.allSettled(list.map((it) =>
+    fetch(`/api/lead/${encodeURIComponent(it.client_key)}/resolve/${encodeURIComponent(it.id)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ behavior }) })
+  ));
+  refreshPending();
 }
 
 async function resolvePending(it, behavior, row) {
@@ -432,7 +499,9 @@ window.addEventListener("keydown", (e) => {
   if (e.key !== "1" && e.key !== "2") return;
   e.preventDefault();
   const target = visiblePendings[visiblePendings.length - 1];
-  const row = pendingPane.lastElementChild;
+  const rows = pendingPane.querySelectorAll(".row:not(.group-head)");
+  const row = rows[rows.length - 1];
+  if (!row) return;
   resolvePending(target, e.key === "1" ? "allow" : "deny", row);
 });
 

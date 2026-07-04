@@ -121,6 +121,16 @@ main {
 #pending-pane button.deny  { background: var(--bad);  color: var(--bg); }
 #pending-pane button:disabled { opacity: 0.4; cursor: wait; }
 
+/* grouped approvals: header row with allow/deny-all + expandable details */
+#pending-pane .row.group-head { background: rgba(248, 81, 73, 0.14); font-weight: 600; }
+#pending-pane .row.indent { padding-left: 2rem; }
+#pending-pane button.toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 400;
+}
+
 aside#leads {
   width: 280px;
   background: var(--panel);
