@@ -309,7 +309,11 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	keepalive := time.NewTicker(30 * time.Second)
 	defer keepalive.Stop()
-	high := ""
+	// Index watermark, not timestamp: the lead's event log is append-only, so
+	// "everything past what we already sent" is exact. A timestamp watermark
+	// silently dropped all-but-the-first of any same-second batch — which is
+	// precisely what a broadcast tell produces.
+	sent := 0
 
 	for {
 		select {
@@ -338,16 +342,19 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(body, &events); err != nil {
 			continue
 		}
-		for _, e := range events {
-			if e.Time <= high {
-				continue
-			}
+		if len(events) < sent {
+			sent = 0 // lead restarted and its log reset; replay from the top
+		}
+		if len(events) == sent {
+			continue
+		}
+		for _, e := range events[sent:] {
 			data, _ := json.Marshal(e)
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
 				return
 			}
-			high = e.Time
 		}
+		sent = len(events)
 		flusher.Flush()
 	}
 }
