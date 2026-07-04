@@ -640,21 +640,38 @@ if (window.visualViewport) {
   let vvFitTimer = null;
   const vv = window.visualViewport;
   const onVV = () => {
-    if (termPane.hidden) return;
-    if (window.matchMedia("(max-width: 640px)").matches) {
-      termPane.style.top = vv.offsetTop + "px";
-      termPane.style.height = vv.height + "px";
-      termPane.style.bottom = "auto";
+    const mobile = window.matchMedia("(max-width: 640px)").matches;
+
+    // Whole-layout shrink: when the keyboard eats part of the viewport, pin
+    // the body to the visible height so header/tabs/feed compress and the
+    // tell form sits right above the keys — instead of iOS shoving the top
+    // of the page off-screen.
+    const keyboardUp = mobile && window.innerHeight - vv.height > 60;
+    if (keyboardUp) {
+      document.body.style.height = vv.height + "px";
+      window.scrollTo(0, 0);
+      feedBody.scrollTop = feedBody.scrollHeight; // keep the latest lines visible
     } else {
-      termPane.style.top = "";
-      termPane.style.height = "";
-      termPane.style.bottom = "";
+      document.body.style.height = "";
     }
-    clearTimeout(vvFitTimer);
-    vvFitTimer = setTimeout(() => {
-      const t = activeTerm();
-      if (t && !termPane.hidden) applyFit(t);
-    }, 150);
+
+    // Full-screen terminal pane follows the visible rect too.
+    if (!termPane.hidden) {
+      if (mobile) {
+        termPane.style.top = vv.offsetTop + "px";
+        termPane.style.height = vv.height + "px";
+        termPane.style.bottom = "auto";
+      } else {
+        termPane.style.top = "";
+        termPane.style.height = "";
+        termPane.style.bottom = "";
+      }
+      clearTimeout(vvFitTimer);
+      vvFitTimer = setTimeout(() => {
+        const t = activeTerm();
+        if (t && !termPane.hidden) applyFit(t);
+      }, 150);
+    }
   };
   vv.addEventListener("resize", onVV);
   vv.addEventListener("scroll", onVV);
