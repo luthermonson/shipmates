@@ -207,9 +207,8 @@ tellForm.onsubmit = async (e) => {
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     tellMessage.value = "";
-    // local echo — instant feedback even if the feed stream is mid-reconnect;
-    // the server-side tell event will follow through the stream
-    appendEvent({ time: nowISO(), persona: persona, type: "tell✓", text: message });
+    // no local echo: the server-side tell event arrives through the stream
+    // within a tick; echoing here would double every line
   } catch (err) {
     appendEvent({ time: nowISO(), persona: "(bridge)", type: "tell-error", text: String(err) });
   }
