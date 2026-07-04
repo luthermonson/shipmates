@@ -74,6 +74,7 @@ function renderLeads(data) {
           selectLead(lead.client_key);
           tellPersona.value = m.persona;
           tellPersona.dataset.autofill = m.persona;
+          updateFeedTitle();
           tellMessage.focus();
         };
         row.appendChild(md);
@@ -84,6 +85,15 @@ function renderLeads(data) {
   }
 }
 
+// updateFeedTitle shows WHO you're addressing, not just which ship you're on:
+// "security @ laptop:lead" when the tell form targets a persona, the bare
+// client key otherwise. Feed content stays ship-wide either way.
+function updateFeedTitle() {
+  if (!selected) { feedTitle.textContent = "select a lead"; return; }
+  const persona = tellPersona.value.trim();
+  feedTitle.textContent = persona ? `${persona} @ ${selected}` : selected;
+}
+
 function selectLead(key) {
   document.body.classList.remove("drawer-open"); // mobile: give the feed full width
   if (selected === key) return;
@@ -91,7 +101,6 @@ function selectLead(key) {
   feedBody.innerHTML = "";
   refreshLeads(); // re-render to update .selected
   const lead = knownLeads.get(key);
-  feedTitle.textContent = key;
   feedMeta.textContent = lead && lead.connected
     ? `online · port ${lead.port}`
     : "offline";
@@ -104,10 +113,14 @@ function selectLead(key) {
     tellPersona.value = defaultPersona;
   }
   tellPersona.dataset.autofill = defaultPersona;
+  updateFeedTitle();
   updateTellEnabled();
   refreshPending(); // switch the pending pane to this lead immediately
   openStream(key);
 }
+
+// retitle live as the operator retargets — chip taps and manual edits alike
+tellPersona.addEventListener("input", updateFeedTitle);
 
 // updateTellEnabled greys out the tell form when the selected lead is offline
 // or unselected. Stops the operator from firing 504s into a dead tunnel.
