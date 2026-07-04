@@ -67,6 +67,7 @@ type Server struct {
 	refs         int           // active /register count
 	lastActivity time.Time     // last register/deregister/event (guarded by s.mu)
 	idleBound    time.Duration // chosen in Run, based on whether a bridge is configured
+	bridged      bool          // wired to a central bridge (changes idle behavior)
 }
 
 // idleTimeoutEphemeral is the lifecycle bound for a server spawned by a
@@ -75,10 +76,12 @@ type Server struct {
 const idleTimeoutEphemeral = 5 * time.Minute
 
 // idleTimeoutBridged is the longer bound used when the lead is wired to a
-// central bridge. A bridged lead is actively being watched (and may be
-// woken at any moment by a `bridge tell`), so the aggressive short bound is
-// the wrong default — but we still want SOME bound so a forgotten lead
-// doesn't run forever.
+// central bridge. A bridged lead does NOT exit on idle — exiting severs the
+// tunnel and leaves nothing on the ship for the bridge to wake. Instead the
+// idle bound reaps the crew processes (the actual resource cost: idle claude
+// processes) while the lead itself — a tiny HTTP server plus a websocket —
+// stays connected. Any tell or PTY start through the bridge spawns fresh
+// crew: the ship never sleeps, only the mates do.
 const idleTimeoutBridged = 1 * time.Hour
 
 // New constructs an empty server.
@@ -188,8 +191,20 @@ func (s *Server) Run(ctx context.Context) error {
 				s.mu.Lock()
 				idle := time.Since(s.lastActivity)
 				bound := s.idleBound
+				bridged := s.bridged
 				s.mu.Unlock()
 				if idle > bound {
+					if bridged {
+						// reap idle crew but keep the ship reachable — the
+						// bridge can wake it with a tell/pty-start any time
+						slog.Info("idle timeout: reaping crew, staying connected", "idle", idle)
+						s.closeLive()
+						s.closePTYs()
+						s.mu.Lock()
+						s.lastActivity = time.Now()
+						s.mu.Unlock()
+						continue
+					}
 					slog.Info("idle timeout reached, shutting down", "idle", idle, "bound", bound)
 					s.stopOnce.Do(func() { close(s.stopCh) })
 					return
@@ -206,6 +221,9 @@ func (s *Server) Run(ctx context.Context) error {
 		s.startBridge(ctx, conf)
 		if conf != nil && strings.TrimSpace(conf.Bridge.URL) != "" {
 			idleBound = idleTimeoutBridged
+			s.mu.Lock()
+			s.bridged = true
+			s.mu.Unlock()
 		}
 	}
 	s.idleBound = idleBound

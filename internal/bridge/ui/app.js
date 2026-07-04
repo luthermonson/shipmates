@@ -552,7 +552,9 @@ async function openTerminal(key, persona) {
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
   } catch (err) {
-    appendEvent({ time: nowISO(), persona: "(bridge)", type: "term-error", text: String(err) });
+    // upstream failures can hand back whole HTML error pages — keep one line
+    const msg = String(err).replace(/\s+/g, " ").slice(0, 200);
+    appendEvent({ time: nowISO(), persona: "(bridge)", type: "term-error", text: msg });
     return;
   }
 
