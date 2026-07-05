@@ -158,19 +158,19 @@ function setTellPersona(p) {
 
 function renderTellOptions() {
   const current = tellPersona.value;
-  const personas = new Set(["all"]);
+  const personas = new Set();
   for (const m of (mateStatus.get(selected) || [])) personas.add(m.persona);
   for (const e of feedEvents) {
     if (e.persona && !e.persona.startsWith("(")) personas.add(e.persona);
   }
   tellPersona.innerHTML = "";
-  for (const p of personas) {
+  for (const p of ["all", ...orderedPersonas(personas)]) {
     const o = document.createElement("option");
     o.value = p;
     o.textContent = p;
     tellPersona.appendChild(o);
   }
-  tellPersona.value = personas.has(current) ? current : "all";
+  tellPersona.value = personas.has(current) || current === "all" ? current : "all";
 }
 
 // dropdown change = conversation switch, mirroring the feed tabs
@@ -267,6 +267,14 @@ function eventMatchesFilter(e) {
   return e.persona === feedFilter;
 }
 
+// Persona display order: "all" first, the ship's lead persona second (it
+// announces itself in the tunnel identity headers), crew alphabetical after.
+function orderedPersonas(personas) {
+  const leadPersona = selected && knownLeads.get(selected) ? knownLeads.get(selected).persona : "";
+  const rest = [...personas].filter((p) => p !== leadPersona).sort();
+  return personas.has(leadPersona) ? [leadPersona, ...rest] : rest;
+}
+
 function renderFeedTabs() {
   feedTabsEl.innerHTML = "";
   if (!selected) return;
@@ -275,7 +283,7 @@ function renderFeedTabs() {
   for (const e of feedEvents) {
     if (e.persona && !e.persona.startsWith("(")) personas.add(e.persona);
   }
-  for (const p of ["all", ...[...personas].sort()]) {
+  for (const p of ["all", ...orderedPersonas(personas)]) {
     const tab = document.createElement("button");
     tab.type = "button";
     tab.className = "feed-tab" + (feedFilter === p ? " active" : "");
