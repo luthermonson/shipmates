@@ -101,6 +101,7 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/resize", b.proxyPTYPost("/pty/%s/resize"))
 	mux.HandleFunc("GET /api/lead/{key}/pty/{persona}/snapshot", b.proxyGet2("/pty/%s/snapshot", "persona"))
 	mux.HandleFunc("GET /api/lead/{key}/bead/{id}", b.proxyGet2("/bead/%s", "id"))
+	mux.HandleFunc("GET /api/beads", b.handleAggregateBeads)
 	mux.HandleFunc("GET /api/lead/{key}/pty/{persona}/stream", b.handlePTYStreamProxy)
 	mux.HandleFunc("GET /api/lead/{key}/stream", b.handleStream)
 	mux.HandleFunc("POST /api/lead/{key}/tell/{persona}", b.handleTell)

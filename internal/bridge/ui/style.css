@@ -497,6 +497,7 @@ section#feed {
 #beads-pane .btitle { min-width: 0; word-break: break-word; }
 #beads-pane .bprio { margin-left: auto; color: var(--muted); flex-shrink: 0; }
 #beads-pane .bead { cursor: pointer; }
+#beads-pane .bships { color: var(--muted); font-size: 0.72rem; flex-shrink: 0; }
 #beads-pane .bead:hover { background: rgba(255,255,255,0.03); }
 #beads-pane .bead-detail {
   padding: 0.6rem 1rem 0.8rem 2.4rem;

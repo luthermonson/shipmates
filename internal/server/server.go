@@ -230,6 +230,8 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.idleBound = idleBound
 
+	go s.beadsSyncLoop(ctx)
+
 	slog.Info("shipmates server listening", "port", port, "pid", os.Getpid())
 	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err

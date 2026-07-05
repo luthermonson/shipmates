@@ -876,21 +876,29 @@ const beadsOpenBtn = $("beads-open");
 
 function closeBeads() {
   beadsPane.hidden = true;
-  feedBody.hidden = false;
-  tellForm.style.display = "";
   beadsOpenBtn.classList.remove("active");
+  if (selected) {
+    feedBody.hidden = false;
+    tellForm.style.display = "";
+  } else {
+    renderLeadPicker(); // back to the fleet overview
+  }
 }
 
 async function openBeads() {
-  if (!selected) return;
   if (!beadsPane.hidden) { closeBeads(); return; }
   beadsPane.innerHTML = '<div class="empty">loading beads…</div>';
   beadsPane.hidden = false;
   feedBody.hidden = true;
+  leadPicker.hidden = true;
   tellForm.style.display = "none"; // no tell target while reading the graph
   beadsOpenBtn.classList.add("active");
   try {
-    const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/beads`);
+    // ship selected → that ship's graph; nothing selected → fleet-wide union
+    const url = selected
+      ? `/api/lead/${encodeURIComponent(selected)}/beads`
+      : "/api/beads";
+    const r = await fetch(url);
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (r.status === 404) {
       beadsPane.innerHTML = '<div class="empty">no beads workspace on this ship</div>';
@@ -912,18 +920,22 @@ function renderBeads(beads) {
   for (const b of beads) {
     const row = document.createElement("div");
     row.className = "bead";
+    // fleet view: show which ships carry the bead (synced graphs dedupe here)
+    const ships = (b.ships || []).map((s) => s.split(":")[0]).join(", ");
     row.innerHTML =
       `<span class="bstatus ${escape(b.status || "open")}">${escape(b.status || "?")}</span>` +
       `<span class="bid">${escape(b.id || "")}</span>` +
       `<span class="btitle">${escape(b.title || "")}</span>` +
-      (b.priority !== undefined ? `<span class="bprio" title="priority">p${escape(String(b.priority))}</span>` : "");
-    row.onclick = () => toggleBeadDetail(row, b.id);
+      (ships && !selected ? `<span class="bships">${escape(ships)}</span>` : "") +
+      (b.priority !== undefined && b.priority !== null ? `<span class="bprio" title="priority">p${escape(String(b.priority))}</span>` : "");
+    const detailKey = selected || (b.ships && b.ships[0]);
+    if (detailKey) row.onclick = () => toggleBeadDetail(row, b.id, detailKey);
     beadsPane.appendChild(row);
   }
 }
 
 // tap a bead to expand its full record (bd show) inline; tap again to fold
-async function toggleBeadDetail(row, id) {
+async function toggleBeadDetail(row, id, leadKey) {
   const existing = row.nextElementSibling;
   if (existing && existing.classList.contains("bead-detail")) {
     existing.remove();
@@ -934,7 +946,7 @@ async function toggleBeadDetail(row, id) {
   detail.textContent = "loading…";
   row.after(detail);
   try {
-    const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/bead/${encodeURIComponent(id)}`);
+    const r = await fetch(`/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}`);
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const arr = await r.json();

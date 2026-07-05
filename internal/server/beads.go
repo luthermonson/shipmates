@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -94,6 +97,59 @@ type beadsTimeoutError struct{}
 func (beadsTimeoutError) Error() string { return "bd command timed out" }
 
 var errBeadsTimeout = beadsTimeoutError{}
+
+// beadsSyncRemote reports whether the workspace has a sync remote configured
+// (a non-comment `sync.remote:` entry in .beads/config.yaml). bd writes this
+// on `bd dolt remote add`; the fleet heartbeat only runs when it's present.
+func beadsSyncRemote() bool {
+	f, err := os.Open(".beads/config.yaml")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "sync.remote:") {
+			v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "sync.remote:")), `"'`)
+			return v != ""
+		}
+	}
+	return false
+}
+
+// beadsSyncInterval is the fleet-graph heartbeat cadence. Dolt merges are
+// cell-level and bead ids are hash-based, so late syncs converge instead of
+// conflicting — the interval is a freshness knob, not a correctness one.
+const beadsSyncInterval = 3 * time.Minute
+
+// beadsSyncLoop pulls then pushes the bead graph on a heartbeat, keeping this
+// ship's slice of the fleet graph converging with the shared remote. Failures
+// log (throttled by the interval itself) and never disturb serving.
+func (s *Server) beadsSyncLoop(ctx context.Context) {
+	if !beadsEnabled() || !beadsSyncRemote() {
+		return
+	}
+	slog.Info("beads sync heartbeat started", "interval", beadsSyncInterval)
+	ticker := time.NewTicker(beadsSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+		}
+		if _, err := runBD("dolt", "pull"); err != nil {
+			slog.Warn("beads pull failed", "err", err)
+			continue
+		}
+		if _, err := runBD("dolt", "push"); err != nil {
+			slog.Warn("beads push failed", "err", err)
+		}
+	}
+}
 
 // beadIDOK guards the show endpoint: bd ids are prefix-hash (proj-c03, with
 // dotted epics like proj-a3f8.1). Reject anything else so a path segment can
