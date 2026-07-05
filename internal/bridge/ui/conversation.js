@@ -135,10 +135,12 @@ async function endUtterance() {
   const text = await transcribe(wav);
   if (!text) { resumeListening(); return; }
   input.value = text;
+  // sendMessage awaits the spoken reply END-to-end (speak resolves when
+  // playback finishes), so resuming here can't overlap the assistant's own
+  // voice. The small delay lets the speaker tail/reverb die before the mic
+  // counts anything as speech again.
   await sendMessage();
-  // if a spoken reply is playing, its 'ended' event resumes listening;
-  // otherwise (tts off / failed / empty reply) resume now
-  if (audioEl.paused || audioEl.ended) resumeListening();
+  setTimeout(resumeListening, 350);
 }
 
 function resumeListening() {
@@ -263,7 +265,7 @@ async function sendMessage() {
     }
     addBubble("assistant", data.reply || "(empty reply)");
     history.push({ role: "assistant", content: data.reply || "" });
-    speak(data.reply || "");
+    await speak(data.reply || "");
   } catch (err) {
     thinking.remove();
     addBubble("assistant", "network error: " + String(err));
@@ -302,6 +304,9 @@ const ttsTest = document.getElementById("tts-test");
 const ttsInfo = document.getElementById("tts-info");
 ttsInfo.textContent = "server-side TTS (Edge neural)";
 
+// speak resolves when playback has FINISHED, not when it starts — the
+// hands-free loop awaits it so the mic can't reopen while the assistant is
+// mid-sentence and transcribe its own voice back as operator input.
 async function speak(text) {
   if (!text) return;
   try {
@@ -317,15 +322,21 @@ async function speak(text) {
     const blob = await r.blob();
     audioEl.src = URL.createObjectURL(blob);
     await audioEl.play();
+    await new Promise((resolve) => {
+      const done = () => {
+        audioEl.removeEventListener("ended", done);
+        audioEl.removeEventListener("error", done);
+        audioEl.removeEventListener("pause", done);
+        resolve();
+      };
+      audioEl.addEventListener("ended", done);
+      audioEl.addEventListener("error", done);
+      audioEl.addEventListener("pause", done); // interrupted counts as done
+    });
   } catch (err) {
     ttsInfo.textContent = "tts: " + String(err);
   }
 }
-
-// conversation mode: the mic stays muted while the reply plays (vadState
-// "busy"); when playback finishes, go back to listening
-audioEl.addEventListener("ended", resumeListening);
-audioEl.addEventListener("error", resumeListening);
 
 // iOS suspends the AudioContext when the tab backgrounds; wake it (and the
 // listening loop) when the operator comes back mid-conversation.
