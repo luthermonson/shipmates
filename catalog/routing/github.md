@@ -15,6 +15,15 @@ This project routes work through GitHub issues and PRs. Follow these conventions
 ### Byline every GitHub message
 
 - Start every comment, issue body, and PR body you write with your byline. All crew commit as the same GitHub user, so the byline is the only way a human can tell which persona is speaking.
+{{end}}{{if .Beads}}
+### Beads ↔ GitHub: two layers, one link
+
+GitHub issues are the **human-facing contract layer**; the beads graph (`bd`) is the **agent coordination layer**. They link through `external_ref`.
+
+- When decomposing a gh issue into work beads, stamp every bead with the issue: `bd create "<title>" --external-ref gh-<n>`. One issue may fan out to many beads; each `gh-<n>` ref traces back to the contract.
+- `--external-ref` also takes a full URL (e.g. a PR: `https://github.com/<owner>/<repo>/pull/<n>`). Use `bd update <id> --external-ref ...` to link after the fact.
+- A bead id is a **context capsule**: when dispatching work to a subagent or crew member, hand them the bead id — they run `bd show <id>` to load the work's context instead of you re-explaining it.
+- Close the loop in both layers: when the PR merges, `bd close <bead-id>` AND the issue closes via `Closes #<n>`. A closed issue with open beads means unfinished decomposed work — flag it.
 {{end}}
 ### One worktree per issue
 

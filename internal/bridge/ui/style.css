@@ -507,6 +507,17 @@ section#feed {
 }
 #beads-pane .bead-detail .bdesc { white-space: pre-wrap; margin-bottom: 0.5rem; }
 #beads-pane .bead-detail .bmeta { color: var(--muted); font-size: 0.75rem; }
+#beads-pane .bref {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--muted);
+  text-decoration: none;
+}
+#beads-pane a.bref { color: var(--accent); border-color: var(--accent); }
+#beads-pane a.bref:hover { background: rgba(255,255,255,0.06); }
 
 /* per-agent conversation tabs under the feed header */
 #feed-tabs {

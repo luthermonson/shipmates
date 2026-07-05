@@ -50,6 +50,7 @@ type Server struct {
 type Lead struct {
 	ClientKey   string    `json:"client_key"`
 	Repo        string    `json:"repo"`
+	RepoURL     string    `json:"repo_url,omitempty"` // browsable origin URL (for gh links)
 	InstallID   string    `json:"install_id"`
 	Persona     string    `json:"persona"`
 	Port        int       `json:"port"` // lead's local server port (for tunnel dial)
@@ -170,6 +171,7 @@ func (b *Server) authorize(req *http.Request) (clientKey string, authed bool, er
 		b.leads[clientKey] = existing
 	}
 	existing.Repo = req.Header.Get("X-Shipmates-Repo")
+	existing.RepoURL = req.Header.Get("X-Shipmates-Repo-URL")
 	existing.InstallID = req.Header.Get("X-Shipmates-Install-ID")
 	existing.Persona = req.Header.Get("X-Shipmates-Persona")
 	existing.Port = port

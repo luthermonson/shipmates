@@ -911,6 +911,28 @@ async function openBeads() {
   }
 }
 
+// externalRefURL resolves a bead's external_ref to a clickable URL. Full URLs
+// pass through; the `gh-<n>` convention resolves against the carrying ship's
+// repo origin (GitHub redirects /issues/<n> to /pull/<n> when it's a PR, so
+// one path shape covers both).
+function externalRefURL(ref, leadKey) {
+  if (!ref) return null;
+  if (/^https?:\/\//.test(ref)) return ref;
+  const m = /^gh-(\d+)$/.exec(ref);
+  if (!m) return null;
+  const lead = knownLeads.get(leadKey);
+  if (!lead || !lead.repo_url) return null;
+  return `${lead.repo_url}/issues/${m[1]}`;
+}
+
+// refLink renders an external_ref as an anchor when resolvable, a plain chip
+// otherwise. Anchor clicks must not toggle the bead detail row.
+function refLink(ref, leadKey) {
+  const url = externalRefURL(ref, leadKey);
+  if (!url) return `<span class="bref">${escape(ref)}</span>`;
+  return `<a class="bref" href="${escape(url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${escape(ref)}</a>`;
+}
+
 function renderBeads(beads) {
   beadsPane.innerHTML = "";
   if (!beads || beads.length === 0) {
@@ -922,13 +944,14 @@ function renderBeads(beads) {
     row.className = "bead";
     // fleet view: show which ships carry the bead (synced graphs dedupe here)
     const ships = (b.ships || []).map((s) => s.split(":")[0]).join(", ");
+    const detailKey = selected || (b.ships && b.ships[0]);
     row.innerHTML =
       `<span class="bstatus ${escape(b.status || "open")}">${escape(b.status || "?")}</span>` +
       `<span class="bid">${escape(b.id || "")}</span>` +
       `<span class="btitle">${escape(b.title || "")}</span>` +
+      (b.external_ref ? refLink(b.external_ref, detailKey) : "") +
       (ships && !selected ? `<span class="bships">${escape(ships)}</span>` : "") +
       (b.priority !== undefined && b.priority !== null ? `<span class="bprio" title="priority">p${escape(String(b.priority))}</span>` : "");
-    const detailKey = selected || (b.ships && b.ships[0]);
     if (detailKey) row.onclick = () => toggleBeadDetail(row, b.id, detailKey);
     beadsPane.appendChild(row);
   }
@@ -955,6 +978,7 @@ async function toggleBeadDetail(row, id, leadKey) {
     const lines = [];
     if (b.description) lines.push(`<div class="bdesc">${escape(b.description)}</div>`);
     const meta = [];
+    if (b.external_ref) meta.push(`ref: ${refLink(b.external_ref, leadKey)}`);
     if (b.issue_type) meta.push(`type: ${escape(b.issue_type)}`);
     if (b.owner) meta.push(`owner: ${escape(b.owner)}`);
     if (b.created_at) meta.push(`created: ${escape(String(b.created_at).slice(0, 16).replace("T", " "))}`);
