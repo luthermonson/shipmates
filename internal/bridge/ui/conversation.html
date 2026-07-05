@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>shipmates bridge — conversation</title>
-<link rel="stylesheet" href="/style.css?v=44">
+<link rel="stylesheet" href="/style.css?v=45">
 <style>
   main { flex-direction: column; }
   #convo {
@@ -30,19 +30,19 @@
   .bubble.thinking  { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); color: var(--muted); font-style: italic; }
   .controls {
     display: flex;
-    gap: 0.5rem;
+    justify-content: center; /* voice-first: one mic, front and center */
     align-items: center;
-    padding: 0.75rem 1rem;
+    padding: 0.85rem 1rem calc(0.85rem + env(safe-area-inset-bottom));
     background: var(--panel);
     border-top: 1px solid var(--border);
   }
   #mic {
-    width: 64px; height: 64px;
+    width: 76px; height: 76px;
     border-radius: 50%;
     background: var(--accent);
     color: var(--bg);
     border: 0;
-    font-size: 1.5rem;
+    font-size: 1.8rem;
     cursor: pointer;
     flex-shrink: 0;
   }
@@ -53,27 +53,7 @@
   #mic:disabled { opacity: 0.4; cursor: not-allowed; }
   @keyframes pulse { 50% { transform: scale(1.06); } }
   @keyframes breathe { 50% { transform: scale(1.03); opacity: 0.85; } }
-  #text-input {
-    flex: 1;
-    background: var(--bg);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.55rem 0.7rem;
-    font-family: var(--mono);
-    font-size: 0.9rem;
-  }
-  #send {
-    background: var(--accent);
-    color: var(--bg);
-    border: 0;
-    border-radius: 4px;
-    padding: 0 1rem;
-    height: 36px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .hint { color: var(--muted); font-size: 0.75rem; padding: 0 1rem 0.5rem; }
+  .hint { color: var(--muted); font-size: 0.75rem; padding: 0 1rem 0.5rem; text-align: center; }
 </style>
 </head>
 <body>
@@ -86,16 +66,14 @@
 </header>
 <main>
   <div id="convo"></div>
-  <div class="hint" id="hint">push the mic to speak, or type a message. replies are spoken aloud.
+  <div class="hint" id="hint">tap the mic and just talk — replies are spoken aloud.
     <button id="tts-test" style="margin-left:0.5rem;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.2rem 0.5rem;font-size:0.75rem;cursor:pointer;">🔊 test voice</button>
     <span id="tts-info" style="color:var(--muted);margin-left:0.5rem;font-size:0.7rem;"></span>
   </div>
   <div class="controls">
-    <button id="mic" title="push to talk">🎤</button>
-    <input id="text-input" placeholder="ask the fleet…" autocomplete="off">
-    <button id="send">send</button>
+    <button id="mic" title="start / end the conversation">🎤</button>
   </div>
 </main>
-<script src="/conversation.js?v=44"></script>
+<script src="/conversation.js?v=45"></script>
 </body>
 </html>

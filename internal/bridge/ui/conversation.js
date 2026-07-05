@@ -9,8 +9,6 @@
 
 const convo = document.getElementById("convo");
 const mic = document.getElementById("mic");
-const input = document.getElementById("text-input");
-const send = document.getElementById("send");
 const hint = document.getElementById("hint");
 
 let history = []; // chat history kept in memory for this session only
@@ -22,11 +20,11 @@ fetch("/api/voice/config").then((r) => r.ok ? r.json() : caps).then((c) => {
   if (!caps.stt) {
     mic.disabled = true;
     mic.title = "bridge started without --stt-url";
-    hint.textContent = "voice input not configured on the bridge (--stt-url) — type your messages.";
+    hint.textContent = "voice input not configured on the bridge (--stt-url).";
   }
   if (!caps.conversation) {
-    hint.textContent = "conversation loop not configured on the bridge (--ollama-url).";
-    send.disabled = true;
+    hint.textContent = "conversation loop not configured on the bridge (--llm-url).";
+    mic.disabled = true;
   }
 }).catch(() => {});
 
@@ -134,12 +132,11 @@ async function endUtterance() {
   const wav = encodeWAV(downsampleTo16k(all, rec ? rec.rate : 48000));
   const text = await transcribe(wav);
   if (!text) { resumeListening(); return; }
-  input.value = text;
   // sendMessage awaits the spoken reply END-to-end (speak resolves when
   // playback finishes), so resuming here can't overlap the assistant's own
   // voice. The small delay lets the speaker tail/reverb die before the mic
   // counts anything as speech again.
-  await sendMessage();
+  await sendMessage(text);
   setTimeout(resumeListening, 350);
 }
 
@@ -228,23 +225,13 @@ mic.onclick = async () => {
   resumeListening();
 };
 
-// Also unlock on send-button / Enter, for the text-input path.
-send.addEventListener("click", unlockTTS);
-input.addEventListener("keydown", (e) => { if (e.key === "Enter") unlockTTS(); });
-
-send.onclick = sendMessage;
-input.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") sendMessage();
-});
-
-async function sendMessage() {
-  const text = input.value.trim();
+async function sendMessage(text) {
+  text = (text || "").trim();
   if (!text) return;
-  input.value = "";
   addBubble("user", text);
   history.push({ role: "user", content: text });
   const thinking = addBubble("thinking", "thinking…");
-  send.disabled = true; mic.disabled = true;
+
   try {
     const r = await fetch("/api/conversation", {
       method: "POST",
@@ -270,8 +257,7 @@ async function sendMessage() {
     thinking.remove();
     addBubble("assistant", "network error: " + String(err));
   } finally {
-    send.disabled = false; mic.disabled = !caps.stt;
-    input.focus();
+    mic.disabled = !caps.stt;
   }
 }
 
