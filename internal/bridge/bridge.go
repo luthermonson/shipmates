@@ -106,6 +106,7 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /api/lead/{key}/bead/{id}", b.proxyGet2("/bead/%s", "id"))
 	mux.HandleFunc("POST /api/lead/{key}/bead", b.proxyPost("/bead"))
 	mux.HandleFunc("POST /api/lead/{key}/bead/{id}/close", b.proxyPost2("/bead/%s/close", "id"))
+	mux.HandleFunc("POST /api/lead/{key}/bead/{id}/assign", b.handleBeadAssign)
 	mux.HandleFunc("GET /api/beads", b.handleAggregateBeads)
 	mux.HandleFunc("POST /api/beads/nudge", b.handleBeadsNudge)
 	mux.HandleFunc("GET /api/lead/{key}/pty/{persona}/stream", b.handlePTYStreamProxy)
@@ -213,11 +214,16 @@ func (b *Server) handleLeads(w http.ResponseWriter, r *http.Request) {
 }
 
 // proxyGet returns a handler that reverse-proxies an inbound GET to the named
-// path on a specific lead's local server, via the remotedialer tunnel.
+// path on a specific lead's local server, via the remotedialer tunnel. The
+// query string rides along (e.g. /beads?all=1 → /beads.json?all=1).
 func (b *Server) proxyGet(leadPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
-		body, status, err := b.proxy(r.Context(), key, "GET", leadPath, nil)
+		path := leadPath
+		if r.URL.RawQuery != "" {
+			path += "?" + r.URL.RawQuery
+		}
+		body, status, err := b.proxy(r.Context(), key, "GET", path, nil)
 		writeProxied(w, status, body, err)
 	}
 }

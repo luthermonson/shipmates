@@ -203,6 +203,17 @@ every ship's `bd` embedded DB pushes/pulls against it.
 Hash-based bead IDs make concurrent multi-ship writes merge-safe (Dolt
 cell-level merge).
 
+**Bead reassignment as cross-ship dispatch (landed):** assigning a bead to
+`persona@ship` from the bridge MOVES the work there. `POST
+/api/lead/{key}/bead/{id}/assign {ship, persona}` runs three tunnel calls in
+sequence: update the assignee on the carrying ship → synchronous
+`/beads/pull?wait=1` on the target ship (the bead must exist locally before
+anyone references it) → `/tell/{persona}` with a dispatch message (`bd show
+<id>`, claim, work, close). The tell path spawns the mate if it's asleep, so
+dispatch also wakes the crew; the mate's first `bd show` lands in the normal
+permission gate. UI: an `assign to… / dispatch` picker in the bead detail,
+built from the fleet-wide roster.
+
 **Schema extensions** beyond stock beads (promote from metadata JSON to columns for
 dashboard query speed): `ship_id`, `verdict_state`, `surface` (file-glob
 scope for decisions/patterns), `session_ref` (Claude session that wrote it).
