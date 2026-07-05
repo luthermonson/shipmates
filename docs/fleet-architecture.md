@@ -149,7 +149,7 @@ every ship's `bd` embedded DB pushes/pulls against it.
 |---|---|
 | `pinned-for-human-<persona>.md` files | `type: pin` beads — `status: blocked`, `assignee: captain`, body = pin markdown |
 | Verdict comments parsed from GitHub | `type: verdict` sub-beads replying to a PR bead |
-| Per-repo issue/PR mental model | bead graph with `external_id: gh:...`, epic → task → implementation hierarchy |
+| Per-repo issue/PR mental model | bead graph linked via bd's native `external_ref` (`gh-<n>` or full URL), epic → task → implementation hierarchy |
 | Rejected patterns buried in memory *.md | `type: pattern, status: rejected` beads, surfaced by `bd prime` on session start |
 | "which ship owns which work" (nowhere) | `ship_id` column on beads |
 
@@ -191,8 +191,18 @@ bead IDs make concurrent multi-ship writes merge-safe (Dolt cell-level merge). R
 nudge: bridge broadcasts "pull now" over the existing tunnel when it sees new pushes.
 
 **Schema extensions** beyond stock beads (promote from metadata JSON to columns for
-dashboard query speed): `ship_id`, `external_id`, `verdict_state`, `surface` (file-glob
+dashboard query speed): `ship_id`, `verdict_state`, `surface` (file-glob
 scope for decisions/patterns), `session_ref` (Claude session that wrote it).
+
+**gh ↔ beads seam (landed):** no custom column needed — bd v1.1.0 already has a
+first-class `external_ref` field (`--external-ref` on create/update, round-trips
+through `list/show --json`). Convention: `gh-<n>` for this repo's issue/PR n, or
+a full URL for anything else. The github routing template gains a beads section
+(rendered only when `.beads/` exists) teaching the crew to stamp decomposed
+beads with the originating issue and to treat bead ids as context capsules for
+dispatch. The lead sends its git-origin browse URL (`X-Shipmates-Repo-URL`) on
+tunnel connect; the bridge UI resolves `gh-<n>` refs against it for clickable
+links (`/issues/<n>` — GitHub redirects to `/pull/<n>` where the ref is a PR).
 
 ## Execution modes — the two mate flavors
 

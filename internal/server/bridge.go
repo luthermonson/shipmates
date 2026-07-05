@@ -48,6 +48,9 @@ func (s *Server) startBridge(ctx context.Context, conf *project.Config) {
 	headers := http.Header{}
 	headers.Set("X-Shipmates-Identity", clientKey)
 	headers.Set("X-Shipmates-Repo", project.RepoName())
+	if u := project.RepoWebURL(); u != "" {
+		headers.Set("X-Shipmates-Repo-URL", u)
+	}
 	headers.Set("X-Shipmates-Install-ID", installID)
 	headers.Set("X-Shipmates-Persona", leadPersona())
 	headers.Set("X-Shipmates-Port", fmt.Sprintf("%d", s.port))
