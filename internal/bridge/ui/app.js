@@ -197,8 +197,7 @@ function selectLead(key) {
   selected = key;
   leadPicker.hidden = true;
   leadPicker.innerHTML = "";
-  beadsPane.hidden = true;
-  feedBody.hidden = false;
+  closeBeads();
   feedBody.innerHTML = "";
   feedEvents = [];
   // picking a ship drops you into its LEAD's conversation — the lead is the
@@ -304,6 +303,7 @@ function renderFeedTabs() {
     tab.className = "feed-tab" + (feedFilter === p ? " active" : "");
     tab.textContent = p;
     tab.onclick = () => {
+      if (!beadsPane.hidden) closeBeads(); // conversation tabs exit beads mode
       feedFilter = p;
       // "all" is a real tell target too — submit fans out to the whole crew
       setTellPersona(p);
@@ -874,12 +874,21 @@ if (window.visualViewport) {
 const beadsPane = $("beads-pane");
 const beadsOpenBtn = $("beads-open");
 
+function closeBeads() {
+  beadsPane.hidden = true;
+  feedBody.hidden = false;
+  tellForm.style.display = "";
+  beadsOpenBtn.classList.remove("active");
+}
+
 async function openBeads() {
   if (!selected) return;
-  if (!beadsPane.hidden) { beadsPane.hidden = true; feedBody.hidden = false; return; }
+  if (!beadsPane.hidden) { closeBeads(); return; }
   beadsPane.innerHTML = '<div class="empty">loading beads…</div>';
   beadsPane.hidden = false;
   feedBody.hidden = true;
+  tellForm.style.display = "none"; // no tell target while reading the graph
+  beadsOpenBtn.classList.add("active");
   try {
     const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/beads`);
     if (r.status === 401) { window.location.href = "/login"; return; }
