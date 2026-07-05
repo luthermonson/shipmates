@@ -8,10 +8,10 @@ import (
 )
 
 func TestSplitPersona(t *testing.T) {
-	raw := []byte("---\nname: bosun\ndescription: keeps the ship in order\n---\n\n# Role\n\nBe helpful.\n")
+	raw := []byte("---\nname: lead\ndescription: keeps the ship in order\n---\n\n# Role\n\nBe helpful.\n")
 	fm, body := splitPersona(raw)
-	if fm.Name != "bosun" {
-		t.Errorf("Name = %q, want bosun", fm.Name)
+	if fm.Name != "lead" {
+		t.Errorf("Name = %q, want lead", fm.Name)
 	}
 	if fm.Description != "keeps the ship in order" {
 		t.Errorf("Description = %q, want %q", fm.Description, "keeps the ship in order")
@@ -71,9 +71,9 @@ func TestCondenseBody(t *testing.T) {
 
 func TestParseFrontmatter(t *testing.T) {
 	s := strings.Join([]string{
-		"name: bosun",
+		"name: lead",
 		`description: "keeps order"`,
-		"byline: 'the deck boss'",
+		"byline: 'the team lead'",
 		"# a comment line",
 		"domainGlob:",
 		"  - \"**/*.go\"",
@@ -81,14 +81,14 @@ func TestParseFrontmatter(t *testing.T) {
 	}, "\n")
 
 	fm := parseFrontmatter(s)
-	if fm.Name != "bosun" {
-		t.Errorf("Name = %q, want bosun", fm.Name)
+	if fm.Name != "lead" {
+		t.Errorf("Name = %q, want lead", fm.Name)
 	}
 	if fm.Description != "keeps order" {
 		t.Errorf("Description = %q, want %q", fm.Description, "keeps order")
 	}
-	if fm.Byline != "the deck boss" {
-		t.Errorf("Byline = %q, want %q", fm.Byline, "the deck boss")
+	if fm.Byline != "the team lead" {
+		t.Errorf("Byline = %q, want %q", fm.Byline, "the team lead")
 	}
 	want := []string{"**/*.go", "cmd/**"}
 	if !reflect.DeepEqual(fm.DomainGlob, want) {
@@ -100,10 +100,10 @@ func TestUpsertMarkedSectionIdempotent(t *testing.T) {
 	t.Chdir(t.TempDir())
 	const path = "AGENTS.md"
 
-	if err := upsertMarkedSection(path, "bosun", "bosun content v1"); err != nil {
+	if err := upsertMarkedSection(path, "lead", "lead content v1"); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
-	if err := upsertMarkedSection(path, "bosun", "bosun content v2"); err != nil {
+	if err := upsertMarkedSection(path, "lead", "lead content v2"); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
 
@@ -113,44 +113,44 @@ func TestUpsertMarkedSectionIdempotent(t *testing.T) {
 	}
 	text := string(b)
 
-	const startMarker = "<!-- shipmates:bosun:start -->"
+	const startMarker = "<!-- shipmates:lead:start -->"
 	if n := strings.Count(text, startMarker); n != 1 {
-		t.Fatalf("bosun start marker count = %d, want exactly 1\n%s", n, text)
+		t.Fatalf("lead start marker count = %d, want exactly 1\n%s", n, text)
 	}
-	if strings.Contains(text, "bosun content v1") {
+	if strings.Contains(text, "lead content v1") {
 		t.Error("old content v1 not replaced")
 	}
-	if !strings.Contains(text, "bosun content v2") {
+	if !strings.Contains(text, "lead content v2") {
 		t.Error("new content v2 missing")
 	}
 
-	if err := upsertMarkedSection(path, "navigator", "navigator content"); err != nil {
-		t.Fatalf("navigator upsert: %v", err)
+	if err := upsertMarkedSection(path, "tester", "tester content"); err != nil {
+		t.Fatalf("tester upsert: %v", err)
 	}
 	b, err = os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text = string(b)
-	if !strings.Contains(text, "bosun content v2") {
-		t.Error("navigator upsert clobbered bosun's block")
+	if !strings.Contains(text, "lead content v2") {
+		t.Error("tester upsert clobbered lead's block")
 	}
-	if !strings.Contains(text, "navigator content") {
-		t.Error("navigator block not appended")
+	if !strings.Contains(text, "tester content") {
+		t.Error("tester block not appended")
 	}
 	if strings.Count(text, startMarker) != 1 {
-		t.Error("bosun marker duplicated after navigator upsert")
+		t.Error("lead marker duplicated after tester upsert")
 	}
 }
 
 func TestRenderAgentsMD(t *testing.T) {
 	fm := frontmatter{
-		Name:        "bosun",
+		Name:        "lead",
 		Description: "keeps order",
 		DomainGlob:  []string{"**/*.go"},
 	}
 	out := renderAgentsMD(fm, "# Role\n\nBe helpful.")
-	if !strings.Contains(out, "## bosun") {
+	if !strings.Contains(out, "## lead") {
 		t.Errorf("renderAgentsMD output missing name heading:\n%s", out)
 	}
 	if !strings.Contains(out, "keeps order") {
