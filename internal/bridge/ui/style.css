@@ -456,6 +456,46 @@ section#feed {
 }
 #term-open:hover { border-color: var(--accent); }
 
+#beads-open {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#beads-open:hover { border-color: var(--accent); }
+
+/* beads work-graph pane */
+#beads-pane { flex: 1; overflow-y: auto; padding: 0.75rem 1rem; }
+#beads-pane .empty { color: var(--muted); font-style: italic; padding: 1rem; }
+#beads-pane .bead {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.5rem 0.4rem;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  font-family: var(--mono);
+  font-size: 0.83rem;
+}
+#beads-pane .bstatus {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: #3a3f45;
+  color: var(--muted);
+}
+#beads-pane .bstatus.open        { background: #1e6f42; color: #fff; }
+#beads-pane .bstatus.in_progress { background: #7a6400; color: #fff; }
+#beads-pane .bstatus.blocked     { background: #b3261e; color: #fff; }
+#beads-pane .bstatus.closed      { background: #1a4f8a; color: #fff; }
+#beads-pane .bid { color: var(--accent); flex-shrink: 0; }
+#beads-pane .btitle { min-width: 0; word-break: break-word; }
+#beads-pane .bprio { margin-left: auto; color: var(--muted); flex-shrink: 0; }
+
 /* per-agent conversation tabs under the feed header */
 #feed-tabs {
   display: flex;

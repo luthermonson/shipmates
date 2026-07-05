@@ -187,6 +187,8 @@ function selectLead(key) {
   selected = key;
   leadPicker.hidden = true;
   leadPicker.innerHTML = "";
+  beadsPane.hidden = true;
+  feedBody.hidden = false;
   feedBody.innerHTML = "";
   feedEvents = [];
   feedFilter = "all";
@@ -848,6 +850,57 @@ if (window.visualViewport) {
   vv.addEventListener("resize", onVV);
   vv.addEventListener("scroll", onVV);
 }
+
+// --- beads pane ---------------------------------------------------------------
+//
+// Read-only view of the selected ship's beads work graph (bd list --json via
+// the tunnel). Toggles over the feed; 404 means the ship has no beads
+// workspace. Refetched on every open — the graph is agent-written, so it
+// changes while you're not looking.
+
+const beadsPane = $("beads-pane");
+const beadsOpenBtn = $("beads-open");
+
+async function openBeads() {
+  if (!selected) return;
+  if (!beadsPane.hidden) { beadsPane.hidden = true; feedBody.hidden = false; return; }
+  beadsPane.innerHTML = '<div class="empty">loading beads…</div>';
+  beadsPane.hidden = false;
+  feedBody.hidden = true;
+  try {
+    const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/beads`);
+    if (r.status === 401) { window.location.href = "/login"; return; }
+    if (r.status === 404) {
+      beadsPane.innerHTML = '<div class="empty">no beads workspace on this ship</div>';
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    renderBeads(await r.json());
+  } catch (err) {
+    beadsPane.innerHTML = `<div class="empty">beads unavailable: ${escape(String(err).slice(0, 120))}</div>`;
+  }
+}
+
+function renderBeads(beads) {
+  beadsPane.innerHTML = "";
+  if (!beads || beads.length === 0) {
+    beadsPane.innerHTML = '<div class="empty">no open beads — the crew has a clean slate</div>';
+    return;
+  }
+  for (const b of beads) {
+    const row = document.createElement("div");
+    row.className = "bead";
+    row.innerHTML =
+      `<span class="bstatus ${escape(b.status || "open")}">${escape(b.status || "?")}</span>` +
+      `<span class="bid">${escape(b.id || "")}</span>` +
+      `<span class="btitle">${escape(b.title || "")}</span>` +
+      (b.priority !== undefined ? `<span class="bprio">p${escape(String(b.priority))}</span>` : "");
+    if (b.description) row.title = b.description;
+    beadsPane.appendChild(row);
+  }
+}
+
+beadsOpenBtn.onclick = openBeads;
 
 termOpenBtn.onclick = async () => {
   if (!selected) return;
