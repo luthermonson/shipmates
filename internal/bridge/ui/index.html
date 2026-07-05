@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>shipmates bridge</title>
+<link rel="stylesheet" href="/style.css?v=43">
+<link rel="stylesheet" href="/vendor/xterm.min.css?v=43">
+</head>
+<body>
+<header>
+  <button id="leads-toggle" type="button" aria-label="toggle leads list">☰</button>
+  <h1>shipmates bridge</h1>
+  <div class="right">
+    <span id="status">connecting…</span>
+    <a href="/conversation.html" id="voice-link" title="voice conversation">🎤</a>
+    <form id="logout-form" method="POST" action="/logout"><button type="submit" class="link">sign out</button></form>
+  </div>
+</header>
+<main>
+  <div id="drawer-backdrop"></div>
+  <aside id="leads">
+    <h2>leads</h2>
+    <ul id="leads-list"><li class="empty">no leads connected</li></ul>
+  </aside>
+  <section id="feed">
+    <div id="feed-header">
+      <h2 id="feed-title">select a lead</h2>
+      <span class="right">
+        <small id="feed-meta"></small>
+        <button id="beads-open" type="button" title="show this ship's beads work graph">⛃ beads</button>
+        <button id="term-open" type="button" title="open a live terminal for the targeted persona">⌨ term</button>
+      </span>
+    </div>
+    <div id="feed-tabs"></div>
+    <div id="lead-picker" hidden></div>
+    <div id="beads-pane" hidden></div>
+    <pre id="feed-body"></pre>
+    <div id="attach-overlay" hidden>
+      <div class="box">
+        <div class="spinner"></div>
+        <div id="attach-msg">waiting…</div>
+        <div class="actions">
+          <button id="attach-now" type="button">attach now</button>
+          <button id="attach-cancel" type="button" class="link">cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="term-pane" hidden>
+      <div id="term-header">
+        <div id="term-tabs"></div>
+        <button id="term-add" class="link" type="button" title="open another mate's terminal">＋</button>
+        <button id="term-close" class="link" type="button">close</button>
+      </div>
+      <div id="term-add-menu" hidden></div>
+      <div id="term-host"></div>
+      <div id="term-scroll">
+        <button id="term-scroll-up" type="button" aria-label="scroll up">▲</button>
+        <button id="term-scroll-down" type="button" aria-label="scroll down">▼</button>
+      </div>
+    </div>
+    <div id="pending-pane" hidden></div>
+    <form id="tell-form" autocomplete="off">
+      <select id="tell-persona" required></select>
+      <input id="tell-message" placeholder="message…" required>
+      <button type="submit">tell</button>
+    </form>
+  </section>
+</main>
+<script src="/vendor/xterm.min.js?v=43"></script>
+<script src="/vendor/addon-fit.min.js?v=43"></script>
+<script src="/app.js?v=43"></script>
+</body>
+</html>

@@ -24,6 +24,7 @@ const (
 	SessionsDirName = "sessions"
 	ManifestName    = "manifest.json"
 	ConfigName      = "shipmates.yaml"
+	InstallIDName   = "install-id"
 	AgentsDir       = ".claude/agents"
 	CommandsDir     = ".claude/commands"
 )
@@ -106,6 +107,32 @@ func RepoName() string {
 	return filepath.Base(wd)
 }
 
+// InstallIDPath is the on-disk location of the per-install stable ID.
+func InstallIDPath() string { return filepath.Join(Dir, InstallIDName) }
+
+// InstallID returns the stable per-install UUID, generating and persisting one
+// on first read. Used to disambiguate multi-clone of the same repo connecting
+// to the same bridge (clientKey = <repo>/<install-id>/<persona>).
+func InstallID() (string, error) {
+	b, err := os.ReadFile(InstallIDPath())
+	if err == nil {
+		id := strings.TrimSpace(string(b))
+		if id != "" {
+			return id, nil
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	id := NewUUID()
+	if err := os.MkdirAll(Dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(InstallIDPath(), []byte(id+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // Config is the subset of shipmates.yaml that the CLI reads.
 type Config struct {
 	// SessionPrefix namespaces per-persona session names. `shipmates init`
@@ -117,7 +144,42 @@ type Config struct {
 	Routing        string                  `yaml:"routing"`
 	RoutingOptions RoutingOptions          `yaml:"routingOptions"`
 	RoutingOnBoot  bool                    `yaml:"routingOnBoot"`
+	Bridge         BridgeConfig            `yaml:"bridge"`
 	Crew           map[string]CrewOverride `yaml:"crew"`
+}
+
+// BridgeConfig points the lead at a central `shipmates bridge serve` instance.
+// When URL is non-empty the lead opens an outbound websocket on boot using
+// rancher/remotedialer; the bridge can then dial back through the tunnel to the
+// lead's existing 127.0.0.1 server.
+//
+// The secret is NEVER stored in shipmates.yaml (it gets committed to git).
+// TokenEnv names an environment variable the lead reads at boot to get the
+// bearer token; default is SHIPMATES_BRIDGE_TOKEN. Set this var in your shell
+// (or systemd unit, launchd plist, etc.) — the config file stays clean.
+//
+// Name overrides the lead's identity on the bridge. Defaults to the repo
+// directory name, so the clientKey is `<repo>:<persona>`. Set this if two
+// clones of the same repo connect to the same bridge and collide (e.g.
+// "card-cannon-dev" vs "card-cannon-scratch").
+type BridgeConfig struct {
+	URL      string `yaml:"url"`
+	TokenEnv string `yaml:"tokenEnv"`
+	Name     string `yaml:"name"`
+}
+
+// DefaultBridgeTokenEnv is the env var the lead reads when BridgeConfig.TokenEnv
+// is empty. Matches the var the bridge server and operator commands also read.
+const DefaultBridgeTokenEnv = "SHIPMATES_BRIDGE_TOKEN"
+
+// Token returns the resolved bearer token, read from the env var named by
+// TokenEnv (or DefaultBridgeTokenEnv when unset). Empty result means "no auth".
+func (b BridgeConfig) Token() string {
+	name := strings.TrimSpace(b.TokenEnv)
+	if name == "" {
+		name = DefaultBridgeTokenEnv
+	}
+	return strings.TrimSpace(os.Getenv(name))
 }
 
 // RoutingOptions toggles parts of the routing block that are private-fleet
@@ -149,6 +211,8 @@ type CrewOverride struct {
 	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
 	Model                      string    `yaml:"model"`
 	Effort                     string    `yaml:"effort"`
+	Backend                    string    `yaml:"backend"`
+	Command                    []string  `yaml:"command"`
 }
 
 // LoadConfig reads shipmates.yaml, returning a zero Config if it's absent.
@@ -195,7 +259,18 @@ type PersonaConfig struct {
 	DangerouslySkipPermissions bool
 	Model                      string // --model value; "" = claude's configured default
 	Effort                     string // --effort value (low|medium|high|xhigh|max); "" = default
+
+	// Backend selects the mate driver: "claude" (default, full integration:
+	// sessions, hooks, tells) or "command" (spawn Command under a PTY — for
+	// foreign agents like opencode/aider). Command-backed mates are PTY-only:
+	// no session resume, no hooks, no headless tells; their status dots derive
+	// from screen activity instead of hook events.
+	Backend string
+	Command []string // argv for backend "command"
 }
+
+// CommandBacked reports whether the persona runs a foreign agent (PTY-only).
+func (c PersonaConfig) CommandBacked() bool { return c.Backend == "command" }
 
 // Fingerprint is a stable hash of the config settings that are baked into a
 // session at creation and can't change on resume — currently model and effort.
@@ -243,6 +318,8 @@ type personaFrontmatter struct {
 	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
 	Model                      string    `yaml:"model"`
 	Effort                     string    `yaml:"effort"`
+	Backend                    string    `yaml:"backend"`
+	Command                    []string  `yaml:"command"`
 	ShipmatesPersona           *bool     `yaml:"shipmatesPersona"`
 }
 
@@ -284,6 +361,8 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 	cfg.Mode = strings.TrimSpace(fm.Permissions.Mode)
 	cfg.Model = strings.TrimSpace(fm.Model)
 	cfg.Effort = strings.TrimSpace(fm.Effort)
+	cfg.Backend = strings.TrimSpace(fm.Backend)
+	cfg.Command = fm.Command
 	rcNode := fm.RemoteControl
 	if fm.DangerouslySkipPermissions != nil {
 		cfg.DangerouslySkipPermissions = *fm.DangerouslySkipPermissions
@@ -302,6 +381,12 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 		}
 		if e := strings.TrimSpace(ov.Effort); e != "" {
 			cfg.Effort = e
+		}
+		if b := strings.TrimSpace(ov.Backend); b != "" {
+			cfg.Backend = b
+		}
+		if len(ov.Command) > 0 {
+			cfg.Command = ov.Command
 		}
 		if ov.RemoteControl.Kind != 0 {
 			rcNode = ov.RemoteControl

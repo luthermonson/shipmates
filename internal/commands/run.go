@@ -47,6 +47,9 @@ func dispatch(ctx context.Context, persona, prompt string, fresh bool) error {
 // callers (drain-many) can capture each persona's output into its own buffer.
 func dispatchTo(ctx context.Context, persona, prompt string, fresh bool, stdout, stderr io.Writer) error {
 	cfg, idArgs, id, name, fp := sessionLaunch(persona, fresh)
+	if cfg.CommandBacked() {
+		return fmt.Errorf("persona %s is PTY-only (backend: command) — it can't take headless dispatch", persona)
+	}
 	args := append([]string{"-p"}, idArgs...)
 	args = append(args, cfg.LaunchFlags(true)...)
 	args = append(args, prompt)
