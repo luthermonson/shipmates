@@ -141,8 +141,8 @@ dispatch work, or needs to approve/deny pending permission requests. If a tool
 returns no matches, say so plainly rather than guessing.
 Lead identifiers look like "<repo>:<persona>" (e.g. "card-cannon:lead").
 If the operator names a lead by repo only, list leads to find the exact key.
-Bead ids are short hashes like "proj-59m" — NEVER guess one. When the operator
-names a bead by title, call list_beads first and match the title to its id.
+Bead ids are opaque short hashes. NEVER type one from memory — ALWAYS call
+list_beads first and use the exact id whose title matches what the operator said.
 `),
 	}
 	return append([]chatMessage{system}, in...)
@@ -245,7 +245,7 @@ func (b *Server) toolCatalog() []any {
 		def("list_beads", "List open beads (the fleet's shared work graph): id, title, status, priority, assignee, and which ships carry each.", objWith(nil)),
 		def("dispatch_bead", "Assign a bead to persona@ship and wake that mate to work it: syncs the graph to the target ship, sets the assignee, and tells the mate to claim it.",
 			objWith(map[string]any{
-				"bead_id":  strProp("the bead id, e.g. 'proj-c03'"),
+				"bead_id":  strProp("the exact bead id as returned by list_beads — do not guess"),
 				"lead_key": strProp("target ship's client_key, e.g. 'homelab:lead'"),
 				"persona":  strProp("target crew persona, e.g. 'backend'"),
 			}, "bead_id", "lead_key", "persona")),
@@ -563,6 +563,13 @@ func (b *Server) toolDispatchBead(ctx context.Context, args map[string]any) stri
 	// pull first so the bead exists locally before the update references it
 	if out, status, err := b.proxy(ctx, key, "POST", "/beads/pull?wait=1", nil); err != nil || status >= 300 {
 		return toolError("target could not sync the graph: " + string(out))
+	}
+	// Verify the id is real BEFORE mutating. Small models guess ids instead
+	// of looking them up; feeding the actual graph back in the error lets the
+	// model self-correct on its next loop iteration instead of hallucinating
+	// an excuse to the operator.
+	if _, status, err := b.proxy(ctx, key, "GET", "/bead/"+url.PathEscape(id), nil); err != nil || status >= 300 {
+		return `{"error":"no bead with id '` + id + `' — pick the EXACT id from open_beads whose title matches","open_beads":` + b.toolListBeads(ctx) + `}`
 	}
 	shipName, _, _ := strings.Cut(key, ":")
 	assignee := persona + "@" + shipName
