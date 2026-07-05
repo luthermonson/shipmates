@@ -178,14 +178,74 @@ func (s *Server) requestBeadsPull() {
 	}
 }
 
-// handleBeadsPull is the bridge's nudge target.
+// handleBeadsPull is the bridge's nudge target. ?wait=1 pulls synchronously
+// before answering — the dispatch path needs "the bead is HERE now" before
+// telling a mate to bd show it, not "a pull is queued".
 func (s *Server) handleBeadsPull(w http.ResponseWriter, r *http.Request) {
 	if !beadsEnabled() || !beadsSyncRemote() {
 		http.Error(w, "no synced beads workspace", http.StatusNotFound)
 		return
 	}
+	if r.URL.Query().Get("wait") == "1" {
+		if _, err := runBD("dolt", "pull"); err != nil {
+			http.Error(w, "bd dolt pull: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		// keep the watcher from announcing our own pull as a local write
+		s.beadsMu.Lock()
+		s.beadsSig = beadsStateSig()
+		s.beadsMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	s.requestBeadsPull()
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// handleBeadUpdate applies the dispatch-relevant field updates to one bead:
+// currently assignee (persona@ship — the fleet dispatch convention) and
+// priority. Values ride flag=value form, same injection rules as create.
+func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
+	if !beadsEnabled() {
+		http.Error(w, "no beads workspace", http.StatusNotFound)
+		return
+	}
+	id := r.PathValue("id")
+	if !beadIDOK(id) {
+		http.Error(w, "bad bead id", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Assignee string `json:"assignee"`
+		Priority string `json:"priority"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	args := []string{"update", id}
+	if a := strings.TrimSpace(body.Assignee); a != "" {
+		args = append(args, "--assignee="+a)
+	}
+	if p := strings.TrimSpace(body.Priority); p != "" {
+		if len(p) != 1 || p[0] < '0' || p[0] > '4' {
+			http.Error(w, "priority must be 0-4", http.StatusBadRequest)
+			return
+		}
+		args = append(args, "--priority="+p)
+	}
+	if len(args) == 2 {
+		http.Error(w, "want {assignee?, priority?}", http.StatusBadRequest)
+		return
+	}
+	out, err := runBD(args...)
+	if err != nil {
+		http.Error(w, "bd update: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	s.addEvent(Event{Persona: "(bridge)", Type: "bead:update", Text: id + " → " + strings.TrimSpace(body.Assignee+" "+body.Priority)})
+	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
+	_, _ = w.Write([]byte(out))
 }
 
 // beadsWatchLoop probes the workspace signature and marks dirty on change.

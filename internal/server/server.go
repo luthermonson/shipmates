@@ -161,6 +161,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /bead/{id}", s.handleBeadShow)
 	mux.HandleFunc("POST /bead", s.handleBeadCreate)
 	mux.HandleFunc("POST /bead/{id}/close", s.handleBeadClose)
+	mux.HandleFunc("POST /bead/{id}/update", s.handleBeadUpdate)
 	mux.HandleFunc("POST /beads/pull", s.handleBeadsPull)
 	mux.HandleFunc("POST /pty/{persona}/start", s.handlePTYStart)
 	mux.HandleFunc("GET /pty/{persona}/stream", s.handlePTYStream)

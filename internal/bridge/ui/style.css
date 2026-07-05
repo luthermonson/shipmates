@@ -618,6 +618,31 @@ section#feed {
   cursor: pointer;
 }
 #beads-pane .bead-create .row button[type="submit"] { border-color: var(--accent); color: var(--accent); }
+#beads-pane .bead-detail .bead-assign {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+  align-items: center;
+}
+#beads-pane .bead-detail .bead-assign select {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 0.3rem 0.5rem;
+  font-size: 16px; /* <16px auto-zooms on iOS */
+  max-width: 14rem;
+}
+#beads-pane .bead-detail .bead-assign button {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: none;
+  color: var(--accent);
+  font-size: 0.78rem;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+}
+#beads-pane .bead-detail .bead-assign button:hover { background: rgba(255,255,255,0.06); }
 #beads-pane .bead-detail .bead-close {
   margin-top: 0.55rem;
   border: 1px solid var(--bad, #b3261e);

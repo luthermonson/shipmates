@@ -1093,6 +1093,7 @@ async function expandBeadDetail(row, id, leadKey) {
     if (b.description) lines.push(`<div class="bdesc">${escape(b.description)}</div>`);
     const meta = [];
     if (b.external_ref) meta.push(`ref: ${refLink(b.external_ref, leadKey)}`);
+    if (b.assignee) meta.push(`assignee: ${escape(b.assignee)}`);
     if (b.issue_type) meta.push(`type: ${escape(b.issue_type)}`);
     if (b.owner) meta.push(`owner: ${escape(b.owner)}`);
     if (b.created_at) meta.push(`created: ${escape(String(b.created_at).slice(0, 16).replace("T", " "))}`);
@@ -1102,6 +1103,7 @@ async function expandBeadDetail(row, id, leadKey) {
     if (b.comment_count) meta.push(`comments: ${escape(String(b.comment_count))}`);
     lines.push(`<div class="bmeta">${meta.join(" · ")}</div>`);
     detail.innerHTML = lines.join("");
+    if (b.status !== "closed") renderBeadAssign(detail, b, id, leadKey);
     if (b.status !== "closed") {
       const closeBtn = document.createElement("button");
       closeBtn.className = "bead-close";
@@ -1130,6 +1132,58 @@ async function expandBeadDetail(row, id, leadKey) {
   } catch (err) {
     detail.textContent = "detail unavailable: " + String(err).slice(0, 120);
   }
+}
+
+// renderBeadAssign mounts the cross-ship dispatch control: a fleet-wide
+// persona@ship picker + dispatch button. Assigning routes through the bridge,
+// which updates the graph, force-pulls the target ship, and TELLS the mate —
+// assignment IS dispatch, not just bookkeeping.
+function renderBeadAssign(detail, b, id, leadKey) {
+  const row = document.createElement("div");
+  row.className = "bead-assign";
+  const sel = document.createElement("select");
+  const ph = document.createElement("option");
+  ph.value = "";
+  ph.textContent = "assign to…";
+  sel.appendChild(ph);
+  for (const [key, mates] of mateStatus) {
+    const lead = knownLeads.get(key);
+    if (!lead || !lead.connected) continue;
+    const ship = key.split(":")[0];
+    for (const m of orderMates(lead, mates)) {
+      const o = document.createElement("option");
+      o.value = JSON.stringify({ ship: key, persona: m.persona });
+      o.textContent = `${m.persona}@${ship}`;
+      if (b.assignee === `${m.persona}@${ship}`) o.textContent += " (current)";
+      sel.appendChild(o);
+    }
+  }
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "dispatch";
+  btn.onclick = async () => {
+    if (!sel.value) return;
+    const target = JSON.parse(sel.value);
+    btn.disabled = true;
+    try {
+      const r = await fetch(
+        `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/assign`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ship: target.ship, persona: target.persona, title: b.title || "" }) }
+      );
+      if (r.status === 401) { window.location.href = "/login"; return; }
+      if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+      appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead:dispatch",
+        text: `${id} → ${target.persona}@${target.ship.split(":")[0]}` });
+      refreshBeads(true);
+    } catch (err) {
+      btn.disabled = false;
+      appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 200) });
+    }
+  };
+  row.appendChild(sel);
+  row.appendChild(btn);
+  detail.appendChild(row);
 }
 
 beadsOpenBtn.onclick = openBeads;
