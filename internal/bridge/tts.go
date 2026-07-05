@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -196,8 +197,8 @@ func randomHex(n int) string {
 // We use POST not GET because long replies can exceed URL length limits, and
 // because TTS is conceptually a synthesis operation, not a fetch.
 func (b *Server) handleTTS(w http.ResponseWriter, r *http.Request) {
-	if b.conv == nil || b.conv.voice == "" {
-		http.Error(w, "tts disabled — bridge serve --tts-voice required", http.StatusServiceUnavailable)
+	if b.conv == nil || (b.conv.voice == "" && b.conv.ttsURL == "") {
+		http.Error(w, "tts disabled — bridge serve --tts-voice or --tts-url required", http.StatusServiceUnavailable)
 		return
 	}
 	var req struct {
@@ -211,13 +212,65 @@ func (b *Server) handleTTS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "empty text", http.StatusBadRequest)
 		return
 	}
-	audio, err := synthesizeEdgeTTS(r.Context(), req.Text, b.conv.voice)
+	var audio []byte
+	ctype := "audio/mpeg"
+	var err error
+	if b.conv.ttsURL != "" {
+		// local/model path: any OpenAI-compatible /v1/audio/speech server
+		// (kokoro-fastapi, speaches, openedai-speech, LocalAI, or OpenAI
+		// itself) — preferred over Edge when configured, since Edge rides an
+		// unofficial endpoint Microsoft occasionally re-keys.
+		audio, ctype, err = b.synthesizeOpenAITTS(r.Context(), req.Text)
+	} else {
+		audio, err = synthesizeEdgeTTS(r.Context(), req.Text, b.conv.voice)
+	}
 	if err != nil {
 		http.Error(w, "tts: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(audio)))
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(audio)
+}
+
+// synthesizeOpenAITTS posts to an OpenAI-compatible speech endpoint and
+// returns the audio bytes plus their content type (servers vary: mp3 or wav —
+// HTML5 <audio> plays both, so pass whatever came back through). Voice and
+// model ride the convConfig (--tts-voice doubles as the voice name for these
+// servers, e.g. kokoro's "af_heart").
+func (b *Server) synthesizeOpenAITTS(ctx context.Context, text string) ([]byte, string, error) {
+	payload := map[string]any{
+		"input":           text,
+		"response_format": "mp3",
+	}
+	if b.conv.ttsModel != "" {
+		payload["model"] = b.conv.ttsModel
+	}
+	if b.conv.voice != "" {
+		payload["voice"] = b.conv.voice
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, "POST", b.conv.ttsURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.conv.client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	audio, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("tts server %d: %s", resp.StatusCode, string(audio[:min(len(audio), 200)]))
+	}
+	ctype := resp.Header.Get("Content-Type")
+	if ctype == "" {
+		ctype = "audio/mpeg"
+	}
+	return audio, ctype, nil
 }

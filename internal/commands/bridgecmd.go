@@ -72,6 +72,8 @@ func bridgeServe() *cli.Command {
 			&cli.StringFlag{Name: "ollama-model", Sources: cli.EnvVars("OLLAMA_MODEL"), Value: "qwen2.5:7b", Usage: "Ollama model tag for the conversation loop"},
 			&cli.BoolFlag{Name: "ollama-cpu", Sources: cli.EnvVars("OLLAMA_CPU"), Usage: "force CPU inference (num_gpu=0) — for hosts whose GPU ollama can't actually run"},
 			&cli.StringFlag{Name: "tts-voice", Sources: cli.EnvVars("TTS_VOICE"), Value: "en-US-AriaNeural", Usage: "Edge TTS voice for /api/tts (e.g. en-US-JennyNeural). Empty disables."},
+			&cli.StringFlag{Name: "tts-url", Sources: cli.EnvVars("TTS_URL"), Usage: "OpenAI-compatible /v1/audio/speech endpoint (kokoro-fastapi, speaches, ...); overrides Edge TTS"},
+			&cli.StringFlag{Name: "tts-model", Sources: cli.EnvVars("TTS_MODEL"), Usage: "model field for OAI-style TTS servers"},
 			&cli.StringFlag{Name: "stt-url", Sources: cli.EnvVars("STT_URL"), Usage: "enable /api/stt: whisper.cpp /inference or an OpenAI-compatible /v1/audio/transcriptions endpoint"},
 			&cli.StringFlag{Name: "stt-model", Sources: cli.EnvVars("STT_MODEL"), Usage: "model field for OAI-style STT servers (whisper.cpp ignores it)"},
 		},
@@ -88,6 +90,8 @@ func bridgeServe() *cli.Command {
 				OllamaModel: c.String("ollama-model"),
 				OllamaCPU:   c.Bool("ollama-cpu"),
 				TTSVoice:    c.String("tts-voice"),
+				TTSURL:      c.String("tts-url"),
+				TTSModel:    c.String("tts-model"),
 				STTURL:      c.String("stt-url"),
 				STTModel:    c.String("stt-model"),
 			})

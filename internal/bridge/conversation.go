@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -139,6 +141,8 @@ dispatch work, or needs to approve/deny pending permission requests. If a tool
 returns no matches, say so plainly rather than guessing.
 Lead identifiers look like "<repo>:<persona>" (e.g. "card-cannon:lead").
 If the operator names a lead by repo only, list leads to find the exact key.
+Bead ids are short hashes like "proj-59m" — NEVER guess one. When the operator
+names a bead by title, call list_beads first and match the title to its id.
 `),
 	}
 	return append([]chatMessage{system}, in...)
@@ -237,6 +241,14 @@ func (b *Server) toolCatalog() []any {
 				"id":       strProp("the pending request id"),
 				"behavior": strProp("'allow' or 'deny'"),
 			}, "lead_key", "id", "behavior")),
+		def("fleet_status", "Per-mate status across every connected ship: blocked (waiting on approval), working, idle, done, or off. Use to find who is free before dispatching work.", objWith(nil)),
+		def("list_beads", "List open beads (the fleet's shared work graph): id, title, status, priority, assignee, and which ships carry each.", objWith(nil)),
+		def("dispatch_bead", "Assign a bead to persona@ship and wake that mate to work it: syncs the graph to the target ship, sets the assignee, and tells the mate to claim it.",
+			objWith(map[string]any{
+				"bead_id":  strProp("the bead id, e.g. 'proj-c03'"),
+				"lead_key": strProp("target ship's client_key, e.g. 'homelab:lead'"),
+				"persona":  strProp("target crew persona, e.g. 'backend'"),
+			}, "bead_id", "lead_key", "persona")),
 	}
 }
 
@@ -258,6 +270,12 @@ func (b *Server) dispatchTool(ctx context.Context, tc toolCall) string {
 		return b.toolPendingApprovals(ctx)
 	case "resolve":
 		return b.toolResolve(ctx, args)
+	case "fleet_status":
+		return b.toolFleetStatus(ctx)
+	case "list_beads":
+		return b.toolListBeads(ctx)
+	case "dispatch_bead":
+		return b.toolDispatchBead(ctx, args)
 	default:
 		return toolError("unknown tool: " + tc.Function.Name)
 	}
@@ -454,4 +472,108 @@ func (b *Server) toolResolve(ctx context.Context, args map[string]any) string {
 	}
 	slog.Info("conversation resolved pending", "lead", key, "id", id, "behavior", behavior)
 	return `{"ok": true}`
+}
+
+// toolFleetStatus fans out to every connected lead's /status.json and returns
+// a flat [{ship, persona, status}] — the same data behind the UI's dots.
+func (b *Server) toolFleetStatus(ctx context.Context) string {
+	type mate struct {
+		Ship    string `json:"ship"`
+		Persona string `json:"persona"`
+		Status  string `json:"status"`
+	}
+	var all []mate
+	for _, key := range b.dialer.ListClients() {
+		body, status, err := b.proxy(ctx, key, "GET", "/status.json", nil)
+		if err != nil || status >= 300 {
+			continue
+		}
+		var raw []struct {
+			Persona string `json:"persona"`
+			Status  string `json:"status"`
+		}
+		if json.Unmarshal(body, &raw) != nil {
+			continue
+		}
+		for _, m := range raw {
+			all = append(all, mate{Ship: key, Persona: m.Persona, Status: m.Status})
+		}
+	}
+	out, _ := json.Marshal(all)
+	return string(out)
+}
+
+// toolListBeads is the fleet bead union, deduped by id (synced graphs would
+// otherwise repeat every bead once per ship).
+func (b *Server) toolListBeads(ctx context.Context) string {
+	type bead struct {
+		ID       string   `json:"id"`
+		Title    string   `json:"title"`
+		Status   string   `json:"status"`
+		Priority *int     `json:"priority,omitempty"`
+		Assignee string   `json:"assignee,omitempty"`
+		Ships    []string `json:"ships"`
+	}
+	merged := map[string]*bead{}
+	for _, key := range b.dialer.ListClients() {
+		body, status, err := b.proxy(ctx, key, "GET", "/beads.json", nil)
+		if err != nil || status >= 300 {
+			continue
+		}
+		var raw []bead
+		if json.Unmarshal(body, &raw) != nil {
+			continue
+		}
+		for i := range raw {
+			if existing, ok := merged[raw[i].ID]; ok {
+				existing.Ships = append(existing.Ships, key)
+				continue
+			}
+			bd := raw[i]
+			bd.Ships = []string{key}
+			merged[bd.ID] = &bd
+		}
+	}
+	out := make([]bead, 0, len(merged))
+	for _, v := range merged {
+		sort.Strings(v.Ships)
+		out = append(out, *v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	raw, _ := json.Marshal(out)
+	return string(raw)
+}
+
+// toolDispatchBead is voice-driven cross-ship dispatch: sync the graph to the
+// target ship, set the assignee there, then wake the mate — the same sequence
+// the UI's dispatch button runs.
+func (b *Server) toolDispatchBead(ctx context.Context, args map[string]any) string {
+	id, _ := args["bead_id"].(string)
+	key, _ := args["lead_key"].(string)
+	persona, _ := args["persona"].(string)
+	if id == "" || key == "" || persona == "" {
+		return toolError("dispatch_bead requires bead_id, lead_key, persona")
+	}
+	if !beadIDOK(id) {
+		return toolError("bad bead id")
+	}
+	if !b.dialer.HasSession(key) {
+		return toolError("ship " + key + " is not connected")
+	}
+	// pull first so the bead exists locally before the update references it
+	if out, status, err := b.proxy(ctx, key, "POST", "/beads/pull?wait=1", nil); err != nil || status >= 300 {
+		return toolError("target could not sync the graph: " + string(out))
+	}
+	shipName, _, _ := strings.Cut(key, ":")
+	assignee := persona + "@" + shipName
+	upd, _ := json.Marshal(map[string]string{"assignee": assignee})
+	if out, status, err := b.proxy(ctx, key, "POST", "/bead/"+url.PathEscape(id)+"/update", upd); err != nil || status >= 300 {
+		return toolError("assignee update failed: " + string(out))
+	}
+	if err := b.deliverDispatch(ctx, queuedDispatch{Ship: key, Persona: persona, Bead: id}, false); err != nil {
+		return toolError("wake-up tell failed: " + err.Error())
+	}
+	slog.Info("conversation dispatched bead", "bead", id, "assignee", assignee)
+	raw, _ := json.Marshal(map[string]string{"ok": "true", "assignee": assignee})
+	return string(raw)
 }
