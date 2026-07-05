@@ -220,10 +220,19 @@ func renderRoutingBlock(cat *catalog.Catalog) ([]byte, error) {
 	}
 	bylines, labels := conf.RoutingOptions.Resolved()
 	var rendered bytes.Buffer
-	if err := tmpl.Execute(&rendered, struct{ Bylines, Labels bool }{bylines, labels}); err != nil {
+	if err := tmpl.Execute(&rendered, struct{ Bylines, Labels, Beads bool }{bylines, labels, beadsWorkspace()}); err != nil {
 		return nil, fmt.Errorf("render routing template %s: %w", conf.Routing, err)
 	}
 	return collapseBlankLines(rendered.Bytes()), nil
+}
+
+// beadsWorkspace reports whether the project is beads-enabled (.beads/ in the
+// project root). Routing templates use it to include the gh ↔ beads seam
+// conventions only where a graph actually exists. Re-run `shipmates update`
+// (or `routing apply`) after `bd init` to recompose personas with the section.
+func beadsWorkspace() bool {
+	st, err := os.Stat(".beads")
+	return err == nil && st.IsDir()
 }
 
 // collapseBlankLines squeezes runs of 3+ newlines down to 2, cleaning up the

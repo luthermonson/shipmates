@@ -118,7 +118,7 @@ func TestResolvePersonaConfigMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolvePersonaConfig missing persona: %v", err)
 	}
-	if cfg != (PersonaConfig{}) {
+	if !reflect.DeepEqual(cfg, PersonaConfig{}) {
 		t.Fatalf("missing persona = %+v, want zero PersonaConfig", cfg)
 	}
 }

@@ -50,7 +50,9 @@ func main() {
 			commands.Drain(cat),
 			commands.DrainMany(cat),
 			commands.Autonomous(cat),
+			commands.Bridge(),
 			commands.Server(),
+			commands.Ship(),
 		},
 	}
 

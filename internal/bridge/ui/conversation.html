@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>shipmates bridge — conversation</title>
+<link rel="stylesheet" href="/style.css?v=43">
+<style>
+  main { flex-direction: column; }
+  #convo {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .bubble {
+    max-width: 80%;
+    padding: 0.55rem 0.8rem;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .bubble.user      { align-self: flex-end; background: var(--accent); color: var(--bg); }
+  .bubble.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .bubble.tool      { align-self: flex-start; background: rgba(63,185,80,0.10); border: 1px dashed var(--good); color: var(--muted); font-family: var(--mono); font-size: 0.78rem; }
+  .bubble.thinking  { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); color: var(--muted); font-style: italic; }
+  .controls {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+  }
+  #mic {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--bg);
+    border: 0;
+    font-size: 1.5rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  /* conversation ON, waiting for speech: green with a slow breathe */
+  #mic.live { background: var(--good, #3fb950); animation: breathe 2.4s infinite; }
+  /* actively capturing an utterance: red with the fast pulse */
+  #mic.recording, #mic.live.recording { background: var(--bad); animation: pulse 1s infinite; }
+  #mic:disabled { opacity: 0.4; cursor: not-allowed; }
+  @keyframes pulse { 50% { transform: scale(1.06); } }
+  @keyframes breathe { 50% { transform: scale(1.03); opacity: 0.85; } }
+  #text-input {
+    flex: 1;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.55rem 0.7rem;
+    font-family: var(--mono);
+    font-size: 0.9rem;
+  }
+  #send {
+    background: var(--accent);
+    color: var(--bg);
+    border: 0;
+    border-radius: 4px;
+    padding: 0 1rem;
+    height: 36px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .hint { color: var(--muted); font-size: 0.75rem; padding: 0 1rem 0.5rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>shipmates bridge — conversation</h1>
+  <div class="right">
+    <a href="/" style="color: var(--muted); text-decoration: none; font-size: 0.85rem;">← dashboard</a>
+    <form id="logout-form" method="POST" action="/logout"><button type="submit" class="link">sign out</button></form>
+  </div>
+</header>
+<main>
+  <div id="convo"></div>
+  <div class="hint" id="hint">push the mic to speak, or type a message. replies are spoken aloud.
+    <button id="tts-test" style="margin-left:0.5rem;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.2rem 0.5rem;font-size:0.75rem;cursor:pointer;">🔊 test voice</button>
+    <span id="tts-info" style="color:var(--muted);margin-left:0.5rem;font-size:0.7rem;"></span>
+  </div>
+  <div class="controls">
+    <button id="mic" title="push to talk">🎤</button>
+    <input id="text-input" placeholder="ask the fleet…" autocomplete="off">
+    <button id="send">send</button>
+  </div>
+</main>
+<script src="/conversation.js?v=43"></script>
+</body>
+</html>
