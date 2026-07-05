@@ -39,7 +39,12 @@ type ptyProc struct {
 	// client id to type claims it; other viewers' input (and resizes — the
 	// owner's geometry wins) get 409 until an explicit takeover. Empty client
 	// ids bypass the lock (server-internal writes: tells typed into the PTY).
-	writer string
+	// The claim is a LEASE: writerAt refreshes on every keystroke, and a
+	// holder idle past writerLease can be claimed straight over — client ids
+	// are per-page-load, so a refresh or discarded iOS tab would otherwise
+	// hold every keyboard it ever typed into forever.
+	writer   string
+	writerAt time.Time
 
 	// modes latches DEC private mode state (CSI ? Pm h/l) seen in the output
 	// stream — alt-screen 1049, alternate-scroll 1007, bracketed paste 2004,
@@ -339,19 +344,26 @@ func (s *Server) handlePTYSnapshot(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(snap)
 }
 
+// writerLease is how long a writer's claim survives without a keystroke.
+// Long enough that pausing to read doesn't lose the keyboard mid-session,
+// short enough that a dead page's stale claim self-heals.
+const writerLease = 2 * time.Minute
+
 // claimWriter enforces the single-writer lock for a client id. An empty id
-// bypasses (internal writes); an unclaimed lock is claimed by the first
-// typing client; a mismatched id is rejected.
+// bypasses (internal writes); an unclaimed or lease-expired lock is claimed
+// by the typing client; a live mismatched holder rejects.
 func (p *ptyProc) claimWriter(client string) bool {
 	if client == "" {
 		return true
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.writer == "" {
+	if p.writer == "" || p.writer == client || time.Since(p.writerAt) > writerLease {
 		p.writer = client
+		p.writerAt = time.Now()
+		return true
 	}
-	return p.writer == client
+	return false
 }
 
 // handlePTYInput writes the request body to the mate's PTY as keystrokes.
@@ -399,6 +411,7 @@ func (s *Server) handlePTYTakeover(w http.ResponseWriter, r *http.Request) {
 	}
 	p.mu.Lock()
 	p.writer = client
+	p.writerAt = time.Now()
 	p.mu.Unlock()
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -448,7 +461,8 @@ func (s *Server) handlePTYResize(w http.ResponseWriter, r *http.Request) {
 	}
 	client := r.URL.Query().Get("client")
 	p.mu.Lock()
-	locked := p.writer != "" && client != "" && p.writer != client
+	locked := p.writer != "" && client != "" && p.writer != client &&
+		time.Since(p.writerAt) <= writerLease
 	p.mu.Unlock()
 	if locked {
 		http.Error(w, "another viewer holds the keyboard", http.StatusConflict)

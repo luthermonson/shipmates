@@ -731,9 +731,24 @@ function applyFit(t) {
 // silently eating input.
 function termInput(t, data) {
   fetch(`${t.base}/input?client=${t.client}`, { method: "POST", body: data })
-    .then((r) => { if (r.status === 409) showTermLock(t); })
+    .then((r) => {
+      if (r.status === 409) showTermLock(t);
+      // lease expiry or a release means we hold the keyboard again
+      else if (r.ok && t.lockBar) t.lockBar.hidden = true;
+    })
     .catch(() => {});
 }
+
+// A refresh or closed page never runs closeTerm, so hand back every held
+// keyboard on the way out (sendBeacon survives page teardown; the session
+// cookie rides along). Without this, the NEXT page load's fresh client ids
+// find all their own old locks held and every terminal shows the take-over
+// bar until the lease expires.
+window.addEventListener("pagehide", () => {
+  for (const t of terms.values()) {
+    try { navigator.sendBeacon(`${t.base}/release?client=${t.client}`); } catch { /* best effort */ }
+  }
+});
 
 function showTermLock(t) {
   if (t.lockBar) { t.lockBar.hidden = false; return; }
