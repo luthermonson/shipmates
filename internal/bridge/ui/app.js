@@ -322,18 +322,43 @@ function renderFeed() {
   }
 }
 
+// appendEventDOM renders one event with type-aware structure — the headless
+// timeline. Thinking and tool results render collapsed (tap to expand); tool
+// hooks render as compact chips; results carry their cost/duration stats
+// (already folded into the text server-side) plus the model as a suffix.
 function appendEventDOM(e) {
+  const t = e.type || "?";
   const div = document.createElement("span");
-  div.className = "ev"
-    + (e.type && e.type.startsWith("permission") ? " permission" : "")
-    + (e.type === "result" ? " result" : "");
-  div.innerHTML =
+  const head =
     `<span class="ts">[${escape(e.time || "")}]</span> ` +
-    `<span class="who">${escape(e.persona || "?")}</span>/` +
-    `<span class="kind">${escape(e.type || "?")}</span>: ` +
-    `${escape(e.text || "")}\n`;
+    `<span class="who">${escape(e.persona || "?")}</span>`;
+
+  if (t === "thinking" || t === "tool-result") {
+    div.className = `ev ${t} collapsible`;
+    div.innerHTML = `${head}/<span class="kind">${escape(t)}</span>: ${escape(e.text || "")}\n`;
+    div.onclick = () => div.classList.toggle("expanded");
+  } else if (t.startsWith("hook:")) {
+    div.className = "ev hook";
+    const mark = t === "hook:PreToolUse" ? "⚒" : "✓";
+    div.innerHTML =
+      `${head} <span class="toolchip">${mark} ${escape(e.tool || e.text || "")}</span>` +
+      (e.input ? ` <span class="toolinput">${escape(String(e.input).slice(0, 140))}</span>` : "") + "\n";
+  } else {
+    div.className = "ev"
+      + (t.startsWith("permission") ? " permission" : "")
+      + (t === "result" ? " result" : "");
+    div.innerHTML =
+      `${head}/<span class="kind">${escape(t)}</span>: ${escape(e.text || "")}` +
+      (t === "result" && e.model ? ` <span class="model">${escape(shortModel(e.model))}</span>` : "") +
+      "\n";
+  }
   feedBody.appendChild(div);
   feedBody.scrollTop = feedBody.scrollHeight;
+}
+
+// shortModel compresses model ids for the badge: claude-opus-4-7 → opus-4-7.
+function shortModel(m) {
+  return String(m).replace(/^claude-/, "").replace(/-\d{8}$/, "");
 }
 
 function appendEvent(e) {

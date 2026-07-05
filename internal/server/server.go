@@ -20,19 +20,24 @@ import (
 	"time"
 
 	"github.com/luthermonson/shipmates/internal/project"
+	"github.com/luthermonson/shipmates/internal/streamjson"
 )
 
 // Event is one line in the activity feed. Tool, Input, and ID are populated
 // only for permission events so the UI can render allow/deny actions without
-// parsing the free-form Text.
+// parsing the free-form Text. Cost/Duration/Model are populated on "result"
+// events (the headless-timeline stats claude reports per turn).
 type Event struct {
-	Time    string `json:"time"`
-	Persona string `json:"persona"`
-	Type    string `json:"type"`
-	Text    string `json:"text"`
-	Tool    string `json:"tool,omitempty"`
-	Input   string `json:"input,omitempty"` // e.g. the Bash command, the path being written
-	ID      string `json:"id,omitempty"`
+	Time       string  `json:"time"`
+	Persona    string  `json:"persona"`
+	Type       string  `json:"type"`
+	Text       string  `json:"text"`
+	Tool       string  `json:"tool,omitempty"`
+	Input      string  `json:"input,omitempty"` // e.g. the Bash command, the path being written
+	ID         string  `json:"id,omitempty"`
+	CostUSD    float64 `json:"cost_usd,omitempty"`
+	DurationMS int64   `json:"duration_ms,omitempty"`
+	Model      string  `json:"model,omitempty"`
 }
 
 // liveProc is a persistent crew process the server can talk to mid-work.
@@ -626,23 +631,42 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 	return lp, nil
 }
 
-// pump reads a crew process's stream-json output and tees text into the feed.
-// When the read loop ends (process exited / stdout EOF) it decrements the
-// server-driven ref-count, the counterpart of the increment in ensureLive.
+// pump reads a crew process's stream-json output and tees it into the feed as
+// timeline events: assistant text, thinking (truncated), tool results
+// (truncated), and per-turn result stats (cost/duration/model). tool_use
+// items are deliberately dropped — the PreToolUse hook already records every
+// call (it IS the permission gate), so emitting both would double every tool
+// line. When the read loop ends (process exited / stdout EOF) it decrements
+// the server-driven ref-count, the counterpart of the increment in ensureLive.
 func (s *Server) pump(persona string, stdout io.Reader) {
 	dec := json.NewDecoder(stdout)
+	model := ""
 	for {
 		var obj map[string]any
 		if err := dec.Decode(&obj); err != nil {
 			break
 		}
-		switch obj["type"] {
-		case "assistant":
-			if t := assistantText(obj); t != "" {
-				s.addEvent(Event{Persona: persona, Type: "assistant", Text: t})
+		for _, it := range streamjson.Decode(obj) {
+			if it.Model != "" {
+				model = it.Model
 			}
-		case "result":
-			s.addEvent(Event{Persona: persona, Type: "result", Text: "(turn complete)"})
+			switch it.Kind {
+			case "text":
+				s.addEvent(Event{Persona: persona, Type: "assistant", Text: it.Text})
+			case "thinking":
+				s.addEvent(Event{Persona: persona, Type: "thinking", Text: it.Text})
+			case "tool_result":
+				s.addEvent(Event{Persona: persona, Type: "tool-result", Text: it.Text})
+			case "result":
+				text := "(turn complete)"
+				if sum := it.Summary(); sum != "" {
+					text = "(turn complete — " + sum + ")"
+				}
+				s.addEvent(Event{
+					Persona: persona, Type: "result", Text: text,
+					CostUSD: it.CostUSD, DurationMS: it.DurationMS, Model: model,
+				})
+			}
 		}
 	}
 
@@ -657,30 +681,6 @@ func (s *Server) pump(persona string, stdout io.Reader) {
 	s.lastSeen[persona] = time.Now()
 	s.mu.Unlock()
 	slog.Info("live crew process ended", "persona", persona, "refs", refs)
-}
-
-func assistantText(obj map[string]any) string {
-	m, ok := obj["message"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	content, ok := m["content"].([]any)
-	if !ok {
-		return ""
-	}
-	var b strings.Builder
-	for _, c := range content {
-		cm, ok := c.(map[string]any)
-		if !ok {
-			continue
-		}
-		if cm["type"] == "text" {
-			if t, ok := cm["text"].(string); ok {
-				b.WriteString(t)
-			}
-		}
-	}
-	return b.String()
 }
 
 func (s *Server) closeLive() {

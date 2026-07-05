@@ -745,6 +745,37 @@ section#feed {
 #feed-body .ev.result .who,
 #feed-body .ev.result .kind { color: var(--muted); opacity: 0.55; font-size: 0.9em; }
 
+/* headless timeline — type-aware event rendering */
+#feed-body .ev.collapsible {
+  overflow: hidden;
+  max-height: 3.4em; /* ~2 lines + head; tap to expand */
+  cursor: pointer;
+  position: relative;
+}
+#feed-body .ev.collapsible.expanded { max-height: none; }
+#feed-body .ev.thinking { color: var(--muted); font-style: italic; opacity: 0.75; }
+#feed-body .ev.thinking .kind { color: var(--muted); }
+#feed-body .ev.tool-result { color: var(--muted); opacity: 0.8; font-size: 0.92em; }
+#feed-body .ev.tool-result .kind { color: var(--muted); }
+#feed-body .ev.hook { opacity: 0.85; }
+#feed-body .toolchip {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.04);
+  padding: 0 0.5rem;
+  font-size: 0.82em;
+  color: var(--text);
+}
+#feed-body .toolinput { color: var(--muted); font-size: 0.88em; }
+#feed-body .model {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 0.45rem;
+  font-size: 0.78em;
+  color: var(--muted);
+}
+
 #tell-form {
   display: flex;
   gap: 0.5rem;
