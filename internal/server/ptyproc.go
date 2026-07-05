@@ -35,6 +35,12 @@ type ptyProc struct {
 	nextSub int
 	closed  bool
 
+	// writer is the single-writer lock for multi-viewer terminals: the first
+	// client id to type claims it; other viewers' input (and resizes — the
+	// owner's geometry wins) get 409 until an explicit takeover. Empty client
+	// ids bypass the lock (server-internal writes: tells typed into the PTY).
+	writer string
+
 	// modes latches DEC private mode state (CSI ? Pm h/l) seen in the output
 	// stream — alt-screen 1049, alternate-scroll 1007, bracketed paste 2004,
 	// mouse tracking, cursor visibility, etc. The TUI sets these once at
@@ -333,7 +339,24 @@ func (s *Server) handlePTYSnapshot(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(snap)
 }
 
+// claimWriter enforces the single-writer lock for a client id. An empty id
+// bypasses (internal writes); an unclaimed lock is claimed by the first
+// typing client; a mismatched id is rejected.
+func (p *ptyProc) claimWriter(client string) bool {
+	if client == "" {
+		return true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.writer == "" {
+		p.writer = client
+	}
+	return p.writer == client
+}
+
 // handlePTYInput writes the request body to the mate's PTY as keystrokes.
+// Multi-viewer safety: only the current writer's keystrokes pass; others get
+// 409 and must POST /takeover to steal the lock.
 func (s *Server) handlePTYInput(w http.ResponseWriter, r *http.Request) {
 	persona := r.PathValue("persona")
 	s.mu.Lock()
@@ -341,6 +364,10 @@ func (s *Server) handlePTYInput(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if p == nil {
 		http.Error(w, "no pty mate", http.StatusNotFound)
+		return
+	}
+	if !p.claimWriter(r.URL.Query().Get("client")) {
+		http.Error(w, "another viewer holds the keyboard", http.StatusConflict)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
@@ -355,7 +382,53 @@ func (s *Server) handlePTYInput(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// handlePTYResize resizes the mate's terminal.
+// handlePTYTakeover transfers the writer lock to the requesting client.
+func (s *Server) handlePTYTakeover(w http.ResponseWriter, r *http.Request) {
+	persona := r.PathValue("persona")
+	client := r.URL.Query().Get("client")
+	if client == "" {
+		http.Error(w, "want ?client=<id>", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	p := s.ptys[persona]
+	s.mu.Unlock()
+	if p == nil {
+		http.Error(w, "no pty mate", http.StatusNotFound)
+		return
+	}
+	p.mu.Lock()
+	p.writer = client
+	p.mu.Unlock()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// handlePTYRelease drops the writer lock if the caller holds it — sent
+// best-effort when a viewer closes its terminal tab, so the next typist
+// claims cleanly instead of needing a takeover.
+func (s *Server) handlePTYRelease(w http.ResponseWriter, r *http.Request) {
+	persona := r.PathValue("persona")
+	client := r.URL.Query().Get("client")
+	s.mu.Lock()
+	p := s.ptys[persona]
+	s.mu.Unlock()
+	if p == nil {
+		http.Error(w, "no pty mate", http.StatusNotFound)
+		return
+	}
+	p.mu.Lock()
+	if client != "" && p.writer == client {
+		p.writer = ""
+	}
+	p.mu.Unlock()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// handlePTYResize resizes the mate's terminal. Owner-wins: while a writer
+// holds the keyboard, other viewers' fit-resizes are rejected (409) so the
+// typist's geometry is stable and read-only tabs reflow to it instead.
+// Resizing never CLAIMS the lock — every viewer auto-fits on attach, and a
+// look shouldn't steal the keyboard.
 func (s *Server) handlePTYResize(w http.ResponseWriter, r *http.Request) {
 	persona := r.PathValue("persona")
 	var body struct {
@@ -371,6 +444,14 @@ func (s *Server) handlePTYResize(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if p == nil {
 		http.Error(w, "no pty mate", http.StatusNotFound)
+		return
+	}
+	client := r.URL.Query().Get("client")
+	p.mu.Lock()
+	locked := p.writer != "" && client != "" && p.writer != client
+	p.mu.Unlock()
+	if locked {
+		http.Error(w, "another viewer holds the keyboard", http.StatusConflict)
 		return
 	}
 	if err := p.pt.Resize(body.Cols, body.Rows); err != nil {

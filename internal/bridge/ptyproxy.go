@@ -39,13 +39,40 @@ func (b *Server) leadTransport(clientKey string) (http.RoundTripper, error) {
 	}, nil
 }
 
-// proxyPTYPost forwards a small POST (start/input/resize) to the lead.
+// proxyPTYPost forwards a small POST (start/input/resize/takeover/release)
+// to the lead. The query string rides along — it carries the viewer's writer-
+// lock client id.
 func (b *Server) proxyPTYPost(leadPathFmt string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
 		persona := r.PathValue("persona")
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-		out, status, err := b.proxy(r.Context(), key, "POST", fmt.Sprintf(leadPathFmt, persona), body)
+		path := fmt.Sprintf(leadPathFmt, persona)
+		if r.URL.RawQuery != "" {
+			path += "?" + r.URL.RawQuery
+		}
+		out, status, err := b.proxy(r.Context(), key, "POST", path, body)
+		writeProxied(w, status, out, err)
+	}
+}
+
+// proxyPost forwards a small POST to a fixed path on the lead.
+func (b *Server) proxyPost(leadPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := r.PathValue("key")
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		out, status, err := b.proxy(r.Context(), key, "POST", leadPath, body)
+		writeProxied(w, status, out, err)
+	}
+}
+
+// proxyPost2 is proxyPost with one extra path parameter interpolated.
+func (b *Server) proxyPost2(leadPathFmt, param string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := r.PathValue("key")
+		val := r.PathValue(param)
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		out, status, err := b.proxy(r.Context(), key, "POST", fmt.Sprintf(leadPathFmt, val), body)
 		writeProxied(w, status, out, err)
 	}
 }

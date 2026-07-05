@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -185,6 +186,86 @@ func (s *Server) handleBeadShow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(out))
+}
+
+// handleBeadCreate creates a bead from the bridge: `bd create --json` with
+// the fields the UI's quick form offers. Values ride flag=value form so a
+// leading dash in user text can never be parsed as a flag.
+func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
+	if !beadsEnabled() {
+		http.Error(w, "no beads workspace", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    string `json:"priority"`
+		Type        string `json:"type"`
+		ExternalRef string `json:"external_ref"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Title) == "" {
+		http.Error(w, "want {title, description?, priority?, type?, external_ref?}", http.StatusBadRequest)
+		return
+	}
+	args := []string{"create", "--json", "--title=" + strings.TrimSpace(body.Title)}
+	if d := strings.TrimSpace(body.Description); d != "" {
+		args = append(args, "--description="+d)
+	}
+	if p := strings.TrimSpace(body.Priority); p != "" {
+		if len(p) != 1 || p[0] < '0' || p[0] > '4' {
+			http.Error(w, "priority must be 0-4", http.StatusBadRequest)
+			return
+		}
+		args = append(args, "--priority="+p)
+	}
+	if t := strings.TrimSpace(body.Type); t != "" {
+		switch t {
+		case "bug", "feature", "task", "epic", "chore", "decision":
+			args = append(args, "--type="+t)
+		default:
+			http.Error(w, "unknown issue type", http.StatusBadRequest)
+			return
+		}
+	}
+	if ref := strings.TrimSpace(body.ExternalRef); ref != "" {
+		args = append(args, "--external-ref="+ref)
+	}
+	out, err := runBD(args...)
+	if err != nil {
+		http.Error(w, "bd create: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	s.addEvent(Event{Persona: "(bridge)", Type: "bead:create", Text: strings.TrimSpace(body.Title)})
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(out))
+}
+
+// handleBeadClose closes one bead: `bd close <id> [--reason=...]`.
+func (s *Server) handleBeadClose(w http.ResponseWriter, r *http.Request) {
+	if !beadsEnabled() {
+		http.Error(w, "no beads workspace", http.StatusNotFound)
+		return
+	}
+	id := r.PathValue("id")
+	if !beadIDOK(id) {
+		http.Error(w, "bad bead id", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	args := []string{"close", id}
+	if reason := strings.TrimSpace(body.Reason); reason != "" {
+		args = append(args, "--reason="+reason)
+	}
+	out, err := runBD(args...)
+	if err != nil {
+		http.Error(w, "bd close: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	s.addEvent(Event{Persona: "(bridge)", Type: "bead:close", Text: id})
 	_, _ = w.Write([]byte(out))
 }
 
