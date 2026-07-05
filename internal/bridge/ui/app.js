@@ -1174,8 +1174,9 @@ async function expandBeadDetail(row, id, leadKey) {
       renderBeadClose(detail, id, leadKey); // red ✕, absolute top-right of the card
       const actions = document.createElement("div");
       actions.className = "bead-actions";
-      renderBeadEdit(actions, b, id, leadKey, detail); // ✎ leads the line
-      renderBeadAssign(actions, b, id, leadKey);       // [assign][priority][dispatch]
+      // one row that wraps as a unit: [✎][assign to…][priority][dispatch]
+      const grp = renderBeadAssign(actions, b, id, leadKey);
+      renderBeadEdit(grp, b, id, leadKey, detail);
       detail.appendChild(actions);
     }
   } catch (err) {
@@ -1290,7 +1291,7 @@ function renderBeadEdit(container, b, id, leadKey, detail) {
     detail.appendChild(form);
     form.elements.title.focus();
   };
-  container.appendChild(btn);
+  container.prepend(btn); // ✎ opens the row, before the assign select
 }
 
 // renderBeadAssign mounts the cross-ship dispatch control: a fleet-wide
@@ -1347,6 +1348,7 @@ function renderBeadAssign(actions, b, id, leadKey) {
   row.appendChild(buildBeadPriority(b, id, leadKey)); // priority sits before the verb
   row.appendChild(btn);
   actions.appendChild(row);
+  return row;
 }
 
 beadsOpenBtn.onclick = openBeads;
