@@ -1,6 +1,9 @@
 package server
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestWriterLock(t *testing.T) {
 	p := &ptyProc{subs: map[int]chan []byte{}, modes: map[int]bool{}}
@@ -39,5 +42,25 @@ func TestWriterLock(t *testing.T) {
 	p.mu.Unlock()
 	if !p.claimWriter("alice") {
 		t.Fatal("release should let the next typist claim")
+	}
+}
+
+func TestWriterLeaseExpiry(t *testing.T) {
+	p := &ptyProc{subs: map[int]chan []byte{}, modes: map[int]bool{}}
+	if !p.claimWriter("ghost") {
+		t.Fatal("first claim")
+	}
+	if p.claimWriter("bob") {
+		t.Fatal("live lease must reject others")
+	}
+	// a dead page's claim goes stale; the next typist claims straight over
+	p.mu.Lock()
+	p.writerAt = time.Now().Add(-writerLease - time.Second)
+	p.mu.Unlock()
+	if !p.claimWriter("bob") {
+		t.Fatal("expired lease should be claimable")
+	}
+	if p.writer != "bob" {
+		t.Fatalf("writer = %q, want bob", p.writer)
 	}
 }
