@@ -68,6 +68,12 @@ func bridgeServe() *cli.Command {
 			&cli.StringFlag{Name: "addr", Value: "127.0.0.1:8443", Usage: "listen address"},
 			&cli.StringFlag{Name: "token-file", Usage: "read the shared secret from this file (preferred over env on shared hosts)"},
 			&cli.StringFlag{Name: "store", Usage: "optional SQLite path to mirror events; absent = ephemeral live-only"},
+			&cli.StringFlag{Name: "ollama-url", Sources: cli.EnvVars("OLLAMA_URL"), Usage: "enable /api/conversation by pointing at a local Ollama (e.g. http://127.0.0.1:11434)"},
+			&cli.StringFlag{Name: "ollama-model", Sources: cli.EnvVars("OLLAMA_MODEL"), Value: "qwen2.5:7b", Usage: "Ollama model tag for the conversation loop"},
+			&cli.BoolFlag{Name: "ollama-cpu", Sources: cli.EnvVars("OLLAMA_CPU"), Usage: "force CPU inference (num_gpu=0) — for hosts whose GPU ollama can't actually run"},
+			&cli.StringFlag{Name: "tts-voice", Sources: cli.EnvVars("TTS_VOICE"), Value: "en-US-AriaNeural", Usage: "Edge TTS voice for /api/tts (e.g. en-US-JennyNeural). Empty disables."},
+			&cli.StringFlag{Name: "stt-url", Sources: cli.EnvVars("STT_URL"), Usage: "enable /api/stt: whisper.cpp /inference or an OpenAI-compatible /v1/audio/transcriptions endpoint"},
+			&cli.StringFlag{Name: "stt-model", Sources: cli.EnvVars("STT_MODEL"), Usage: "model field for OAI-style STT servers (whisper.cpp ignores it)"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			token, err := loadBridgeToken(c.String("token-file"))
@@ -75,9 +81,15 @@ func bridgeServe() *cli.Command {
 				return err
 			}
 			b, err := bridge.New(bridge.Options{
-				Addr:  c.String("addr"),
-				Token: token,
-				Store: c.String("store"),
+				Addr:        c.String("addr"),
+				Token:       token,
+				Store:       c.String("store"),
+				OllamaURL:   c.String("ollama-url"),
+				OllamaModel: c.String("ollama-model"),
+				OllamaCPU:   c.Bool("ollama-cpu"),
+				TTSVoice:    c.String("tts-voice"),
+				STTURL:      c.String("stt-url"),
+				STTModel:    c.String("stt-model"),
 			})
 			if err != nil {
 				return err

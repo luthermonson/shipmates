@@ -25,7 +25,10 @@ var publicPaths = map[string]bool{
 	"/logout":     true,
 	"/style.css":  true,
 	"/app.js":     true,
-	"/favicon.ico": true,
+	// like app.js: a .js URL must NEVER answer with login HTML or an edge
+	// cache will store it and serve it to authenticated browsers as script
+	"/conversation.js": true,
+	"/favicon.ico":     true,
 }
 
 // publicPrefixes are path prefixes reachable without auth — vendored static
