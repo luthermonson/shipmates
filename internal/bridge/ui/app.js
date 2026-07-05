@@ -64,7 +64,7 @@ function renderLeadPicker() {
     meta.textContent = lead.connected ? `online · ${lead.repo}` : "offline";
     head.appendChild(meta);
     card.appendChild(head);
-    const mates = mateStatus.get(lead.client_key) || [];
+    const mates = orderMates(lead, mateStatus.get(lead.client_key) || []);
     if (mates.length > 0) {
       const row = document.createElement("div");
       row.className = "mates";
@@ -79,6 +79,16 @@ function renderLeadPicker() {
     card.onclick = () => selectLead(lead.client_key);
     leadPicker.appendChild(card);
   }
+}
+
+// orderMates puts the ship's own lead persona first, crew alphabetical after
+// — mirrors the tab/dropdown ordering so every surface reads the same.
+function orderMates(lead, mates) {
+  return [...mates].sort((a, b) => {
+    if (a.persona === lead.persona) return -1;
+    if (b.persona === lead.persona) return 1;
+    return a.persona.localeCompare(b.persona);
+  });
 }
 
 function renderLeads(data) {
@@ -100,7 +110,7 @@ function renderLeads(data) {
     li.appendChild(document.createTextNode(lead.client_key));
     li.title = `repo=${lead.repo}\npersona=${lead.persona}\nport=${lead.port}\nlast_seen=${lead.last_seen}`;
     li.onclick = () => selectLead(lead.client_key);
-    const mates = mateStatus.get(lead.client_key) || [];
+    const mates = orderMates(lead, mateStatus.get(lead.client_key) || []);
     if (mates.length > 0) {
       const row = document.createElement("div");
       row.className = "mates";
@@ -191,7 +201,10 @@ function selectLead(key) {
   feedBody.hidden = false;
   feedBody.innerHTML = "";
   feedEvents = [];
-  feedFilter = "all";
+  // picking a ship drops you into its LEAD's conversation — the lead is the
+  // natural front door; "all" and crew tabs are one tap away
+  const picked = knownLeads.get(key);
+  feedFilter = picked && picked.persona ? picked.persona : "all";
   renderFeedTabs();
   refreshLeads(); // re-render to update .selected
   const lead = knownLeads.get(key);
