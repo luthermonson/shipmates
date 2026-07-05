@@ -28,14 +28,14 @@ import (
 // yaml names WHERE a secret comes from (`SHIPMATES_BRIDGE_TOKEN: ${HOMELAB_TOKEN}`),
 // never the secret itself, so the file is safe to sync between hosts.
 type Config struct {
-	Env      map[string]string `yaml:"env"`      // host-level, applied to every lead
-	Projects []Project         `yaml:"projects"` // one lead server per dir
+	Env      map[string]string `yaml:"env,omitempty"` // host-level, applied to every lead
+	Projects []Project         `yaml:"projects"`      // one lead server per dir
 }
 
 // Project is one supervised lead: a project dir plus per-project env overrides.
 type Project struct {
 	Dir string            `yaml:"dir"`
-	Env map[string]string `yaml:"env"`
+	Env map[string]string `yaml:"env,omitempty"`
 }
 
 // ConfigPath is the canonical supervisor config location.
@@ -240,6 +240,67 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-time.After(d):
 		return true
 	}
+}
+
+// AddProject appends a project dir to the config at path, creating the file
+// when absent. Note: rewrites the yaml, so hand-written comments don't
+// survive — the file is meant to be machine-managed via this command.
+func AddProject(path, dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	abs = filepath.ToSlash(abs)
+	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
+		return fmt.Errorf("%s is not a directory", abs)
+	}
+
+	var c Config
+	if b, err := os.ReadFile(path); err == nil {
+		if err := yaml.Unmarshal(b, &c); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	for _, p := range c.Projects {
+		if strings.EqualFold(filepath.ToSlash(strings.TrimSpace(p.Dir)), abs) {
+			return fmt.Errorf("%s is already in %s", abs, path)
+		}
+	}
+	c.Projects = append(c.Projects, Project{Dir: abs})
+
+	out, err := yaml.Marshal(&c)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o644)
+}
+
+// ProjectStatus is one supervised project's probe result.
+type ProjectStatus struct {
+	Dir     string
+	Running bool
+	Port    int
+	PID     int
+}
+
+// StatusAll probes every configured project's recorded lead-server port.
+func StatusAll(c *Config) []ProjectStatus {
+	out := make([]ProjectStatus, 0, len(c.Projects))
+	for _, p := range c.Projects {
+		st := ProjectStatus{Dir: p.Dir}
+		st.Port = serverPort(p.Dir)
+		if b, err := os.ReadFile(filepath.Join(p.Dir, ".shipmates", "sessions", "server.pid")); err == nil {
+			_, _ = fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &st.PID)
+		}
+		st.Running = serverHealthy(p.Dir)
+		out = append(out, st)
+	}
+	return out
 }
 
 // ErrUnsupported marks install/uninstall on platforms without an implementation.

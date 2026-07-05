@@ -43,6 +43,12 @@ type Server struct {
 	mu    sync.Mutex
 	leads map[string]*Lead // keyed by clientKey
 
+	// dispatchQ holds bead dispatches whose target ship was offline at
+	// assign time; a sweep loop delivers them when the ship reconnects.
+	// In-memory only — a bridge restart drops the queue (the assignee is
+	// already on the graph, so the work isn't lost, just un-nudged).
+	dispatchQ []queuedDispatch
+
 	store *store // nil when --store wasn't passed
 }
 
@@ -96,6 +102,7 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /api/lead/{key}/pending", b.proxyGet("/pending"))
 	mux.HandleFunc("GET /api/lead/{key}/status", b.proxyGet("/status.json"))
 	mux.HandleFunc("GET /api/lead/{key}/beads", b.proxyGet("/beads.json"))
+	mux.HandleFunc("GET /api/lead/{key}/beads/summary", b.proxyGet("/beads/summary"))
 	mux.HandleFunc("GET /api/status", b.handleAggregateStatus)
 	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/start", b.proxyPTYPost("/pty/%s/start"))
 	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/input", b.proxyPTYPost("/pty/%s/input"))
@@ -106,6 +113,7 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /api/lead/{key}/bead/{id}", b.proxyGet2("/bead/%s", "id"))
 	mux.HandleFunc("POST /api/lead/{key}/bead", b.proxyPost("/bead"))
 	mux.HandleFunc("POST /api/lead/{key}/bead/{id}/close", b.proxyPost2("/bead/%s/close", "id"))
+	mux.HandleFunc("POST /api/lead/{key}/bead/{id}/update", b.proxyPost2("/bead/%s/update", "id"))
 	mux.HandleFunc("POST /api/lead/{key}/bead/{id}/assign", b.handleBeadAssign)
 	mux.HandleFunc("GET /api/beads", b.handleAggregateBeads)
 	mux.HandleFunc("POST /api/beads/nudge", b.handleBeadsNudge)
@@ -143,6 +151,7 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	if b.store != nil {
 		go b.mirrorLoop(ctx)
 	}
+	go b.dispatchSweepLoop(ctx)
 
 	slog.Info("bridge listening", "addr", addr, "auth", b.token != "", "store", b.store != nil)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -163,6 +163,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /pending.json", s.handlePendingJSON)
 	mux.HandleFunc("GET /status.json", s.handleStatusJSON)
 	mux.HandleFunc("GET /beads.json", s.handleBeadsJSON)
+	mux.HandleFunc("GET /beads/summary", s.handleBeadsSummary)
 	mux.HandleFunc("GET /bead/{id}", s.handleBeadShow)
 	mux.HandleFunc("POST /bead", s.handleBeadCreate)
 	mux.HandleFunc("POST /bead/{id}/close", s.handleBeadClose)
