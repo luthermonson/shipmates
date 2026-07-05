@@ -91,10 +91,6 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 		return p, nil
 	}
 
-	claudePath, err := exec.LookPath("claude")
-	if err != nil {
-		return nil, fmt.Errorf("claude not on PATH: %w", err)
-	}
 	pt, err := pty.New()
 	if err != nil {
 		return nil, fmt.Errorf("open pty: %w", err)
@@ -104,25 +100,52 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 		return nil, fmt.Errorf("resize pty: %w", err)
 	}
 
-	cfg, idArgs, sessID, sessName, fp := project.SessionLaunch(persona, false)
-	args := []string{
-		// observe-only hooks: interactive claude prompts for permissions
-		// natively in the terminal — the operator approves right where they
-		// are typing instead of hunting for the bridge's pending pane behind
-		// the full-screen term
-		"--settings", s.hookSettings(persona, false),
+	// The backend driver seam: claude mates get the full integration
+	// (session resume, observe hooks, beads prime); command-backed mates
+	// (opencode, aider, ...) just get their argv under a PTY — their status
+	// derives from screen activity, which pumpPTY already records.
+	var cmd *pty.Cmd
+	var sessID, sessName, fp string
+	pcfg, _ := project.ResolvePersonaConfig(persona)
+	if pcfg.CommandBacked() {
+		if len(pcfg.Command) == 0 {
+			_ = pt.Close()
+			return nil, fmt.Errorf("persona %s has backend: command but no command", persona)
+		}
+		// go-pty resolves bare names relative to Dir — absolute path required.
+		prog, err := exec.LookPath(pcfg.Command[0])
+		if err != nil {
+			_ = pt.Close()
+			return nil, fmt.Errorf("%s not on PATH: %w", pcfg.Command[0], err)
+		}
+		cmd = pt.Command(prog, pcfg.Command[1:]...)
+	} else {
+		claudePath, err := exec.LookPath("claude")
+		if err != nil {
+			_ = pt.Close()
+			return nil, fmt.Errorf("claude not on PATH: %w", err)
+		}
+		var cfg project.PersonaConfig
+		var idArgs []string
+		cfg, idArgs, sessID, sessName, fp = project.SessionLaunch(persona, false)
+		args := []string{
+			// observe-only hooks: interactive claude prompts for permissions
+			// natively in the terminal — the operator approves right where they
+			// are typing instead of hunting for the bridge's pending pane behind
+			// the full-screen term
+			"--settings", s.hookSettings(persona, false),
+		}
+		args = append(args, idArgs...)
+		args = append(args, cfg.LaunchFlags(false)...)
+		// beads: same prime injection as live mates, for consistent context
+		if prime := beadsPrime(); prime != "" {
+			args = append(args, "--append-system-prompt", prime)
+		}
+		cmd = pt.Command(claudePath, args...)
 	}
-	args = append(args, idArgs...)
-	args = append(args, cfg.LaunchFlags(false)...)
-	// beads: same prime injection as live mates, for consistent context
-	if prime := beadsPrime(); prime != "" {
-		args = append(args, "--append-system-prompt", prime)
-	}
-	// go-pty resolves bare names relative to Dir — absolute path required.
-	cmd := pt.Command(claudePath, args...)
 	if err := cmd.Start(); err != nil {
 		_ = pt.Close()
-		return nil, fmt.Errorf("spawn claude under pty: %w", err)
+		return nil, fmt.Errorf("spawn mate under pty: %w", err)
 	}
 
 	p := &ptyProc{
@@ -138,7 +161,9 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 	s.lastSeen[persona] = time.Now()
 	s.refs++
 	s.lastActivity = time.Now()
-	_ = project.WriteSessionMeta(persona, sessName, sessID, fp)
+	if sessID != "" {
+		_ = project.WriteSessionMeta(persona, sessName, sessID, fp)
+	}
 	go s.pumpPTY(p)
 	return p, nil
 }
