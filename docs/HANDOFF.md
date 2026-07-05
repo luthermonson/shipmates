@@ -137,5 +137,12 @@ running its own crew.
   status.go / beads.go (aggregates), ptyproxy.go, ui/ (vanilla JS, no build).
 - `internal/project/sessionlaunch.go` — shared session identity resolution.
 - `docs/fleet-architecture.md` — the design doc, phases 1-5 + open questions.
-- Voice/Ollama experiment: parked in two git stashes on this branch (see
-  `git stash list`), deliberately out of scope.
+- Voice conversation mode: LANDED (2026-07-05, un-parked from the stashes).
+  `/conversation.html` — mic captures 16kHz WAV via Web Audio (NOT the flaky
+  Web Speech API that got it parked), `/api/stt` proxies to a whisper.cpp
+  server (`~/.shipmates/whisper/`, run: `Release/whisper-server.exe -m
+  ggml-small.en-q5_1.bin --port 8321`), `/api/conversation` is an Ollama
+  tool-loop driving the fleet, `/api/tts` speaks replies via Edge neural
+  voices (pure Go websocket). Bridge flags: --ollama-url --ollama-model
+  --ollama-cpu --tts-voice --stt-url. --ollama-cpu is REQUIRED on the
+  captain's PC (GT 1030's CUDA toolchain is unsupported; GPU path 500s).

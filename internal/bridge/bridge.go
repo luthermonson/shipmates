@@ -49,7 +49,22 @@ type Server struct {
 	// already on the graph, so the work isn't lost, just un-nudged).
 	dispatchQ []queuedDispatch
 
-	store *store // nil when --store wasn't passed
+	store *store      // nil when --store wasn't passed
+	conv  *convConfig // nil unless voice/conversation flags are set
+}
+
+// convConfig holds the runtime config for the voice surface: /api/conversation
+// (Ollama tool-loop), /api/tts (Edge neural voices), and /api/stt (an
+// OpenAI-compatible or whisper.cpp transcription server). The http client is
+// reused so connections stay pooled.
+type convConfig struct {
+	url      string // Ollama base URL; "" disables /api/conversation
+	model    string // Ollama model tag
+	cpuOnly  bool   // force num_gpu=0 (broken-GPU hosts)
+	voice    string // Edge TTS voice tag; "" disables /api/tts
+	sttURL   string // transcription endpoint; "" disables /api/stt
+	sttModel string // model field sent to the transcription server (OAI-style)
+	client   *http.Client
 }
 
 // Lead is the bridge's record of one connected shipmates lead.
@@ -66,9 +81,15 @@ type Lead struct {
 
 // Options configures the bridge.
 type Options struct {
-	Addr  string // listen address (e.g. ":8443")
-	Token string // shared secret; if empty, auth is disabled (dev only)
-	Store string // optional SQLite path; empty = ephemeral
+	Addr        string // listen address (e.g. ":8443")
+	Token       string // shared secret; if empty, auth is disabled (dev only)
+	Store       string // optional SQLite path; empty = ephemeral
+	OllamaURL   string // optional; enables /api/conversation (e.g. http://127.0.0.1:11434)
+	OllamaModel string // model tag for the conversation loop, e.g. "qwen2.5:7b"
+	OllamaCPU   bool   // force CPU inference (hosts whose GPU ollama can't actually drive)
+	TTSVoice    string // optional Edge TTS voice tag (e.g. en-US-AriaNeural); empty disables /api/tts
+	STTURL      string // optional transcription endpoint (whisper.cpp /inference or OAI /v1/audio/transcriptions); empty disables /api/stt
+	STTModel    string // model name forwarded to OAI-style STT servers; whisper.cpp ignores it
 }
 
 // New constructs the bridge. The returned Server is ready to Run.
@@ -83,6 +104,20 @@ func New(opts Options) (*Server, error) {
 			return nil, fmt.Errorf("open store %s: %w", opts.Store, err)
 		}
 		b.store = s
+	}
+	if opts.OllamaURL != "" || opts.TTSVoice != "" || opts.STTURL != "" {
+		b.conv = &convConfig{
+			url:      strings.TrimRight(opts.OllamaURL, "/"),
+			model:    opts.OllamaModel,
+			cpuOnly:  opts.OllamaCPU,
+			voice:    strings.TrimSpace(opts.TTSVoice),
+			sttURL:   strings.TrimSpace(opts.STTURL),
+			sttModel: strings.TrimSpace(opts.STTModel),
+			// Long timeout because a tool-call loop with multiple Ollama round
+			// trips, each waiting on a lead's tunnelled response, can take a
+			// while. Voice timeouts are enforced by the UI client, not here.
+			client: &http.Client{Timeout: 5 * time.Minute},
+		}
 	}
 	b.dialer = remotedialer.New(b.authorize, remotedialer.DefaultErrorWriter)
 	return b, nil
@@ -121,6 +156,10 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /api/lead/{key}/stream", b.handleStream)
 	mux.HandleFunc("POST /api/lead/{key}/tell/{persona}", b.handleTell)
 	mux.HandleFunc("POST /api/lead/{key}/resolve/{id}", b.handleResolve)
+	mux.HandleFunc("POST /api/conversation", b.handleConversation)
+	mux.HandleFunc("POST /api/tts", b.handleTTS)
+	mux.HandleFunc("POST /api/stt", b.handleSTT)
+	mux.HandleFunc("GET /api/voice/config", b.handleVoiceConfig)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 
 	// Mount the embedded UI at /. fs.Sub drops the "ui" prefix so paths like
