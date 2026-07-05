@@ -564,7 +564,8 @@ section#feed {
 #beads-pane .bships { color: var(--muted); font-size: 0.72rem; flex-shrink: 0; }
 #beads-pane .bead:hover { background: rgba(255,255,255,0.03); }
 #beads-pane .bead-detail {
-  padding: 0.6rem 1rem 0.8rem 2.4rem;
+  position: relative; /* anchors the top-right close ✕ */
+  padding: 0.6rem 2.8rem 0.8rem 2.4rem; /* right inset keeps text clear of ✕ */
   border-bottom: 1px solid rgba(255,255,255,0.05);
   font-size: 0.82rem;
   background: rgba(255,255,255,0.02);
@@ -612,7 +613,7 @@ section#feed {
   font-size: 16px; /* <16px auto-zooms on iOS */
   font-family: inherit;
 }
-#beads-pane .bead-create .row { display: flex; gap: 0.5rem; }
+#beads-pane .bead-create .row { display: flex; gap: 0.5rem; justify-content: flex-end; }
 #beads-pane .bead-create .row button {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -639,10 +640,6 @@ section#feed {
   gap: 0.45rem;
   flex: 1 1 auto;
   min-width: 0;
-}
-#beads-pane .bead-detail .bead-actions .grp.icons {
-  flex: 0 0 auto;
-  margin-left: auto; /* edit/close sit apart from the routine controls */
 }
 #beads-pane .bead-detail .bead-actions select {
   background: var(--panel);
@@ -673,11 +670,21 @@ section#feed {
   font-size: 0.9rem;
   line-height: 1;
 }
-#beads-pane .bead-detail .bead-actions .bead-close {
-  border-color: var(--bad, #b3261e);
+/* the close ✕ lives in the card's top-right corner, away from the controls */
+#beads-pane .bead-detail .bead-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.7rem;
+  border: 1px solid var(--bad, #b3261e);
+  border-radius: 6px;
+  background: none;
   color: var(--bad, #b3261e);
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
 }
-#beads-pane .bead-detail .bead-actions .bead-close:hover { background: rgba(179,38,30,0.15); }
+#beads-pane .bead-detail .bead-close:hover { background: rgba(179,38,30,0.15); }
 
 /* inline title/description editor (✎) */
 #beads-pane .bead-edit {
@@ -697,7 +704,7 @@ section#feed {
   font-size: 16px; /* <16px auto-zooms on iOS */
   font-family: inherit;
 }
-#beads-pane .bead-edit .row { display: flex; gap: 0.5rem; }
+#beads-pane .bead-edit .row { display: flex; gap: 0.5rem; justify-content: flex-end; }
 #beads-pane .bead-edit .row button {
   border: 1px solid var(--border);
   border-radius: 6px;

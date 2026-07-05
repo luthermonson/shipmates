@@ -1100,7 +1100,7 @@ function renderBeadCreate() {
     form.innerHTML =
       '<input name="title" placeholder="title" maxlength="200" required>' +
       '<textarea name="description" placeholder="description (optional)" rows="2"></textarea>' +
-      '<div class="row"><button type="submit">create</button> <button type="button" class="cancel">cancel</button></div>';
+      '<div class="row"><button type="button" class="cancel">cancel</button> <button type="submit">create</button></div>';
     form.querySelector(".cancel").onclick = () => { form.remove(); btn.hidden = false; };
     form.onsubmit = async (e) => {
       e.preventDefault();
@@ -1171,15 +1171,11 @@ async function expandBeadDetail(row, id, leadKey) {
     lines.push(`<div class="bmeta">${meta.join(" · ")}</div>`);
     detail.innerHTML = lines.join("");
     if (b.status !== "closed") {
+      renderBeadClose(detail, id, leadKey); // red ✕, absolute top-right of the card
       const actions = document.createElement("div");
       actions.className = "bead-actions";
-      const grp = renderBeadAssign(actions, b, id, leadKey);
-      renderBeadPriority(grp, b, id, leadKey); // priority rides the assign line
-      const icons = document.createElement("div");
-      icons.className = "grp icons";
-      renderBeadEdit(icons, b, id, leadKey, detail);
-      renderBeadClose(icons, id, leadKey);
-      actions.appendChild(icons);
+      renderBeadEdit(actions, b, id, leadKey, detail); // ✎ leads the line
+      renderBeadAssign(actions, b, id, leadKey);       // [assign][priority][dispatch]
       detail.appendChild(actions);
     }
   } catch (err) {
@@ -1220,9 +1216,9 @@ function renderBeadClose(actions, id, leadKey) {
   actions.appendChild(closeBtn);
 }
 
-// renderBeadPriority is a lone select that applies on change — a priority
+// buildBeadPriority is a lone select that applies on change — a priority
 // tweak is low-stakes, so no confirm button cluttering the bar.
-function renderBeadPriority(actions, b, id, leadKey) {
+function buildBeadPriority(b, id, leadKey) {
   const pSel = document.createElement("select");
   pSel.className = "prio";
   pSel.title = "priority (applies immediately)";
@@ -1249,7 +1245,7 @@ function renderBeadPriority(actions, b, id, leadKey) {
       beadActionError(err);
     }
   };
-  actions.appendChild(pSel);
+  return pSel;
 }
 
 // renderBeadEdit: ✎ toggles an inline title/description editor — beads are a
@@ -1268,7 +1264,7 @@ function renderBeadEdit(container, b, id, leadKey, detail) {
     form.innerHTML =
       '<input name="title" maxlength="200" required>' +
       '<textarea name="description" rows="4"></textarea>' +
-      '<div class="row"><button type="submit">save</button> <button type="button" class="cancel">cancel</button></div>';
+      '<div class="row"><button type="button" class="cancel">cancel</button> <button type="submit">save</button></div>';
     form.elements.title.value = b.title || "";
     form.elements.description.value = b.description || "";
     form.querySelector(".cancel").onclick = () => form.remove();
@@ -1348,9 +1344,9 @@ function renderBeadAssign(actions, b, id, leadKey) {
     }
   };
   row.appendChild(sel);
+  row.appendChild(buildBeadPriority(b, id, leadKey)); // priority sits before the verb
   row.appendChild(btn);
   actions.appendChild(row);
-  return row;
 }
 
 beadsOpenBtn.onclick = openBeads;
