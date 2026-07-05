@@ -58,9 +58,8 @@ type Server struct {
 // OpenAI-compatible or whisper.cpp transcription server). The http client is
 // reused so connections stay pooled.
 type convConfig struct {
-	url      string // Ollama base URL; "" disables /api/conversation
-	model    string // Ollama model tag
-	cpuOnly  bool   // force num_gpu=0 (broken-GPU hosts)
+	url      string // OpenAI-compatible base URL (…/v1); "" disables /api/conversation
+	model    string // model tag/name sent in requests
 	voice    string // voice tag: Edge (en-US-AriaNeural) or the OAI server's voice name
 	ttsURL   string // OpenAI-compatible /v1/audio/speech endpoint; "" = Edge websocket
 	ttsModel string // model field for OAI-style TTS servers
@@ -86,9 +85,8 @@ type Options struct {
 	Addr        string // listen address (e.g. ":8443")
 	Token       string // shared secret; if empty, auth is disabled (dev only)
 	Store       string // optional SQLite path; empty = ephemeral
-	OllamaURL   string // optional; enables /api/conversation (e.g. http://127.0.0.1:11434)
-	OllamaModel string // model tag for the conversation loop, e.g. "qwen2.5:7b"
-	OllamaCPU   bool   // force CPU inference (hosts whose GPU ollama can't actually drive)
+	LLMURL      string // OpenAI-compatible base URL incl. /v1 (ollama, llama.cpp, LM Studio, OpenAI…); enables /api/conversation
+	LLMModel    string // model name for the conversation loop, e.g. "qwen3:30b-a3b"
 	TTSVoice    string // voice tag (Edge: en-US-AriaNeural; OAI servers: e.g. af_heart); empty + no TTSURL disables /api/tts
 	TTSURL      string // optional OpenAI-compatible /v1/audio/speech endpoint (kokoro-fastapi etc.); overrides Edge
 	TTSModel    string // model field for OAI-style TTS servers
@@ -109,17 +107,16 @@ func New(opts Options) (*Server, error) {
 		}
 		b.store = s
 	}
-	if opts.OllamaURL != "" || opts.TTSVoice != "" || opts.TTSURL != "" || opts.STTURL != "" {
+	if opts.LLMURL != "" || opts.TTSVoice != "" || opts.TTSURL != "" || opts.STTURL != "" {
 		b.conv = &convConfig{
-			url:      strings.TrimRight(opts.OllamaURL, "/"),
-			model:    opts.OllamaModel,
-			cpuOnly:  opts.OllamaCPU,
+			url:      strings.TrimRight(opts.LLMURL, "/"),
+			model:    opts.LLMModel,
 			voice:    strings.TrimSpace(opts.TTSVoice),
 			ttsURL:   strings.TrimSpace(opts.TTSURL),
 			ttsModel: strings.TrimSpace(opts.TTSModel),
 			sttURL:   strings.TrimSpace(opts.STTURL),
 			sttModel: strings.TrimSpace(opts.STTModel),
-			// Long timeout because a tool-call loop with multiple Ollama round
+			// Long timeout because a tool-call loop with multiple LLM round
 			// trips, each waiting on a lead's tunnelled response, can take a
 			// while. Voice timeouts are enforced by the UI client, not here.
 			client: &http.Client{Timeout: 5 * time.Minute},
