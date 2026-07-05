@@ -13,7 +13,6 @@ const input = document.getElementById("text-input");
 const send = document.getElementById("send");
 const hint = document.getElementById("hint");
 
-let recording = false;
 let history = []; // chat history kept in memory for this session only
 
 // capability probe: grey out what the bridge wasn't started with
@@ -31,15 +30,31 @@ fetch("/api/voice/config").then((r) => r.ok ? r.json() : caps).then((c) => {
   }
 }).catch(() => {});
 
-// --- microphone capture ------------------------------------------------------
+// --- microphone capture + conversation mode -----------------------------------
+//
+// One tap turns the conversation ON: the mic stays open and a small energy
+// VAD (voice activity detector) segments your speech — roughly a second of
+// silence after you talk auto-cuts the utterance, transcribes it, asks the
+// fleet, speaks the answer, and goes back to listening. Tap again to end.
+// Capture pauses while the reply plays so the assistant doesn't hear itself.
 //
 // ScriptProcessorNode is deprecated but is the one capture API that works
-// everywhere including iOS Safari; buffers accumulate as Float32 chunks and
-// are downsampled + WAV-encoded on stop.
+// everywhere including iOS Safari.
 
-let rec = null; // {ctx, stream, src, node, gain, chunks, rate}
+let rec = null;        // {ctx, stream, src, node, gain, rate}
+let live = false;      // conversation mode on
+let vadState = "idle"; // idle | listening | speaking | busy
 
-async function startRecording() {
+const VAD_SILENCE_MS = 1100; // this much quiet ends the utterance
+const VAD_MIN_SPEECH_MS = 350; // shorter blips (coughs, taps) are ignored
+const VAD_MAX_UTTER_MS = 60000; // hard cap per utterance
+
+let noiseFloor = 0.006; // adapts while listening
+let preRoll = [];       // recent chunks so the utterance start isn't clipped
+let speechBufs = [];    // the utterance being captured
+let speechMs = 0, silentMs = 0, utterMs = 0;
+
+async function startCapture() {
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -54,31 +69,83 @@ async function startRecording() {
   await ctx.resume(); // iOS: must resume inside the user gesture
   const src = ctx.createMediaStreamSource(stream);
   const node = ctx.createScriptProcessor(4096, 1, 1);
-  const chunks = [];
-  node.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  node.onaudioprocess = (e) => onAudio(new Float32Array(e.inputBuffer.getChannelData(0)));
   // the processor only runs when connected to the destination; a zero-gain
   // stage keeps the mic from feeding back through the speakers
   const gain = ctx.createGain();
   gain.gain.value = 0;
   src.connect(node); node.connect(gain); gain.connect(ctx.destination);
-  rec = { ctx, stream, src, node, gain, chunks, rate: ctx.sampleRate };
+  rec = { ctx, stream, src, node, gain, rate: ctx.sampleRate };
   return true;
 }
 
-async function stopRecording() {
-  if (!rec) return null;
-  const { ctx, stream, src, node, gain, chunks, rate } = rec;
+function stopCapture() {
+  if (!rec) return;
+  const { ctx, stream, src, node, gain } = rec;
   rec = null;
   try { src.disconnect(); node.disconnect(); gain.disconnect(); } catch { /* already torn down */ }
   stream.getTracks().forEach((t) => t.stop());
-  try { await ctx.close(); } catch { /* fine */ }
+  ctx.close().catch(() => {});
+  preRoll = []; speechBufs = [];
+}
+
+// onAudio is the VAD state machine, fed ~85ms buffers while the mic is open.
+function onAudio(buf) {
+  if (!rec) return;
+  const ms = (buf.length / rec.rate) * 1000;
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  const rms = Math.sqrt(sum / buf.length);
+  const threshold = Math.max(noiseFloor * 3, 0.012);
+
+  if (vadState === "listening") {
+    noiseFloor = noiseFloor * 0.95 + rms * 0.05; // track the room
+    preRoll.push(buf);
+    if (preRoll.length > 8) preRoll.shift(); // ~0.7s of lead-in
+    if (rms > threshold) {
+      vadState = "speaking";
+      speechBufs = preRoll.slice();
+      preRoll = [];
+      speechMs = ms; silentMs = 0; utterMs = ms;
+      mic.classList.add("recording");
+      hint.textContent = "";
+    }
+  } else if (vadState === "speaking") {
+    speechBufs.push(buf);
+    utterMs += ms;
+    if (rms > Math.max(noiseFloor * 2.5, 0.01)) { speechMs += ms; silentMs = 0; }
+    else silentMs += ms;
+    if (silentMs >= VAD_SILENCE_MS || utterMs >= VAD_MAX_UTTER_MS) endUtterance();
+  }
+  // idle/busy: the reply pipeline owns the floor; audio is discarded
+}
+
+async function endUtterance() {
+  vadState = "busy";
+  mic.classList.remove("recording");
+  const bufs = speechBufs;
+  speechBufs = [];
+  if (speechMs < VAD_MIN_SPEECH_MS) { resumeListening(); return; } // a blip, not speech
   let n = 0;
-  for (const c of chunks) n += c.length;
-  if (n === 0) return null;
+  for (const c of bufs) n += c.length;
   const all = new Float32Array(n);
   let off = 0;
-  for (const c of chunks) { all.set(c, off); off += c.length; }
-  return encodeWAV(downsampleTo16k(all, rate));
+  for (const c of bufs) { all.set(c, off); off += c.length; }
+  const wav = encodeWAV(downsampleTo16k(all, rec ? rec.rate : 48000));
+  const text = await transcribe(wav);
+  if (!text) { resumeListening(); return; }
+  input.value = text;
+  await sendMessage();
+  // if a spoken reply is playing, its 'ended' event resumes listening;
+  // otherwise (tts off / failed / empty reply) resume now
+  if (audioEl.paused || audioEl.ended) resumeListening();
+}
+
+function resumeListening() {
+  if (!live) return;
+  vadState = "listening";
+  silentMs = 0; speechMs = 0; utterMs = 0;
+  hint.textContent = "listening — just talk; tap the mic to end";
 }
 
 // downsampleTo16k averages source samples per output sample — crude but fine
@@ -141,26 +208,22 @@ function unlockTTS() {
   audioUnlocked = true;
 }
 
-// tap to talk, tap again to finish: stop → encode → transcribe → send
+// tap once = conversation ON (hands-free, VAD-segmented); tap again = off
 mic.onclick = async () => {
   if (mic.disabled) return;
   unlockTTS();
-  if (recording) {
-    recording = false;
-    mic.classList.remove("recording");
-    const wav = await stopRecording();
-    if (!wav) { hint.textContent = "didn't catch that — try again"; return; }
-    const text = await transcribe(wav);
-    if (!text) { if (!hint.textContent) hint.textContent = "didn't catch that — try again"; return; }
-    input.value = text;
-    sendMessage();
+  if (live) {
+    live = false;
+    vadState = "idle";
+    stopCapture();
+    mic.classList.remove("live", "recording");
+    hint.textContent = "";
     return;
   }
-  input.value = "";
-  if (!(await startRecording())) return;
-  recording = true;
-  mic.classList.add("recording");
-  hint.textContent = "listening — tap again when done";
+  if (!(await startCapture())) return;
+  live = true;
+  mic.classList.add("live");
+  resumeListening();
 };
 
 // Also unlock on send-button / Enter, for the text-input path.
@@ -258,6 +321,20 @@ async function speak(text) {
     ttsInfo.textContent = "tts: " + String(err);
   }
 }
+
+// conversation mode: the mic stays muted while the reply plays (vadState
+// "busy"); when playback finishes, go back to listening
+audioEl.addEventListener("ended", resumeListening);
+audioEl.addEventListener("error", resumeListening);
+
+// iOS suspends the AudioContext when the tab backgrounds; wake it (and the
+// listening loop) when the operator comes back mid-conversation.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && live && rec) {
+    rec.ctx.resume().catch(() => {});
+    if (vadState === "idle") resumeListening();
+  }
+});
 
 // Diagnostic button — fires fetch+play directly on click (inside the user
 // gesture, which keeps iOS Safari happy on first use).

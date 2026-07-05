@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>shipmates bridge — conversation</title>
-<link rel="stylesheet" href="/style.css?v=42">
+<link rel="stylesheet" href="/style.css?v=43">
 <style>
   main { flex-direction: column; }
   #convo {
@@ -46,9 +46,13 @@
     cursor: pointer;
     flex-shrink: 0;
   }
-  #mic.recording { background: var(--bad); animation: pulse 1s infinite; }
+  /* conversation ON, waiting for speech: green with a slow breathe */
+  #mic.live { background: var(--good, #3fb950); animation: breathe 2.4s infinite; }
+  /* actively capturing an utterance: red with the fast pulse */
+  #mic.recording, #mic.live.recording { background: var(--bad); animation: pulse 1s infinite; }
   #mic:disabled { opacity: 0.4; cursor: not-allowed; }
   @keyframes pulse { 50% { transform: scale(1.06); } }
+  @keyframes breathe { 50% { transform: scale(1.03); opacity: 0.85; } }
   #text-input {
     flex: 1;
     background: var(--bg);
@@ -92,6 +96,6 @@
     <button id="send">send</button>
   </div>
 </main>
-<script src="/conversation.js?v=42"></script>
+<script src="/conversation.js?v=43"></script>
 </body>
 </html>
