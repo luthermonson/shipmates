@@ -623,47 +623,53 @@ section#feed {
   cursor: pointer;
 }
 #beads-pane .bead-create .row button[type="submit"] { border-color: var(--accent); color: var(--accent); }
-#beads-pane .bead-detail .bead-assign {
+/* one action bar per open bead: [assign+dispatch] [priority] ......... [close] */
+#beads-pane .bead-detail .bead-actions {
   display: flex;
-  gap: 0.5rem;
-  margin-top: 0.55rem;
+  flex-wrap: wrap;
   align-items: center;
+  gap: 0.5rem 0.8rem;
+  margin-top: 0.7rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid rgba(255,255,255,0.06);
 }
-#beads-pane .bead-detail .bead-assign select {
+#beads-pane .bead-detail .bead-actions .grp {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+#beads-pane .bead-detail .bead-actions select {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
   padding: 0.3rem 0.5rem;
   font-size: 16px; /* <16px auto-zooms on iOS */
-  max-width: 14rem;
+  max-width: 13rem;
 }
-#beads-pane .bead-detail .bead-assign button {
+#beads-pane .bead-detail .bead-actions select.prio { max-width: 4.6rem; }
+#beads-pane .bead-detail .bead-actions button {
   border: 1px solid var(--accent);
   border-radius: 6px;
   background: none;
   color: var(--accent);
   font-size: 0.78rem;
-  padding: 0.3rem 0.7rem;
+  padding: 0.35rem 0.75rem;
   cursor: pointer;
+  white-space: nowrap;
 }
-#beads-pane .bead-detail .bead-assign button:hover { background: rgba(255,255,255,0.06); }
-#beads-pane .bead-detail .bead-assign select.prio { max-width: 5rem; margin-left: 0.6rem; }
-@media (max-width: 640px) {
-  #beads-pane .bead-detail .bead-assign { flex-wrap: wrap; }
-  #beads-pane .bead-detail .bead-assign select.prio { margin-left: 0; }
-}
-#beads-pane .bead-detail .bead-close {
-  margin-top: 0.55rem;
-  border: 1px solid var(--bad, #b3261e);
-  border-radius: 6px;
-  background: none;
+#beads-pane .bead-detail .bead-actions button:hover { background: rgba(255,255,255,0.06); }
+#beads-pane .bead-detail .bead-actions .bead-close {
+  margin-left: auto; /* close sits apart from the routine controls */
+  border-color: var(--bad, #b3261e);
   color: var(--bad, #b3261e);
-  font-size: 0.78rem;
-  padding: 0.25rem 0.7rem;
-  cursor: pointer;
 }
-#beads-pane .bead-detail .bead-close:hover { background: rgba(179,38,30,0.15); }
+#beads-pane .bead-detail .bead-actions .bead-close:hover { background: rgba(179,38,30,0.15); }
+@media (max-width: 640px) {
+  #beads-pane .bead-detail { padding-left: 1rem; } /* reclaim the indent for controls */
+  #beads-pane .bead-detail .bead-actions .grp { width: 100%; }
+  #beads-pane .bead-detail .bead-actions .grp select { flex: 1; max-width: none; }
+}
 
 /* per-agent conversation tabs under the feed header */
 #feed-tabs {

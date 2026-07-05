@@ -1147,44 +1147,90 @@ async function expandBeadDetail(row, id, leadKey) {
     if (b.comment_count) meta.push(`comments: ${escape(String(b.comment_count))}`);
     lines.push(`<div class="bmeta">${meta.join(" · ")}</div>`);
     detail.innerHTML = lines.join("");
-    if (b.status !== "closed") renderBeadAssign(detail, b, id, leadKey);
     if (b.status !== "closed") {
-      const closeBtn = document.createElement("button");
-      closeBtn.className = "bead-close";
-      closeBtn.textContent = "close bead";
-      closeBtn.onclick = async () => {
-        const reason = prompt(`close ${id} — reason (optional):`);
-        if (reason === null) return; // cancelled
-        closeBtn.disabled = true;
-        try {
-          const cr = await fetch(
-            `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/close`,
-            { method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ reason: reason.trim() }) }
-          );
-          if (cr.status === 401) { window.location.href = "/login"; return; }
-          if (!cr.ok) throw new Error(await cr.text() || `HTTP ${cr.status}`);
-          expandedBeads.delete(id);
-          refreshBeads(true);
-        } catch (err) {
-          closeBtn.disabled = false;
-          appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 160) });
-        }
-      };
-      detail.appendChild(closeBtn);
+      const actions = document.createElement("div");
+      actions.className = "bead-actions";
+      renderBeadAssign(actions, b, id, leadKey);
+      renderBeadPriority(actions, b, id, leadKey);
+      renderBeadClose(actions, id, leadKey);
+      detail.appendChild(actions);
     }
   } catch (err) {
     detail.textContent = "detail unavailable: " + String(err).slice(0, 120);
   }
 }
 
+// beadActionError surfaces a failed write without leaving the pane.
+function beadActionError(err) {
+  appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 200) });
+}
+
+function renderBeadClose(actions, id, leadKey) {
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "bead-close";
+  closeBtn.textContent = "close bead";
+  closeBtn.onclick = async () => {
+    const reason = prompt(`close ${id} — reason (optional):`);
+    if (reason === null) return; // cancelled
+    closeBtn.disabled = true;
+    try {
+      const cr = await fetch(
+        `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/close`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: reason.trim() }) }
+      );
+      if (cr.status === 401) { window.location.href = "/login"; return; }
+      if (!cr.ok) throw new Error(await cr.text() || `HTTP ${cr.status}`);
+      expandedBeads.delete(id);
+      refreshBeads(true);
+    } catch (err) {
+      closeBtn.disabled = false;
+      beadActionError(err);
+    }
+  };
+  actions.appendChild(closeBtn);
+}
+
+// renderBeadPriority is a lone select that applies on change — a priority
+// tweak is low-stakes, so no confirm button cluttering the bar.
+function renderBeadPriority(actions, b, id, leadKey) {
+  const pSel = document.createElement("select");
+  pSel.className = "prio";
+  pSel.title = "priority (applies immediately)";
+  for (let p = 0; p <= 4; p++) {
+    const o = document.createElement("option");
+    o.value = String(p);
+    o.textContent = "p" + p;
+    if (b.priority === p) o.selected = true;
+    pSel.appendChild(o);
+  }
+  pSel.onchange = async () => {
+    pSel.disabled = true;
+    try {
+      const r = await fetch(
+        `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/update`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ priority: pSel.value }) }
+      );
+      if (r.status === 401) { window.location.href = "/login"; return; }
+      if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+      refreshBeads(true);
+    } catch (err) {
+      pSel.disabled = false;
+      beadActionError(err);
+    }
+  };
+  actions.appendChild(pSel);
+}
+
 // renderBeadAssign mounts the cross-ship dispatch control: a fleet-wide
 // persona@ship picker + dispatch button. Assigning routes through the bridge,
 // which updates the graph, force-pulls the target ship, and TELLS the mate —
 // assignment IS dispatch, not just bookkeeping.
-function renderBeadAssign(detail, b, id, leadKey) {
+function renderBeadAssign(actions, b, id, leadKey) {
   const row = document.createElement("div");
-  row.className = "bead-assign";
+  row.className = "grp";
   const sel = document.createElement("select");
   const ph = document.createElement("option");
   ph.value = "";
@@ -1225,44 +1271,12 @@ function renderBeadAssign(detail, b, id, leadKey) {
       refreshBeads(true);
     } catch (err) {
       btn.disabled = false;
-      appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 200) });
+      beadActionError(err);
     }
   };
   row.appendChild(sel);
   row.appendChild(btn);
-
-  // priority edit rides the same row: p0 (highest) … p4
-  const pSel = document.createElement("select");
-  pSel.className = "prio";
-  for (let p = 0; p <= 4; p++) {
-    const o = document.createElement("option");
-    o.value = String(p);
-    o.textContent = "p" + p;
-    if (b.priority === p) o.selected = true;
-    pSel.appendChild(o);
-  }
-  const pBtn = document.createElement("button");
-  pBtn.type = "button";
-  pBtn.textContent = "set";
-  pBtn.onclick = async () => {
-    pBtn.disabled = true;
-    try {
-      const r = await fetch(
-        `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/update`,
-        { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ priority: pSel.value }) }
-      );
-      if (r.status === 401) { window.location.href = "/login"; return; }
-      if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
-      refreshBeads(true);
-    } catch (err) {
-      pBtn.disabled = false;
-      appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 160) });
-    }
-  };
-  row.appendChild(pSel);
-  row.appendChild(pBtn);
-  detail.appendChild(row);
+  actions.appendChild(row);
 }
 
 beadsOpenBtn.onclick = openBeads;
