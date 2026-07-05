@@ -49,6 +49,48 @@ func Ship() *cli.Command {
 				},
 			},
 			{
+				Name:      "add",
+				Usage:     "add a project dir to ship.yaml",
+				ArgsUsage: "<dir>",
+				Action: func(ctx context.Context, c *cli.Command) error {
+					dir := c.Args().First()
+					if dir == "" {
+						return fmt.Errorf("usage: shipmates ship add <dir>")
+					}
+					path, err := ship.ConfigPath()
+					if err != nil {
+						return err
+					}
+					if err := ship.AddProject(path, dir); err != nil {
+						return err
+					}
+					fmt.Printf("added %s to %s — restart `ship serve` (or the logon task) to pick it up\n", dir, path)
+					return nil
+				},
+			},
+			{
+				Name:  "status",
+				Usage: "show each configured project's lead state",
+				Action: func(ctx context.Context, c *cli.Command) error {
+					path, err := ship.ConfigPath()
+					if err != nil {
+						return err
+					}
+					conf, err := ship.LoadConfig(path)
+					if err != nil {
+						return err
+					}
+					for _, st := range ship.StatusAll(conf) {
+						state := "stopped"
+						if st.Running {
+							state = fmt.Sprintf("running  port=%d pid=%d", st.Port, st.PID)
+						}
+						fmt.Printf("%-8s %s\n", state, st.Dir)
+					}
+					return nil
+				},
+			},
+			{
 				Name:  "install",
 				Usage: "run the supervisor at logon (Windows: Scheduled Task; macOS: launchd user agent)",
 				Action: func(ctx context.Context, c *cli.Command) error {

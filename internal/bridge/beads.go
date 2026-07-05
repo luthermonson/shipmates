@@ -78,33 +78,111 @@ func (b *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.Ship != key {
-		out, status, err = b.proxy(r.Context(), body.Ship, "POST", "/beads/pull?wait=1", nil)
-		if err != nil || status >= 300 {
-			msg := fmt.Sprintf("assigned %s, but %s could not pull the graph: %s", assignee, body.Ship, string(out))
-			http.Error(w, msg, http.StatusBadGateway)
-			return
-		}
+	// Target ship offline: the assignee is already on the graph (it'll sync
+	// when the ship returns), so queue the wake-up instead of failing.
+	if !b.dialer.HasSession(body.Ship) {
+		b.mu.Lock()
+		b.dispatchQ = append(b.dispatchQ, queuedDispatch{
+			Ship: body.Ship, Persona: persona, Bead: id, Title: strings.TrimSpace(body.Title), At: time.Now(),
+		})
+		b.mu.Unlock()
+		slog.Info("bead dispatch queued (ship offline)", "bead", id, "assignee", assignee)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"assignee": assignee, "queued": "true"})
+		return
 	}
 
-	title := strings.TrimSpace(body.Title)
-	if title != "" {
-		title = fmt.Sprintf(" — %q", title)
-	}
-	msg := fmt.Sprintf(
-		"[bridge dispatch] You have been assigned bead %s%s. Run `bd show %s` for the full context, claim it with `bd update %s --claim`, then do the work. Record findings as bd comments and `bd close %s` when done.",
-		id, title, id, id, id)
-	tell, _ := json.Marshal(map[string]string{"message": msg})
-	out, status, err = b.proxy(r.Context(), body.Ship, "POST", "/tell/"+url.PathEscape(persona), tell)
-	if err != nil || status >= 300 {
-		msg := fmt.Sprintf("assigned %s, but the dispatch tell failed: %s", assignee, string(out))
-		http.Error(w, msg, http.StatusBadGateway)
+	if err := b.deliverDispatch(r.Context(), queuedDispatch{
+		Ship: body.Ship, Persona: persona, Bead: id, Title: strings.TrimSpace(body.Title),
+	}, body.Ship != key); err != nil {
+		http.Error(w, fmt.Sprintf("assigned %s, but dispatch failed: %v", assignee, err), http.StatusBadGateway)
 		return
 	}
 
 	slog.Info("bead dispatched", "bead", id, "assignee", assignee, "via", key)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"assignee": assignee, "dispatched": "true"})
+}
+
+// queuedDispatch is a wake-up owed to a ship that was offline at assign time.
+type queuedDispatch struct {
+	Ship    string
+	Persona string
+	Bead    string
+	Title   string
+	At      time.Time
+}
+
+// deliverDispatch performs the wake-up half of an assignment: force-pull the
+// graph on the target ship (so the bead exists locally) then tell the mate.
+func (b *Server) deliverDispatch(ctx context.Context, q queuedDispatch, pull bool) error {
+	if pull {
+		if out, status, err := b.proxy(ctx, q.Ship, "POST", "/beads/pull?wait=1", nil); err != nil || status >= 300 {
+			return fmt.Errorf("%s could not pull the graph: %s", q.Ship, string(out))
+		}
+	}
+	title := q.Title
+	if title != "" {
+		title = fmt.Sprintf(" — %q", title)
+	}
+	msg := fmt.Sprintf(
+		"[bridge dispatch] You have been assigned bead %s%s. Run `bd show %s` for the full context, claim it with `bd update %s --claim`, then do the work. Record findings as bd comments and `bd close %s` when done.",
+		q.Bead, title, q.Bead, q.Bead, q.Bead)
+	tell, _ := json.Marshal(map[string]string{"message": msg})
+	if out, status, err := b.proxy(ctx, q.Ship, "POST", "/tell/"+url.PathEscape(q.Persona), tell); err != nil || status >= 300 {
+		return fmt.Errorf("dispatch tell failed: %s", string(out))
+	}
+	return nil
+}
+
+// dispatchQueueTTL bounds how long an undelivered dispatch stays queued. The
+// assignee is on the graph regardless; after this long a wake-up tell would
+// be more confusing than useful.
+const dispatchQueueTTL = 24 * time.Hour
+
+// dispatchSweepLoop retries queued dispatches as their target ships
+// reconnect. Delivered and expired entries drop; the rest stay for the next
+// sweep.
+func (b *Server) dispatchSweepLoop(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		b.mu.Lock()
+		pending := b.dispatchQ
+		b.mu.Unlock()
+		if len(pending) == 0 {
+			continue
+		}
+		var keep []queuedDispatch
+		for _, q := range pending {
+			if time.Since(q.At) > dispatchQueueTTL {
+				slog.Warn("queued dispatch expired", "bead", q.Bead, "ship", q.Ship)
+				continue
+			}
+			if !b.dialer.HasSession(q.Ship) {
+				keep = append(keep, q)
+				continue
+			}
+			dctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			err := b.deliverDispatch(dctx, q, true)
+			cancel()
+			if err != nil {
+				slog.Warn("queued dispatch retry failed", "bead", q.Bead, "ship", q.Ship, "err", err)
+				keep = append(keep, q)
+				continue
+			}
+			slog.Info("queued dispatch delivered", "bead", q.Bead, "ship", q.Ship, "persona", q.Persona)
+		}
+		b.mu.Lock()
+		// entries assigned while we swept were appended to b.dispatchQ; keep them
+		b.dispatchQ = append(keep, b.dispatchQ[len(pending):]...)
+		b.mu.Unlock()
+	}
 }
 
 // beadIDOK mirrors the lead-side guard: prefix-hash ids only, so a path

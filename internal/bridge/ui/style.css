@@ -99,7 +99,12 @@ main {
   white-space: pre-wrap;
   word-break: break-all;
   font-size: 0.8rem;
+  /* long commands clamp; tap to expand (see renderPendingRow) */
+  max-height: 3.2em;
+  overflow: hidden;
+  cursor: pointer;
 }
+#pending-pane .cmd.expanded { max-height: none; }
 #pending-pane button {
   border: 0;
   border-radius: 4px;
@@ -643,6 +648,11 @@ section#feed {
   cursor: pointer;
 }
 #beads-pane .bead-detail .bead-assign button:hover { background: rgba(255,255,255,0.06); }
+#beads-pane .bead-detail .bead-assign select.prio { max-width: 5rem; margin-left: 0.6rem; }
+@media (max-width: 640px) {
+  #beads-pane .bead-detail .bead-assign { flex-wrap: wrap; }
+  #beads-pane .bead-detail .bead-assign select.prio { margin-left: 0; }
+}
 #beads-pane .bead-detail .bead-close {
   margin-top: 0.55rem;
   border: 1px solid var(--bad, #b3261e);

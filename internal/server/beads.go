@@ -244,6 +244,7 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.addEvent(Event{Persona: "(bridge)", Type: "bead:update", Text: id + " → " + strings.TrimSpace(body.Assignee+" "+body.Priority)})
+	invalidateBeadsSummary()
 	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	_, _ = w.Write([]byte(out))
 }
@@ -359,6 +360,50 @@ func (s *Server) notifyBeadsNudge() {
 	slog.Debug("beads nudge sent", "status", resp.StatusCode)
 }
 
+// beadsSummaryCache backs the ⛃ badge poll: the count changes slowly and a
+// bd spawn per UI tick would be silly, so it's cached briefly.
+var (
+	beadsSummaryMu   sync.Mutex
+	beadsSummaryAt   time.Time
+	beadsSummaryOpen int
+	beadsSummaryTTL  = 30 * time.Second
+)
+
+// invalidateBeadsSummary drops the badge cache after a write so the count
+// the operator just changed doesn't lag behind their own action.
+func invalidateBeadsSummary() {
+	beadsSummaryMu.Lock()
+	beadsSummaryAt = time.Time{}
+	beadsSummaryMu.Unlock()
+}
+
+// handleBeadsSummary serves a tiny {open: N} for the bridge's badge.
+func (s *Server) handleBeadsSummary(w http.ResponseWriter, r *http.Request) {
+	if !beadsEnabled() {
+		http.Error(w, "no beads workspace", http.StatusNotFound)
+		return
+	}
+	beadsSummaryMu.Lock()
+	fresh := time.Since(beadsSummaryAt) < beadsSummaryTTL
+	open := beadsSummaryOpen
+	beadsSummaryMu.Unlock()
+	if !fresh {
+		out, err := runBD("list", "--json")
+		if err != nil {
+			http.Error(w, "bd list: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		var beads []json.RawMessage
+		_ = json.Unmarshal([]byte(out), &beads)
+		open = len(beads)
+		beadsSummaryMu.Lock()
+		beadsSummaryOpen, beadsSummaryAt = open, time.Now()
+		beadsSummaryMu.Unlock()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int{"open": open})
+}
+
 // beadIDOK guards the show endpoint: bd ids are prefix-hash (proj-c03, with
 // dotted epics like proj-a3f8.1). Reject anything else so a path segment can
 // never smuggle flags or shell-ish input into the bd invocation.
@@ -444,6 +489,7 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.addEvent(Event{Persona: "(bridge)", Type: "bead:create", Text: strings.TrimSpace(body.Title)})
+	invalidateBeadsSummary()
 	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(out))
@@ -474,6 +520,7 @@ func (s *Server) handleBeadClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.addEvent(Event{Persona: "(bridge)", Type: "bead:close", Text: id})
+	invalidateBeadsSummary()
 	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	_, _ = w.Write([]byte(out))
 }

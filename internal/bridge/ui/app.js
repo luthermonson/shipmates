@@ -218,6 +218,7 @@ function selectLead(key) {
   updateFeedTitle();
   updateTellEnabled();
   refreshPending(); // switch the pending pane to this lead immediately
+  refreshBeadsBadge(); // the ⛃ count is per-ship
   openStream(key);
 }
 
@@ -348,7 +349,7 @@ function appendEventDOM(e) {
       + (t.startsWith("permission") ? " permission" : "")
       + (t === "result" ? " result" : "");
     div.innerHTML =
-      `${head}/<span class="kind">${escape(t)}</span>: ${escape(e.text || "")}` +
+      `${head}/<span class="kind">${escape(t)}</span>: ${linkifyRefs(escape(e.text || ""))}` +
       (t === "result" && e.model ? ` <span class="model">${escape(shortModel(e.model))}</span>` : "") +
       "\n";
   }
@@ -359,6 +360,20 @@ function appendEventDOM(e) {
 // shortModel compresses model ids for the badge: claude-opus-4-7 → opus-4-7.
 function shortModel(m) {
   return String(m).replace(/^claude-/, "").replace(/-\d{8}$/, "");
+}
+
+// linkifyRefs turns gh-<n> / #<n> mentions in (already-escaped) feed text
+// into issue links against the selected ship's repo. The #<n> form only
+// matches after whitespace/punctuation-openers so escaped entities
+// (&amp;#39;) and code fragments don't false-link.
+function linkifyRefs(html) {
+  const lead = selected ? knownLeads.get(selected) : null;
+  if (!lead || !lead.repo_url) return html;
+  const link = (label, n) =>
+    `<a href="${lead.repo_url}/issues/${n}" target="_blank" rel="noopener">${label}</a>`;
+  return html
+    .replace(/\bgh-(\d+)\b/g, (m, n) => link(m, n))
+    .replace(/(^|[\s(,:])#(\d+)\b/g, (m, pre, n) => pre + link("#" + n, n));
 }
 
 function appendEvent(e) {
@@ -545,6 +560,9 @@ function renderPendingRow(it, indent) {
     `<div><span class="who">${escape(it.persona)}</span> wants ` +
     `<span class="tool">${escape(it.tool)}</span></div>` +
     (it.input ? `<div class="cmd">${escape(it.input)}</div>` : "");
+  // long commands clamp to a couple of lines; tap to read the whole thing
+  const cmd = meta.querySelector(".cmd");
+  if (cmd) cmd.onclick = () => cmd.classList.toggle("expanded");
   const allow = document.createElement("button");
   allow.className = "allow";
   allow.textContent = "allow";
@@ -983,6 +1001,7 @@ async function refreshBeads(force) {
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const text = await r.text();
+    if (force) refreshBeadsBadge(); // writes just happened; resync the ⛃ count
     if (!force && text === beadsLastJSON) return;
     beadsLastJSON = text;
     renderBeads(JSON.parse(text));
@@ -1198,8 +1217,11 @@ function renderBeadAssign(detail, b, id, leadKey) {
       );
       if (r.status === 401) { window.location.href = "/login"; return; }
       if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+      const res = await r.json();
       appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead:dispatch",
-        text: `${id} → ${target.persona}@${target.ship.split(":")[0]}` });
+        text: res.queued
+          ? `${id} assigned to ${res.assignee} — ship offline, dispatch queued for reconnect`
+          : `${id} → ${target.persona}@${target.ship.split(":")[0]}` });
       refreshBeads(true);
     } catch (err) {
       btn.disabled = false;
@@ -1208,10 +1230,59 @@ function renderBeadAssign(detail, b, id, leadKey) {
   };
   row.appendChild(sel);
   row.appendChild(btn);
+
+  // priority edit rides the same row: p0 (highest) … p4
+  const pSel = document.createElement("select");
+  pSel.className = "prio";
+  for (let p = 0; p <= 4; p++) {
+    const o = document.createElement("option");
+    o.value = String(p);
+    o.textContent = "p" + p;
+    if (b.priority === p) o.selected = true;
+    pSel.appendChild(o);
+  }
+  const pBtn = document.createElement("button");
+  pBtn.type = "button";
+  pBtn.textContent = "set";
+  pBtn.onclick = async () => {
+    pBtn.disabled = true;
+    try {
+      const r = await fetch(
+        `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/update`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ priority: pSel.value }) }
+      );
+      if (r.status === 401) { window.location.href = "/login"; return; }
+      if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+      refreshBeads(true);
+    } catch (err) {
+      pBtn.disabled = false;
+      appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 160) });
+    }
+  };
+  row.appendChild(pSel);
+  row.appendChild(pBtn);
   detail.appendChild(row);
 }
 
 beadsOpenBtn.onclick = openBeads;
+
+// --- beads count badge ---------------------------------------------------------
+//
+// The ⛃ button shows the selected ship's open-bead count so graph activity is
+// visible without opening the pane. The lead caches the count (30s TTL,
+// invalidated on bridge-mediated writes), so this poll is cheap.
+
+async function refreshBeadsBadge() {
+  if (!selected) { beadsOpenBtn.textContent = "⛃ beads"; return; }
+  try {
+    const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/beads/summary`);
+    if (!r.ok) { beadsOpenBtn.textContent = "⛃ beads"; return; }
+    const s = await r.json();
+    beadsOpenBtn.textContent = s.open > 0 ? `⛃ beads (${s.open})` : "⛃ beads";
+  } catch { /* keep the last label; next tick retries */ }
+}
+setInterval(refreshBeadsBadge, 30000);
 
 termOpenBtn.onclick = async () => {
   if (!selected) return;
