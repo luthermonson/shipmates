@@ -68,6 +68,19 @@ type Server struct {
 	lastActivity time.Time     // last register/deregister/event (guarded by s.mu)
 	idleBound    time.Duration // chosen in Run, based on whether a bridge is configured
 	bridged      bool          // wired to a central bridge (changes idle behavior)
+
+	// beads real-time sync state (see beads.go). beadsTrigger wakes the sync
+	// loop ahead of its heartbeat; beadsDirty marks "local writes to
+	// announce"; beadsSig is the watcher's last-seen workspace signature.
+	beadsMu      sync.Mutex
+	beadsDirty   bool
+	beadsSig     string
+	beadsTrigger chan struct{}
+
+	// bridge identity for lead→bridge callbacks (set by startBridge)
+	bridgeURL   string
+	bridgeToken string
+	bridgeKey   string
 }
 
 // idleTimeoutEphemeral is the lifecycle bound for a server spawned by a
@@ -87,12 +100,13 @@ const idleTimeoutBridged = 1 * time.Hour
 // New constructs an empty server.
 func New() *Server {
 	return &Server{
-		live:     map[string]*liveProc{},
-		ptys:     map[string]*ptyProc{},
-		pendings: map[string]*pending{},
-		lastSeen: map[string]time.Time{},
-		exited:   map[string]bool{},
-		stopCh:   make(chan struct{}),
+		live:         map[string]*liveProc{},
+		ptys:         map[string]*ptyProc{},
+		pendings:     map[string]*pending{},
+		lastSeen:     map[string]time.Time{},
+		exited:       map[string]bool{},
+		stopCh:       make(chan struct{}),
+		beadsTrigger: make(chan struct{}, 1),
 	}
 }
 
@@ -147,6 +161,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /bead/{id}", s.handleBeadShow)
 	mux.HandleFunc("POST /bead", s.handleBeadCreate)
 	mux.HandleFunc("POST /bead/{id}/close", s.handleBeadClose)
+	mux.HandleFunc("POST /beads/pull", s.handleBeadsPull)
 	mux.HandleFunc("POST /pty/{persona}/start", s.handlePTYStart)
 	mux.HandleFunc("GET /pty/{persona}/stream", s.handlePTYStream)
 	mux.HandleFunc("GET /pty/{persona}/snapshot", s.handlePTYSnapshot)
