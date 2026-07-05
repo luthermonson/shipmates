@@ -37,9 +37,54 @@ async function refreshLeads() {
   }
 }
 
+// The first-load empty state: instead of a blank feed and a hidden drawer,
+// show every ship as a tappable card with its live status. Disappears once a
+// lead is selected.
+const leadPicker = $("lead-picker");
+
+function renderLeadPicker() {
+  if (selected || knownLeads.size === 0) {
+    leadPicker.hidden = true;
+    leadPicker.innerHTML = "";
+    return;
+  }
+  leadPicker.hidden = false;
+  leadPicker.innerHTML = "";
+  const leads = [...knownLeads.values()].sort((a, b) => a.client_key.localeCompare(b.client_key));
+  for (const lead of leads) {
+    const card = document.createElement("div");
+    card.className = "ship-card";
+    const head = document.createElement("div");
+    head.className = "head";
+    const dot = document.createElement("span");
+    dot.className = "dot" + (lead.connected ? " online" : "");
+    head.appendChild(dot);
+    head.appendChild(document.createTextNode(lead.client_key));
+    const meta = document.createElement("small");
+    meta.textContent = lead.connected ? `online · ${lead.repo}` : "offline";
+    head.appendChild(meta);
+    card.appendChild(head);
+    const mates = mateStatus.get(lead.client_key) || [];
+    if (mates.length > 0) {
+      const row = document.createElement("div");
+      row.className = "mates";
+      for (const m of mates) {
+        const md = document.createElement("span");
+        md.className = "mate " + m.status;
+        md.textContent = m.persona;
+        row.appendChild(md);
+      }
+      card.appendChild(row);
+    }
+    card.onclick = () => selectLead(lead.client_key);
+    leadPicker.appendChild(card);
+  }
+}
+
 function renderLeads(data) {
   knownLeads = new Map(data.map(l => [l.client_key, l]));
   updateTellEnabled(); // selected lead's online state may have flipped
+  renderLeadPicker();
   if (data.length === 0) {
     leadsList.innerHTML = '<li class="empty">no leads connected</li>';
     return;
@@ -140,6 +185,8 @@ function selectLead(key) {
   document.body.classList.remove("drawer-open"); // mobile: give the feed full width
   if (selected === key) return;
   selected = key;
+  leadPicker.hidden = true;
+  leadPicker.innerHTML = "";
   feedBody.innerHTML = "";
   feedEvents = [];
   feedFilter = "all";

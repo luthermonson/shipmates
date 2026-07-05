@@ -437,6 +437,49 @@ section#feed {
 }
 .feed-tab.active { color: var(--text); border-color: var(--accent); background: var(--bg); }
 
+/* first-load ship picker: tappable card per lead with live status */
+#lead-picker {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow-y: auto;
+}
+.ship-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 0.8rem 1rem;
+  cursor: pointer;
+}
+.ship-card:hover { border-color: var(--accent); }
+.ship-card .head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+}
+.ship-card .head small { color: var(--muted); margin-left: auto; font-size: 0.75rem; }
+.ship-card .head .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--bad);
+}
+.ship-card .head .dot.online { background: var(--good); }
+.ship-card .mates { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.55rem; }
+.ship-card .mate {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  color: #fff;
+  opacity: 0.92;
+}
+.ship-card .mate.blocked { background: #b3261e; }
+.ship-card .mate.working { background: #7a6400; }
+.ship-card .mate.idle    { background: #1e6f42; }
+.ship-card .mate.done    { background: #1a4f8a; }
+.ship-card .mate.off     { background: #3a3f45; color: var(--muted); }
+
 #feed-body {
   flex: 1;
   margin: 0;
