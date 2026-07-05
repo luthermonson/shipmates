@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -26,21 +27,17 @@ import (
 // scoped. Cross-fleet questions ("which crew is idle?", "tell the busiest one
 // to stop") need bridge-wide context, which only the bridge has.
 
-const (
-	// conversationMaxIterations caps the chat→tool→chat loop so a misbehaving
-	// model can't pin the bridge. Five iterations covers "list leads, find one,
-	// tell it, wait for result, summarize" — anything richer should be split
-	// into multiple operator turns.
-	conversationMaxIterations = 5
-	// conversationKeepAlive instructs Ollama to keep the model resident in RAM
-	// rather than its 5min default. Cold loads on a 7B model take 30s on this
-	// hardware — pinning warm keeps every turn at ~3s.
-	conversationKeepAlive = "24h"
-)
+// conversationMaxIterations caps the chat→tool→chat loop so a misbehaving
+// model can't pin the bridge. Five iterations covers "list leads, find one,
+// tell it, wait for result, summarize" — anything richer should be split
+// into multiple operator turns.
+const conversationMaxIterations = 5
 
-// chatMessage is one entry in the conversation history we send to Ollama.
-// Role is "system" | "user" | "assistant" | "tool". Tool messages carry the
-// result of a tool the assistant called on the previous turn.
+// chatMessage is one entry in the conversation history sent to the LLM
+// (OpenAI chat-completions shape — Ollama, llama.cpp, LM Studio, vLLM, and
+// OpenAI itself all speak it). Role is "system" | "user" | "assistant" |
+// "tool". Tool messages carry the result of a tool the assistant called on
+// the previous turn.
 type chatMessage struct {
 	Role       string     `json:"role"`
 	Content    string     `json:"content,omitempty"`
@@ -49,14 +46,25 @@ type chatMessage struct {
 	Name       string     `json:"name,omitempty"` // tool name when role=="tool"
 }
 
+// toolCall is the OpenAI wire shape. Note Arguments is a JSON-encoded STRING
+// on the wire (the OpenAI convention), decoded lazily via Args().
 type toolCall struct {
 	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"` // "function"
 	Function toolCallFunc `json:"function"`
 }
 
 type toolCallFunc struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON object, string-encoded per OAI
+}
+
+// Args decodes the string-encoded arguments; a decode failure yields an
+// empty map (tool impls then report their usage error back to the model).
+func (tc toolCall) Args() map[string]any {
+	out := map[string]any{}
+	_ = json.Unmarshal([]byte(tc.Function.Arguments), &out)
+	return out
 }
 
 // conversationRequest is the public shape the UI POSTs.
@@ -76,8 +84,8 @@ type conversationResponse struct {
 // tools the model calls against the bridge's own endpoints, until the model
 // produces a final natural-language reply (or the iteration cap trips).
 func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
-	if b.conv == nil {
-		http.Error(w, "conversation disabled — start bridge with --ollama-url", http.StatusServiceUnavailable)
+	if b.conv == nil || b.conv.url == "" {
+		http.Error(w, "conversation disabled — start bridge with --llm-url", http.StatusServiceUnavailable)
 		return
 	}
 	var req conversationRequest
@@ -91,9 +99,9 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 	var called []toolCall
 
 	for iter := 0; iter < conversationMaxIterations; iter++ {
-		resp, err := b.ollamaChat(r.Context(), messages, tools)
+		resp, err := b.llmChat(r.Context(), messages, tools)
 		if err != nil {
-			http.Error(w, "ollama: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, "llm: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 		// Always append the assistant turn — including tool_calls — so the
@@ -143,39 +151,47 @@ Lead identifiers look like "<repo>:<persona>" (e.g. "card-cannon:lead").
 If the operator names a lead by repo only, list leads to find the exact key.
 Bead ids are opaque short hashes. NEVER type one from memory — ALWAYS call
 list_beads first and use the exact id whose title matches what the operator said.
+fleet_status reports MATES (crew members): "off" means asleep (normal — a tell
+wakes them), not disconnected. Ship connectivity comes from list_leads.
+/no_think
 `),
 	}
 	return append([]chatMessage{system}, in...)
 }
 
-// ollamaChat does one round-trip to Ollama's /api/chat and returns the
-// assistant message (content + any tool_calls).
-type ollamaChatResp struct {
-	Message struct {
-		Role      string     `json:"role"`
-		Content   string     `json:"content"`
-		ToolCalls []toolCall `json:"tool_calls"`
-	} `json:"message"`
+// llmChat does one round-trip to the configured OpenAI-compatible
+// /chat/completions endpoint and returns the assistant message (content +
+// any tool_calls). Host-level tuning (keep-alive, GPU layers) belongs to the
+// LLM server's own config, not this request — that's what keeps this agnostic.
+type llmChatResp struct {
+	Choices []struct {
+		Message struct {
+			Role      string     `json:"role"`
+			Content   string     `json:"content"`
+			ToolCalls []toolCall `json:"tool_calls"`
+		} `json:"message"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
-func (b *Server) ollamaChat(ctx context.Context, messages []chatMessage, tools []any) (*struct {
+// thinkBlock strips reasoning traces (qwen3 et al emit <think>…</think>)
+// from spoken replies — the operator wants the answer, not the monologue.
+var thinkBlock = regexp.MustCompile(`(?s)<think>.*?</think>`)
+
+func (b *Server) llmChat(ctx context.Context, messages []chatMessage, tools []any) (*struct {
 	Content   string
 	ToolCalls []toolCall
 }, error) {
 	payload := map[string]any{
-		"model":      b.conv.model,
-		"messages":   messages,
-		"tools":      tools,
-		"stream":     false,
-		"keep_alive": conversationKeepAlive,
-	}
-	if b.conv.cpuOnly {
-		// num_gpu 0 forces CPU inference — for hosts whose GPU ollama probes
-		// but can't actually run (old cards, driver/toolchain mismatches).
-		payload["options"] = map[string]any{"num_gpu": 0}
+		"model":    b.conv.model,
+		"messages": messages,
+		"tools":    tools,
+		"stream":   false,
 	}
 	body, _ := json.Marshal(payload)
-	req, _ := http.NewRequestWithContext(ctx, "POST", b.conv.url+"/api/chat", bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(b.conv.url, "/")+"/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := b.conv.client.Do(req)
 	if err != nil {
@@ -184,16 +200,24 @@ func (b *Server) ollamaChat(ctx context.Context, messages []chatMessage, tools [
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("ollama %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return nil, fmt.Errorf("llm %d: %s", resp.StatusCode, strings.TrimSpace(string(raw[:min(len(raw), 300)])))
 	}
-	var out ollamaChatResp
+	var out llmChatResp
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode ollama response: %w", err)
+		return nil, fmt.Errorf("decode llm response: %w", err)
 	}
+	if out.Error != nil {
+		return nil, fmt.Errorf("llm: %s", out.Error.Message)
+	}
+	if len(out.Choices) == 0 {
+		return nil, fmt.Errorf("llm returned no choices")
+	}
+	m := out.Choices[0].Message
+	content := strings.TrimSpace(thinkBlock.ReplaceAllString(m.Content, ""))
 	return &struct {
 		Content   string
 		ToolCalls []toolCall
-	}{Content: out.Message.Content, ToolCalls: out.Message.ToolCalls}, nil
+	}{Content: content, ToolCalls: m.ToolCalls}, nil
 }
 
 // toolCatalog is the set of tools the local model can invoke. Mirrors the
@@ -256,7 +280,7 @@ func (b *Server) toolCatalog() []any {
 // JSON string (which the model receives back as the next "tool" message).
 // Errors are returned as JSON {"error": "..."} so the model can recover.
 func (b *Server) dispatchTool(ctx context.Context, tc toolCall) string {
-	args := tc.Function.Arguments
+	args := tc.Args()
 	switch tc.Function.Name {
 	case "list_leads":
 		return b.toolListLeads()

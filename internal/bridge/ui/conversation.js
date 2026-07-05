@@ -220,6 +220,10 @@ function addBubble(role, text) {
 }
 
 function formatArgs(args) {
+  // OpenAI wire format: arguments arrive as a JSON-encoded string
+  if (typeof args === "string") {
+    try { args = JSON.parse(args); } catch { return args.slice(0, 80); }
+  }
   if (!args || Object.keys(args).length === 0) return "";
   return Object.entries(args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ");
 }
