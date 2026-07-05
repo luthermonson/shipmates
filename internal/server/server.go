@@ -282,6 +282,24 @@ func (s *Server) handleTell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Single attachment per shipmate: when a terminal holds the persona's
+	// session, the tell is typed INTO the terminal (bracketed paste + enter)
+	// — same conversation, visible where the operator is looking — instead
+	// of spawning a second process against the same session.
+	s.mu.Lock()
+	pp := s.ptys[persona]
+	s.mu.Unlock()
+	if pp != nil {
+		s.addEvent(Event{Persona: persona, Type: "tell", Text: body.Message})
+		keys := "\x1b[200~" + body.Message + "\x1b[201~\r"
+		if _, err := pp.pt.Write([]byte(keys)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
 	lp, err := s.ensureLive(persona)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -528,6 +546,10 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		return lp, nil
 	}
 
+	// One long-term session per shipmate: resume the same tracked session
+	// that ask/open/fanout use, so tell/term/ask are one continuous
+	// conversation instead of per-surface forks.
+	cfg, idArgs, sessID, sessName, fp := project.SessionLaunch(persona, false)
 	args := []string{
 		"-p",
 		"--input-format", "stream-json",
@@ -535,14 +557,11 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		"--verbose", // required by claude when --print is combined with stream-json output
 		"--include-partial-messages",
 		"--settings", s.hookSettings(persona, true),
-		"--agent", persona,
-		"--name", project.SessionName(persona) + "-live",
 	}
-	if cfg, err := project.ResolvePersonaConfig(persona); err == nil {
-		// Live-server path mediates permission via the PreToolUse gate, so it
-		// passes model/effort only (permission=false).
-		args = append(args, cfg.LaunchFlags(false)...)
-	}
+	args = append(args, idArgs...)
+	// Live-server path mediates permission via the PreToolUse gate, so it
+	// passes model/effort only (permission=false).
+	args = append(args, cfg.LaunchFlags(false)...)
 	// beads: -p sessions never fire SessionStart hooks, so bd's auto-prime
 	// can't run — inject the workflow context at spawn instead.
 	if prime := beadsPrime(); prime != "" {
@@ -572,8 +591,9 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 	s.live[persona] = lp
 	delete(s.exited, persona) // resurrect: a re-spawned mate is no longer "done"
 	s.lastSeen[persona] = time.Now()
+	_ = project.WriteSessionMeta(persona, sessName, sessID, fp)
 	go s.pump(persona, stdout)
-	slog.Info("spawned live crew process", "persona", persona, "pid", cmd.Process.Pid)
+	slog.Info("spawned live crew process", "persona", persona, "pid", cmd.Process.Pid, "session", sessID)
 	return lp, nil
 }
 

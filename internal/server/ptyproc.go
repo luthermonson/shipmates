@@ -56,12 +56,38 @@ const ptyRingCap = 64 * 1024
 const subBufChunks = 256
 
 // ensurePTY returns the persona's PTY-hosted mate, spawning one if needed.
-// PTY mates and stream-json live mates are separate pools: `tell` drives the
-// headless pool; PTY mates are driven by keystrokes.
+// The PTY resumes the shipmate's ONE long-term session (the same one
+// ask/tell use). Single attachment per shipmate: an existing headless live
+// proc is retired first — the terminal takes over the conversation, with
+// full history rendered by claude's own session resume.
 func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if p, ok := s.ptys[persona]; ok {
+		s.mu.Unlock()
+		return p, nil
+	}
+	if lp, ok := s.live[persona]; ok {
+		// retire the headless attachment; its pump cleans up asynchronously
+		_ = lp.stdin.Close()
+		if lp.cmd.Process != nil {
+			_ = lp.cmd.Process.Kill()
+		}
+	}
+	s.mu.Unlock()
+	// wait for the pump to release the session before resuming it here
+	for i := 0; i < 40; i++ {
+		s.mu.Lock()
+		_, still := s.live[persona]
+		s.mu.Unlock()
+		if !still {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.ptys[persona]; ok { // raced with another attach
 		return p, nil
 	}
 
@@ -78,18 +104,16 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 		return nil, fmt.Errorf("resize pty: %w", err)
 	}
 
+	cfg, idArgs, sessID, sessName, fp := project.SessionLaunch(persona, false)
 	args := []string{
 		// observe-only hooks: interactive claude prompts for permissions
 		// natively in the terminal — the operator approves right where they
 		// are typing instead of hunting for the bridge's pending pane behind
 		// the full-screen term
 		"--settings", s.hookSettings(persona, false),
-		"--agent", persona,
-		"--name", project.SessionName(persona) + "-pty",
 	}
-	if cfg, err := project.ResolvePersonaConfig(persona); err == nil {
-		args = append(args, cfg.LaunchFlags(false)...)
-	}
+	args = append(args, idArgs...)
+	args = append(args, cfg.LaunchFlags(false)...)
 	// beads: same prime injection as live mates, for consistent context
 	if prime := beadsPrime(); prime != "" {
 		args = append(args, "--append-system-prompt", prime)
@@ -114,6 +138,7 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 	s.lastSeen[persona] = time.Now()
 	s.refs++
 	s.lastActivity = time.Now()
+	_ = project.WriteSessionMeta(persona, sessName, sessID, fp)
 	go s.pumpPTY(p)
 	return p, nil
 }
