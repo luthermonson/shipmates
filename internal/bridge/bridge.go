@@ -349,12 +349,10 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		if err != nil || status >= 300 {
 			continue
 		}
-		var events []struct {
-			Time    string `json:"time"`
-			Persona string `json:"persona"`
-			Type    string `json:"type"`
-			Text    string `json:"text"`
-		}
+		// Raw passthrough: the lead's event schema grows (timeline stats,
+		// permission fields) and re-marshaling a named subset here silently
+		// stripped every field this proxy didn't know about.
+		var events []json.RawMessage
 		if err := json.Unmarshal(body, &events); err != nil {
 			continue
 		}
@@ -365,8 +363,7 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, e := range events[sent:] {
-			data, _ := json.Marshal(e)
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", e); err != nil {
 				return
 			}
 		}

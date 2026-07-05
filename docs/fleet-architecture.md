@@ -305,8 +305,13 @@ status in `/api/leads`; dots in the web UI; 🔴 opens pending panel. No new dep
 stream endpoint, tunnel proxy, xterm.js in the UI. Read-only attach first;
 keystrokes + single-writer lock second. *The herdr-parity milestone.*
 
-**Phase 3 — headless timeline.** stream-json decoder + structured timeline UI for
-`drain`/`fanout` mates. Cost/duration surfaced per run. *The beyond-herdr milestone.*
+**Phase 3 — headless timeline (landed 2026-07-05).** stream-json decoder
+(`internal/streamjson`, version-guarded: all format knowledge lives there,
+unknown types decode to nothing) + type-aware feed rendering: thinking and
+tool results collapsed-with-tap-to-expand, tool hooks as compact chips, and
+per-turn cost/duration/model on result events. tool_use items from the stream
+are deliberately dropped — the PreToolUse hook already records every call.
+*The beyond-herdr milestone.*
 
 **Phase 4 — beads, single ship.** `bd` embedded on one ship; pins/verdicts/patterns
 shadow-written to beads; `bd prime` wired into persona session start; bridge reads the
