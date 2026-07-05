@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -119,20 +123,80 @@ func beadsSyncRemote() bool {
 	return false
 }
 
-// beadsSyncInterval is the fleet-graph heartbeat cadence. Dolt merges are
-// cell-level and bead ids are hash-based, so late syncs converge instead of
-// conflicting — the interval is a freshness knob, not a correctness one.
+// beadsSyncInterval is the fleet-graph heartbeat cadence — now the SAFETY NET
+// under the real-time nudge path, catching anything the watcher missed. Dolt
+// merges are cell-level and bead ids are hash-based, so late syncs converge
+// instead of conflicting — the interval is a freshness knob, not a
+// correctness one.
 const beadsSyncInterval = 3 * time.Minute
 
-// beadsSyncLoop pulls then pushes the bead graph on a heartbeat, keeping this
-// ship's slice of the fleet graph converging with the shared remote. Failures
-// log (throttled by the interval itself) and never disturb serving.
-func (s *Server) beadsSyncLoop(ctx context.Context) {
+// beadsWatchInterval is how often the watcher probes for out-of-band local
+// writes (mates running bd themselves). A 2KB file read per tick.
+const beadsWatchInterval = 3 * time.Second
+
+// beadsStateSig fingerprints the workspace's data state: the content of the
+// dolt noms manifest(s), which carry the root hash and change exactly when
+// the graph changes. Chosen over file mtimes (journal writes churn those
+// without data changes) and over `.beads/last-touched` (bd updates it on
+// SHOW, so reads would false-trigger).
+func beadsStateSig() string {
+	matches, _ := filepath.Glob(filepath.Join(".beads", "embeddeddolt", "*", ".dolt", "noms", "manifest"))
+	if len(matches) == 0 {
+		return ""
+	}
+	sort.Strings(matches)
+	h := sha256.New()
+	for _, m := range matches {
+		b, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// markBeadsDirty records a local graph write and wakes the sync loop: the
+// change should be pushed AND announced to the fleet. Called by the watcher
+// and by the bridge-mediated write endpoints (create/close).
+func (s *Server) markBeadsDirty() {
+	s.beadsMu.Lock()
+	s.beadsDirty = true
+	s.beadsMu.Unlock()
+	select {
+	case s.beadsTrigger <- struct{}{}:
+	default: // a wake-up is already queued; the loop will see dirty
+	}
+}
+
+// requestBeadsPull wakes the sync loop without marking dirty — the bridge
+// says another ship pushed; pull now, nothing local to announce.
+func (s *Server) requestBeadsPull() {
+	select {
+	case s.beadsTrigger <- struct{}{}:
+	default:
+	}
+}
+
+// handleBeadsPull is the bridge's nudge target.
+func (s *Server) handleBeadsPull(w http.ResponseWriter, r *http.Request) {
 	if !beadsEnabled() || !beadsSyncRemote() {
+		http.Error(w, "no synced beads workspace", http.StatusNotFound)
 		return
 	}
-	slog.Info("beads sync heartbeat started", "interval", beadsSyncInterval)
-	ticker := time.NewTicker(beadsSyncInterval)
+	s.requestBeadsPull()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// beadsWatchLoop probes the workspace signature and marks dirty on change.
+// The sync loop re-baselines the signature after every pull/push, so changes
+// caused by syncing (our own pulls) never re-trigger — only out-of-band
+// writes (a mate's bd create/close/update) get announced.
+func (s *Server) beadsWatchLoop(ctx context.Context) {
+	s.beadsMu.Lock()
+	s.beadsSig = beadsStateSig()
+	s.beadsMu.Unlock()
+	ticker := time.NewTicker(beadsWatchInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -142,14 +206,97 @@ func (s *Server) beadsSyncLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		if _, err := runBD("dolt", "pull"); err != nil {
-			slog.Warn("beads pull failed", "err", err)
-			continue
+		sig := beadsStateSig()
+		s.beadsMu.Lock()
+		changed := sig != "" && sig != s.beadsSig
+		if changed {
+			s.beadsSig = sig
 		}
-		if _, err := runBD("dolt", "push"); err != nil {
-			slog.Warn("beads push failed", "err", err)
+		s.beadsMu.Unlock()
+		if changed {
+			s.markBeadsDirty()
 		}
 	}
+}
+
+// beadsSyncLoop pulls then pushes the bead graph — on the heartbeat, and
+// immediately when woken (local write detected, or the bridge nudged us to
+// pull another ship's push). After a dirty sync it notifies the bridge so
+// the rest of the fleet pulls within seconds instead of a heartbeat.
+// Failures log and never disturb serving.
+func (s *Server) beadsSyncLoop(ctx context.Context) {
+	if !beadsEnabled() || !beadsSyncRemote() {
+		return
+	}
+	go s.beadsWatchLoop(ctx)
+	slog.Info("beads sync started", "heartbeat", beadsSyncInterval, "watch", beadsWatchInterval)
+	ticker := time.NewTicker(beadsSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+		case <-s.beadsTrigger:
+		}
+
+		s.beadsMu.Lock()
+		wasDirty := s.beadsDirty
+		s.beadsDirty = false
+		s.beadsMu.Unlock()
+
+		pushed := true
+		if _, err := runBD("dolt", "pull"); err != nil {
+			slog.Warn("beads pull failed", "err", err)
+			pushed = false
+		} else if _, err := runBD("dolt", "push"); err != nil {
+			slog.Warn("beads push failed", "err", err)
+			pushed = false
+		}
+
+		// absorb this sync's own mutations so the watcher doesn't re-fire
+		s.beadsMu.Lock()
+		s.beadsSig = beadsStateSig()
+		if !pushed && wasDirty {
+			s.beadsDirty = true // announce on the next successful sync instead
+		}
+		s.beadsMu.Unlock()
+
+		if pushed && wasDirty {
+			s.notifyBeadsNudge()
+		}
+	}
+}
+
+// notifyBeadsNudge tells the bridge "we pushed — have the other ships pull."
+// Plain outbound HTTPS with the same bearer token the tunnel uses; a failure
+// just means the fleet falls back to heartbeat freshness.
+func (s *Server) notifyBeadsNudge() {
+	s.mu.Lock()
+	url, token, key := s.bridgeURL, s.bridgeToken, s.bridgeKey
+	s.mu.Unlock()
+	if url == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]string{"from": key})
+	req, err := http.NewRequest("POST", strings.TrimRight(url, "/")+"/api/beads/nudge", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Warn("beads nudge failed", "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	slog.Debug("beads nudge sent", "status", resp.StatusCode)
 }
 
 // beadIDOK guards the show endpoint: bd ids are prefix-hash (proj-c03, with
@@ -237,6 +384,7 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.addEvent(Event{Persona: "(bridge)", Type: "bead:create", Text: strings.TrimSpace(body.Title)})
+	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(out))
 }
@@ -266,6 +414,7 @@ func (s *Server) handleBeadClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.addEvent(Event{Persona: "(bridge)", Type: "bead:close", Text: id})
+	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	_, _ = w.Write([]byte(out))
 }
 

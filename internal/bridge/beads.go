@@ -1,10 +1,41 @@
 package bridge
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sort"
+	"time"
 )
+
+// handleBeadsNudge is a lead's "we just pushed" callback: fan a pull-now out
+// to every OTHER connected ship so the shared graph converges in seconds
+// instead of a heartbeat. Fan-out is async on a background context — the
+// nudging lead shouldn't block on the slowest ship's pull, and r.Context()
+// dies when this handler returns.
+func (b *Server) handleBeadsNudge(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		From string `json:"from"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	targets := 0
+	for _, key := range b.dialer.ListClients() {
+		if key == body.From {
+			continue
+		}
+		targets++
+		go func(key string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, status, err := b.proxy(ctx, key, "POST", "/beads/pull", nil); err != nil && status != http.StatusNotFound {
+				slog.Warn("beads nudge: pull dispatch failed", "ship", key, "err", err)
+			}
+		}(key)
+	}
+	slog.Debug("beads nudge", "from", body.From, "ships", targets)
+	w.WriteHeader(http.StatusAccepted)
+}
 
 // handleAggregateBeads fans /beads.json out to every connected lead and
 // returns the union deduped by bead id — ships syncing one shared graph

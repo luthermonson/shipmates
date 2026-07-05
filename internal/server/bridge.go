@@ -45,6 +45,13 @@ func (s *Server) startBridge(ctx context.Context, conf *project.Config) {
 		return
 	}
 
+	// identity for lead→bridge callbacks (the beads nudge)
+	s.mu.Lock()
+	s.bridgeURL = strings.TrimSpace(conf.Bridge.URL)
+	s.bridgeToken = conf.Bridge.Token()
+	s.bridgeKey = clientKey
+	s.mu.Unlock()
+
 	headers := http.Header{}
 	headers.Set("X-Shipmates-Identity", clientKey)
 	headers.Set("X-Shipmates-Repo", project.RepoName())

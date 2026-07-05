@@ -185,10 +185,23 @@ every ship's `bd` embedded DB pushes/pulls against it.
   `events-export` (audit trail JSONL); no-db JSONL-only mode; embedded
   dolt sql-server auto-starts per project.
 
-**Sync model:** embedded `bd` per ship (single-writer, file-locked) + `bd dolt push/pull`
-against the bridge's remote on a heartbeat (post-write hook + N-second poll). Hash-based
-bead IDs make concurrent multi-ship writes merge-safe (Dolt cell-level merge). Real-time
-nudge: bridge broadcasts "pull now" over the existing tunnel when it sees new pushes.
+**Sync model (landed):** embedded `bd` per ship (single-writer, file-locked) +
+`bd dolt push/pull` against the shared remote. Two tiers:
+
+- **Real-time nudge** — the lead watches the workspace signature (content of
+  the dolt noms manifest, NOT file mtimes — journal writes churn those — and
+  NOT `.beads/last-touched` — bd updates it on `show`, so reads would false-
+  trigger) on a 3s poll; bridge-mediated writes mark dirty directly. On a
+  local write: pull, push, then POST `/api/beads/nudge` to the bridge, which
+  fans `POST /beads/pull` out to every other connected ship through the
+  tunnels. Cross-ship propagation measured at ~4s. The sync loop re-baselines
+  the signature after its own pull/push so sync-induced changes never
+  self-trigger (no nudge storms).
+- **3-minute heartbeat** — unchanged, now the safety net under the nudge
+  (failed pushes, missed watches, ships that were offline).
+
+Hash-based bead IDs make concurrent multi-ship writes merge-safe (Dolt
+cell-level merge).
 
 **Schema extensions** beyond stock beads (promote from metadata JSON to columns for
 dashboard query speed): `ship_id`, `verdict_state`, `surface` (file-glob
