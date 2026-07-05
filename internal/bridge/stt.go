@@ -89,7 +89,7 @@ func (b *Server) handleVoiceConfig(w http.ResponseWriter, r *http.Request) {
 	caps := map[string]bool{"conversation": false, "tts": false, "stt": false}
 	if b.conv != nil {
 		caps["conversation"] = b.conv.url != ""
-		caps["tts"] = b.conv.voice != ""
+		caps["tts"] = b.conv.voice != "" || b.conv.ttsURL != ""
 		caps["stt"] = b.conv.sttURL != ""
 	}
 	w.Header().Set("Content-Type", "application/json")

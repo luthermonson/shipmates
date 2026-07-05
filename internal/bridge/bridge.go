@@ -61,7 +61,9 @@ type convConfig struct {
 	url      string // Ollama base URL; "" disables /api/conversation
 	model    string // Ollama model tag
 	cpuOnly  bool   // force num_gpu=0 (broken-GPU hosts)
-	voice    string // Edge TTS voice tag; "" disables /api/tts
+	voice    string // voice tag: Edge (en-US-AriaNeural) or the OAI server's voice name
+	ttsURL   string // OpenAI-compatible /v1/audio/speech endpoint; "" = Edge websocket
+	ttsModel string // model field for OAI-style TTS servers
 	sttURL   string // transcription endpoint; "" disables /api/stt
 	sttModel string // model field sent to the transcription server (OAI-style)
 	client   *http.Client
@@ -87,7 +89,9 @@ type Options struct {
 	OllamaURL   string // optional; enables /api/conversation (e.g. http://127.0.0.1:11434)
 	OllamaModel string // model tag for the conversation loop, e.g. "qwen2.5:7b"
 	OllamaCPU   bool   // force CPU inference (hosts whose GPU ollama can't actually drive)
-	TTSVoice    string // optional Edge TTS voice tag (e.g. en-US-AriaNeural); empty disables /api/tts
+	TTSVoice    string // voice tag (Edge: en-US-AriaNeural; OAI servers: e.g. af_heart); empty + no TTSURL disables /api/tts
+	TTSURL      string // optional OpenAI-compatible /v1/audio/speech endpoint (kokoro-fastapi etc.); overrides Edge
+	TTSModel    string // model field for OAI-style TTS servers
 	STTURL      string // optional transcription endpoint (whisper.cpp /inference or OAI /v1/audio/transcriptions); empty disables /api/stt
 	STTModel    string // model name forwarded to OAI-style STT servers; whisper.cpp ignores it
 }
@@ -105,12 +109,14 @@ func New(opts Options) (*Server, error) {
 		}
 		b.store = s
 	}
-	if opts.OllamaURL != "" || opts.TTSVoice != "" || opts.STTURL != "" {
+	if opts.OllamaURL != "" || opts.TTSVoice != "" || opts.TTSURL != "" || opts.STTURL != "" {
 		b.conv = &convConfig{
 			url:      strings.TrimRight(opts.OllamaURL, "/"),
 			model:    opts.OllamaModel,
 			cpuOnly:  opts.OllamaCPU,
 			voice:    strings.TrimSpace(opts.TTSVoice),
+			ttsURL:   strings.TrimSpace(opts.TTSURL),
+			ttsModel: strings.TrimSpace(opts.TTSModel),
 			sttURL:   strings.TrimSpace(opts.STTURL),
 			sttModel: strings.TrimSpace(opts.STTModel),
 			// Long timeout because a tool-call loop with multiple Ollama round
