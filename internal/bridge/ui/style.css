@@ -623,12 +623,12 @@ section#feed {
   cursor: pointer;
 }
 #beads-pane .bead-create .row button[type="submit"] { border-color: var(--accent); color: var(--accent); }
-/* one action bar per open bead: [assign+dispatch] [priority] ......... [close] */
+/* one action line per open bead: [assign to… | dispatch | p2] ... [✎] [✕] */
 #beads-pane .bead-detail .bead-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 0.8rem;
+  gap: 0.5rem 0.6rem;
   margin-top: 0.7rem;
   padding-top: 0.55rem;
   border-top: 1px solid rgba(255,255,255,0.06);
@@ -636,7 +636,13 @@ section#feed {
 #beads-pane .bead-detail .bead-actions .grp {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.45rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+#beads-pane .bead-detail .bead-actions .grp.icons {
+  flex: 0 0 auto;
+  margin-left: auto; /* edit/close sit apart from the routine controls */
 }
 #beads-pane .bead-detail .bead-actions select {
   background: var(--panel);
@@ -645,9 +651,12 @@ section#feed {
   color: var(--text);
   padding: 0.3rem 0.5rem;
   font-size: 16px; /* <16px auto-zooms on iOS */
-  max-width: 13rem;
 }
-#beads-pane .bead-detail .bead-actions select.prio { max-width: 4.6rem; }
+#beads-pane .bead-detail .bead-actions select:not(.prio) {
+  flex: 1;
+  min-width: 6rem;
+  max-width: 14rem;
+}
 #beads-pane .bead-detail .bead-actions button {
   border: 1px solid var(--accent);
   border-radius: 6px;
@@ -659,16 +668,50 @@ section#feed {
   white-space: nowrap;
 }
 #beads-pane .bead-detail .bead-actions button:hover { background: rgba(255,255,255,0.06); }
+#beads-pane .bead-detail .bead-actions button.icon {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.9rem;
+  line-height: 1;
+}
 #beads-pane .bead-detail .bead-actions .bead-close {
-  margin-left: auto; /* close sits apart from the routine controls */
   border-color: var(--bad, #b3261e);
   color: var(--bad, #b3261e);
 }
 #beads-pane .bead-detail .bead-actions .bead-close:hover { background: rgba(179,38,30,0.15); }
+
+/* inline title/description editor (✎) */
+#beads-pane .bead-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  max-width: 34rem;
+  margin-top: 0.6rem;
+}
+#beads-pane .bead-edit input,
+#beads-pane .bead-edit textarea {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 0.45rem 0.6rem;
+  font-size: 16px; /* <16px auto-zooms on iOS */
+  font-family: inherit;
+}
+#beads-pane .bead-edit .row { display: flex; gap: 0.5rem; }
+#beads-pane .bead-edit .row button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.82rem;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+}
+#beads-pane .bead-edit .row button[type="submit"] { border-color: var(--accent); color: var(--accent); }
+
 @media (max-width: 640px) {
   #beads-pane .bead-detail { padding-left: 1rem; } /* reclaim the indent for controls */
-  #beads-pane .bead-detail .bead-actions .grp { width: 100%; }
-  #beads-pane .bead-detail .bead-actions .grp select { flex: 1; max-width: none; }
+  #beads-pane .bead-detail .bead-actions select:not(.prio) { max-width: none; }
 }
 
 /* per-agent conversation tabs under the feed header */

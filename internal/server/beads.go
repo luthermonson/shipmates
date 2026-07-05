@@ -202,9 +202,10 @@ func (s *Server) handleBeadsPull(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// handleBeadUpdate applies the dispatch-relevant field updates to one bead:
-// currently assignee (persona@ship — the fleet dispatch convention) and
-// priority. Values ride flag=value form, same injection rules as create.
+// handleBeadUpdate applies field updates to one bead: assignee (persona@ship
+// — the fleet dispatch convention), priority, and human edits to title/
+// description from the bridge UI. Values ride flag=value form, same
+// injection rules as create.
 func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 	if !beadsEnabled() {
 		http.Error(w, "no beads workspace", http.StatusNotFound)
@@ -216,8 +217,10 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Assignee string `json:"assignee"`
-		Priority string `json:"priority"`
+		Assignee    string  `json:"assignee"`
+		Priority    string  `json:"priority"`
+		Title       string  `json:"title"`
+		Description *string `json:"description"` // pointer: "" is a real edit (clear it)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
@@ -234,8 +237,14 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		args = append(args, "--priority="+p)
 	}
+	if t := strings.TrimSpace(body.Title); t != "" {
+		args = append(args, "--title="+t)
+	}
+	if body.Description != nil {
+		args = append(args, "--description="+strings.TrimSpace(*body.Description), "--allow-empty-description")
+	}
 	if len(args) == 2 {
-		http.Error(w, "want {assignee?, priority?}", http.StatusBadRequest)
+		http.Error(w, "want {assignee?, priority?, title?, description?}", http.StatusBadRequest)
 		return
 	}
 	out, err := runBD(args...)

@@ -1104,14 +1104,16 @@ function renderBeadCreate() {
     form.querySelector(".cancel").onclick = () => { form.remove(); btn.hidden = false; };
     form.onsubmit = async (e) => {
       e.preventDefault();
-      const title = form.title.value.trim();
+      // form.elements, not form.title — a form's named-control access is
+      // shadowed by the built-in title attribute
+      const title = form.elements.title.value.trim();
       if (!title) return;
       form.querySelectorAll("button").forEach((b) => (b.disabled = true));
       try {
         const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/bead`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title, description: form.description.value.trim() }),
+          body: JSON.stringify({ title, description: form.elements.description.value.trim() }),
         });
         if (r.status === 401) { window.location.href = "/login"; return; }
         if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
@@ -1124,7 +1126,7 @@ function renderBeadCreate() {
       }
     };
     bar.appendChild(form);
-    form.title.focus();
+    form.elements.title.focus();
   };
   bar.appendChild(btn);
   beadsPane.appendChild(bar);
@@ -1171,9 +1173,13 @@ async function expandBeadDetail(row, id, leadKey) {
     if (b.status !== "closed") {
       const actions = document.createElement("div");
       actions.className = "bead-actions";
-      renderBeadAssign(actions, b, id, leadKey);
-      renderBeadPriority(actions, b, id, leadKey);
-      renderBeadClose(actions, id, leadKey);
+      const grp = renderBeadAssign(actions, b, id, leadKey);
+      renderBeadPriority(grp, b, id, leadKey); // priority rides the assign line
+      const icons = document.createElement("div");
+      icons.className = "grp icons";
+      renderBeadEdit(icons, b, id, leadKey, detail);
+      renderBeadClose(icons, id, leadKey);
+      actions.appendChild(icons);
       detail.appendChild(actions);
     }
   } catch (err) {
@@ -1189,8 +1195,9 @@ function beadActionError(err) {
 function renderBeadClose(actions, id, leadKey) {
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
-  closeBtn.className = "bead-close";
-  closeBtn.textContent = "close bead";
+  closeBtn.className = "bead-close icon";
+  closeBtn.textContent = "✕";
+  closeBtn.title = "close bead";
   closeBtn.onclick = async () => {
     const reason = prompt(`close ${id} — reason (optional):`);
     if (reason === null) return; // cancelled
@@ -1243,6 +1250,51 @@ function renderBeadPriority(actions, b, id, leadKey) {
     }
   };
   actions.appendChild(pSel);
+}
+
+// renderBeadEdit: ✎ toggles an inline title/description editor — beads are a
+// shared human+agent surface, not agent-only. Saves via /bead/{id}/update.
+function renderBeadEdit(container, b, id, leadKey, detail) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "icon";
+  btn.textContent = "✎";
+  btn.title = "edit title & description";
+  btn.onclick = () => {
+    const existing = detail.querySelector(".bead-edit");
+    if (existing) { existing.remove(); return; }
+    const form = document.createElement("form");
+    form.className = "bead-edit";
+    form.innerHTML =
+      '<input name="title" maxlength="200" required>' +
+      '<textarea name="description" rows="4"></textarea>' +
+      '<div class="row"><button type="submit">save</button> <button type="button" class="cancel">cancel</button></div>';
+    form.elements.title.value = b.title || "";
+    form.elements.description.value = b.description || "";
+    form.querySelector(".cancel").onclick = () => form.remove();
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const title = form.elements.title.value.trim();
+      if (!title) return;
+      form.querySelectorAll("button").forEach((x) => (x.disabled = true));
+      try {
+        const r = await fetch(
+          `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/update`,
+          { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, description: form.elements.description.value.trim() }) }
+        );
+        if (r.status === 401) { window.location.href = "/login"; return; }
+        if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+        refreshBeads(true);
+      } catch (err) {
+        form.querySelectorAll("button").forEach((x) => (x.disabled = false));
+        beadActionError(err);
+      }
+    };
+    detail.appendChild(form);
+    form.elements.title.focus();
+  };
+  container.appendChild(btn);
 }
 
 // renderBeadAssign mounts the cross-ship dispatch control: a fleet-wide
@@ -1298,6 +1350,7 @@ function renderBeadAssign(actions, b, id, leadKey) {
   row.appendChild(sel);
   row.appendChild(btn);
   actions.appendChild(row);
+  return row;
 }
 
 beadsOpenBtn.onclick = openBeads;
