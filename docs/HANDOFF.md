@@ -107,22 +107,27 @@ running its own crew.
 
 ## Not built yet (the queue, in intended order)
 
-1. **gh ↔ beads seam** — `external_id: gh:issues/N` convention in persona/
-   routing instructions + clickable gh links in the bead detail UI.
-2. **Ship supervisor** — `shipmates ship serve` + `ship install`: one daemon
-   per host reading `~/.shipmates/ship.yaml` (list of project dirs), spawns a
-   lead per dir, restart-on-crash. Windows = Scheduled Task at logon (NOT a
-   session-0 service — claude needs user env); Mac = launchd user agent.
-   Design in fleet-architecture.md incl. env-indirection for creds and the
-   `backend: claude|command` driver seam for opencode/aider PTY-only mates.
+1. ~~gh ↔ beads seam~~ — DONE (2026-07-05). Landed on bd's NATIVE
+   `external_ref` field (`gh-<n>` or full URL) instead of the planned
+   `external_id: gh:issues/N` metadata convention — bd already had the flag
+   and it round-trips through `list/show --json`. Routing template grows a
+   beads section when `.beads/` exists; leads send `X-Shipmates-Repo-URL`
+   (git origin, normalized) so the UI linkifies refs.
+2. ~~Ship supervisor~~ — DONE (2026-07-05). `shipmates ship serve|install|
+   uninstall`, `~/.shipmates/ship.yaml` with `${VAR}` env-indirection,
+   restart-on-crash with backoff, stands by when a healthy server already
+   runs in a dir. Windows Scheduled Task / macOS launchd user agent. The
+   `backend: claude|command` driver seam landed too (PTY-only foreign mates).
+   Design now actually written in fleet-architecture.md.
 3. **Card-cannon rollout** — the real deployment: `bd init` in the card-cannon
    checkout (its origin IS the correct sync remote there), PC ship + Mac mini
-   ship (iOS/Mac crew), both registered with the bridge. Mini needs the
-   supervisor first.
-4. Polish backlog: live beads refresh, write actions from the bridge (close/
-   create), single-writer lock for multi-viewer terminals, SQLite store for
-   feed replay (deliberately skipped in favor of beads — revisit only if a
-   real need survives beads adoption).
+   ship (iOS/Mac crew), both registered with the bridge. Supervisor now
+   exists, so the mini is unblocked.
+4. ~~Polish backlog~~ — DONE (2026-07-05): live beads refresh (5s poll,
+   expanded rows survive), bead create/close from the bridge, single-writer
+   terminal lock with explicit takeover, and a ＋ roster menu in the term
+   pane (was a dead end — could close tabs but not open them). SQLite feed
+   replay still deliberately skipped.
 
 ## Where things live
 
