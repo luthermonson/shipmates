@@ -144,6 +144,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /pending.json", s.handlePendingJSON)
 	mux.HandleFunc("GET /status.json", s.handleStatusJSON)
 	mux.HandleFunc("GET /beads.json", s.handleBeadsJSON)
+	mux.HandleFunc("GET /bead/{id}", s.handleBeadShow)
 	mux.HandleFunc("POST /pty/{persona}/start", s.handlePTYStart)
 	mux.HandleFunc("GET /pty/{persona}/stream", s.handlePTYStream)
 	mux.HandleFunc("GET /pty/{persona}/snapshot", s.handlePTYSnapshot)

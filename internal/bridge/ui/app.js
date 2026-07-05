@@ -916,9 +916,44 @@ function renderBeads(beads) {
       `<span class="bstatus ${escape(b.status || "open")}">${escape(b.status || "?")}</span>` +
       `<span class="bid">${escape(b.id || "")}</span>` +
       `<span class="btitle">${escape(b.title || "")}</span>` +
-      (b.priority !== undefined ? `<span class="bprio">p${escape(String(b.priority))}</span>` : "");
-    if (b.description) row.title = b.description;
+      (b.priority !== undefined ? `<span class="bprio" title="priority">p${escape(String(b.priority))}</span>` : "");
+    row.onclick = () => toggleBeadDetail(row, b.id);
     beadsPane.appendChild(row);
+  }
+}
+
+// tap a bead to expand its full record (bd show) inline; tap again to fold
+async function toggleBeadDetail(row, id) {
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains("bead-detail")) {
+    existing.remove();
+    return;
+  }
+  const detail = document.createElement("div");
+  detail.className = "bead-detail";
+  detail.textContent = "loading…";
+  row.after(detail);
+  try {
+    const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/bead/${encodeURIComponent(id)}`);
+    if (r.status === 401) { window.location.href = "/login"; return; }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const arr = await r.json();
+    const b = Array.isArray(arr) ? arr[0] : arr;
+    if (!b) throw new Error("empty record");
+    const lines = [];
+    if (b.description) lines.push(`<div class="bdesc">${escape(b.description)}</div>`);
+    const meta = [];
+    if (b.issue_type) meta.push(`type: ${escape(b.issue_type)}`);
+    if (b.owner) meta.push(`owner: ${escape(b.owner)}`);
+    if (b.created_at) meta.push(`created: ${escape(String(b.created_at).slice(0, 16).replace("T", " "))}`);
+    if (b.updated_at) meta.push(`updated: ${escape(String(b.updated_at).slice(0, 16).replace("T", " "))}`);
+    if (b.dependency_count) meta.push(`depends on: ${escape(String(b.dependency_count))}`);
+    if (b.dependent_count) meta.push(`blocks: ${escape(String(b.dependent_count))}`);
+    if (b.comment_count) meta.push(`comments: ${escape(String(b.comment_count))}`);
+    lines.push(`<div class="bmeta">${meta.join(" · ")}</div>`);
+    detail.innerHTML = lines.join("");
+  } catch (err) {
+    detail.textContent = "detail unavailable: " + String(err).slice(0, 120);
   }
 }
 

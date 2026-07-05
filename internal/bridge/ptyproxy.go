@@ -50,12 +50,12 @@ func (b *Server) proxyPTYPost(leadPathFmt string) http.HandlerFunc {
 	}
 }
 
-// proxyGet2 is proxyGet with a persona path parameter interpolated.
-func (b *Server) proxyGet2(leadPathFmt string) http.HandlerFunc {
+// proxyGet2 is proxyGet with one extra path parameter interpolated.
+func (b *Server) proxyGet2(leadPathFmt, param string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
-		persona := r.PathValue("persona")
-		out, status, err := b.proxy(r.Context(), key, "GET", fmt.Sprintf(leadPathFmt, persona), nil)
+		val := r.PathValue(param)
+		out, status, err := b.proxy(r.Context(), key, "GET", fmt.Sprintf(leadPathFmt, val), nil)
 		writeProxied(w, status, out, err)
 	}
 }

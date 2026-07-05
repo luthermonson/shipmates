@@ -95,6 +95,43 @@ func (beadsTimeoutError) Error() string { return "bd command timed out" }
 
 var errBeadsTimeout = beadsTimeoutError{}
 
+// beadIDOK guards the show endpoint: bd ids are prefix-hash (proj-c03, with
+// dotted epics like proj-a3f8.1). Reject anything else so a path segment can
+// never smuggle flags or shell-ish input into the bd invocation.
+func beadIDOK(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
+		default:
+			return false
+		}
+	}
+	return id[0] != '-'
+}
+
+// handleBeadShow serves one bead's full record: `bd show <id> --json`.
+func (s *Server) handleBeadShow(w http.ResponseWriter, r *http.Request) {
+	if !beadsEnabled() {
+		http.Error(w, "no beads workspace", http.StatusNotFound)
+		return
+	}
+	id := r.PathValue("id")
+	if !beadIDOK(id) {
+		http.Error(w, "bad bead id", http.StatusBadRequest)
+		return
+	}
+	out, err := runBD("show", id, "--json")
+	if err != nil {
+		http.Error(w, "bd show: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(out))
+}
+
 // handleBeadsJSON serves the ship's bead graph: `bd list --json`, passed
 // through verbatim. 404 when the project has no beads workspace so the bridge
 // can distinguish "no beads here" from "empty graph".
