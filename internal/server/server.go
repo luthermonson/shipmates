@@ -549,6 +549,12 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		return lp, nil
 	}
 
+	// Command-backed mates (backend: command) have no stream-json channel to
+	// inject a tell into — they only exist under a PTY.
+	if pcfg, _ := project.ResolvePersonaConfig(persona); pcfg.CommandBacked() {
+		return nil, fmt.Errorf("persona %s is PTY-only (backend: command) — open a terminal to talk to it", persona)
+	}
+
 	// One long-term session per shipmate: resume the same tracked session
 	// that ask/open/fanout use, so tell/term/ask are one continuous
 	// conversation instead of per-surface forks.

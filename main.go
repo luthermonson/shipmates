@@ -52,6 +52,7 @@ func main() {
 			commands.Autonomous(cat),
 			commands.Bridge(),
 			commands.Server(),
+			commands.Ship(),
 		},
 	}
 

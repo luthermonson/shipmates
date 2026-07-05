@@ -211,6 +211,8 @@ type CrewOverride struct {
 	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
 	Model                      string    `yaml:"model"`
 	Effort                     string    `yaml:"effort"`
+	Backend                    string    `yaml:"backend"`
+	Command                    []string  `yaml:"command"`
 }
 
 // LoadConfig reads shipmates.yaml, returning a zero Config if it's absent.
@@ -257,7 +259,18 @@ type PersonaConfig struct {
 	DangerouslySkipPermissions bool
 	Model                      string // --model value; "" = claude's configured default
 	Effort                     string // --effort value (low|medium|high|xhigh|max); "" = default
+
+	// Backend selects the mate driver: "claude" (default, full integration:
+	// sessions, hooks, tells) or "command" (spawn Command under a PTY — for
+	// foreign agents like opencode/aider). Command-backed mates are PTY-only:
+	// no session resume, no hooks, no headless tells; their status dots derive
+	// from screen activity instead of hook events.
+	Backend string
+	Command []string // argv for backend "command"
 }
+
+// CommandBacked reports whether the persona runs a foreign agent (PTY-only).
+func (c PersonaConfig) CommandBacked() bool { return c.Backend == "command" }
 
 // Fingerprint is a stable hash of the config settings that are baked into a
 // session at creation and can't change on resume — currently model and effort.
@@ -305,6 +318,8 @@ type personaFrontmatter struct {
 	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
 	Model                      string    `yaml:"model"`
 	Effort                     string    `yaml:"effort"`
+	Backend                    string    `yaml:"backend"`
+	Command                    []string  `yaml:"command"`
 	ShipmatesPersona           *bool     `yaml:"shipmatesPersona"`
 }
 
@@ -346,6 +361,8 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 	cfg.Mode = strings.TrimSpace(fm.Permissions.Mode)
 	cfg.Model = strings.TrimSpace(fm.Model)
 	cfg.Effort = strings.TrimSpace(fm.Effort)
+	cfg.Backend = strings.TrimSpace(fm.Backend)
+	cfg.Command = fm.Command
 	rcNode := fm.RemoteControl
 	if fm.DangerouslySkipPermissions != nil {
 		cfg.DangerouslySkipPermissions = *fm.DangerouslySkipPermissions
@@ -364,6 +381,12 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 		}
 		if e := strings.TrimSpace(ov.Effort); e != "" {
 			cfg.Effort = e
+		}
+		if b := strings.TrimSpace(ov.Backend); b != "" {
+			cfg.Backend = b
+		}
+		if len(ov.Command) > 0 {
+			cfg.Command = ov.Command
 		}
 		if ov.RemoteControl.Kind != 0 {
 			rcNode = ov.RemoteControl

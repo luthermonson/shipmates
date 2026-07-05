@@ -204,6 +204,48 @@ dispatch. The lead sends its git-origin browse URL (`X-Shipmates-Repo-URL`) on
 tunnel connect; the bridge UI resolves `gh-<n>` refs against it for clickable
 links (`/issues/<n>` — GitHub redirects to `/pull/<n>` where the ref is a PR).
 
+## Ship supervisor (landed)
+
+One daemon per host keeps that host's leads alive: `shipmates ship serve`
+reads `~/.shipmates/ship.yaml` and runs a lead server per project dir,
+restarting on crash (exponential backoff 1s→60s, reset after 5 min healthy).
+If a healthy server already runs in a dir (started manually), the supervisor
+stands by and re-probes instead of racing it. Lead output appends to each
+project's `.shipmates/sessions/server.log`; on supervisor shutdown leads get
+a graceful `/shutdown` (crew reaped) before the hard kill.
+
+```yaml
+# ~/.shipmates/ship.yaml
+env:                                   # host-level, applied to every lead
+  SHIPMATES_BRIDGE_TOKEN: ${HOMELAB_BRIDGE_TOKEN}   # env-indirection: name the
+projects:                              # source, never store the secret
+  - dir: C:/Users/luthe/card-cannon
+    env:                               # per-project overrides
+      SHIPMATES_BRIDGE_TOKEN: ${CARD_CANNON_TOKEN}
+```
+
+`shipmates ship install` wires it to run at logon — **Windows: Scheduled Task
+(ONLOGON), macOS: launchd user agent** (`~/Library/LaunchAgents/cc.shipmates.ship.plist`,
+KeepAlive). Deliberately NOT a session-0 Windows service or launch daemon:
+claude needs the user's environment, credentials, and profile. `ship uninstall`
+reverses it. Linux: run `ship serve` from a systemd *user* unit.
+
+### The backend driver seam: `backend: claude|command`
+
+Persona frontmatter (or a `crew:` override) may declare a foreign agent:
+
+```yaml
+backend: command
+command: [opencode]
+```
+
+Command-backed mates are **PTY-only**: `ensurePTY` spawns the argv under a
+PTY instead of claude — no session resume, no hooks, no beads prime. Their
+status dots derive from screen activity (pumpPTY already feeds lastSeen).
+Headless surfaces (`ask`, `drain`, tell-to-headless) reject them with a
+pointed error; a tell while their terminal is open still works (it's typed
+into the PTY like any other).
+
 ## Execution modes — the two mate flavors
 
 | Flavor | Backend | What the bridge shows | Herdr equivalent |
