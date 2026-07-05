@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>shipmates bridge</title>
-<link rel="stylesheet" href="/style.css?v=21">
-<link rel="stylesheet" href="/vendor/xterm.min.css?v=21">
+<link rel="stylesheet" href="/style.css?v=22">
+<link rel="stylesheet" href="/vendor/xterm.min.css?v=22">
 </head>
 <body>
 <header>
@@ -33,6 +33,16 @@
     <div id="feed-tabs"></div>
     <div id="lead-picker" hidden></div>
     <pre id="feed-body"></pre>
+    <div id="attach-overlay" hidden>
+      <div class="box">
+        <div class="spinner"></div>
+        <div id="attach-msg">waiting…</div>
+        <div class="actions">
+          <button id="attach-now" type="button">attach now</button>
+          <button id="attach-cancel" type="button" class="link">cancel</button>
+        </div>
+      </div>
+    </div>
     <div id="term-pane" hidden>
       <div id="term-header">
         <div id="term-tabs"></div>
@@ -52,8 +62,8 @@
     </form>
   </section>
 </main>
-<script src="/vendor/xterm.min.js?v=21"></script>
-<script src="/vendor/addon-fit.min.js?v=21"></script>
-<script src="/app.js?v=21"></script>
+<script src="/vendor/xterm.min.js?v=22"></script>
+<script src="/vendor/addon-fit.min.js?v=22"></script>
+<script src="/app.js?v=22"></script>
 </body>
 </html>

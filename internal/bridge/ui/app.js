@@ -689,9 +689,57 @@ function closeTerm(id) {
   renderTermTabs();
 }
 
+// --- attach grace period ------------------------------------------------------
+//
+// Attaching a terminal takes over the shipmate's session, killing a mid-turn
+// headless proc and losing the in-flight answer. When the mate is working (or
+// blocked on an approval), wait for the turn to drain behind a spinner —
+// with "attach now" (take over anyway) and "cancel" escape hatches.
+
+const attachOverlay = $("attach-overlay");
+const attachMsg = $("attach-msg");
+const attachNowBtn = $("attach-now");
+const attachCancelBtn = $("attach-cancel");
+
+function mateBusy(key, persona) {
+  const m = (mateStatus.get(key) || []).find((x) => x.persona === persona);
+  return m && (m.status === "working" || m.status === "blocked") ? m.status : null;
+}
+
+function waitForIdle(key, persona) {
+  return new Promise((resolve) => {
+    let timer = null;
+    const done = (result) => {
+      clearInterval(timer);
+      attachOverlay.hidden = true;
+      attachNowBtn.onclick = null;
+      attachCancelBtn.onclick = null;
+      resolve(result);
+    };
+    attachOverlay.hidden = false;
+    attachNowBtn.onclick = () => done("attach");
+    attachCancelBtn.onclick = () => done("cancel");
+    const tick = async () => {
+      await refreshStatus();
+      const busy = mateBusy(key, persona);
+      if (!busy) { done("attach"); return; }
+      attachMsg.textContent = busy === "blocked"
+        ? `${persona} is blocked on an approval — resolve it, attach now, or cancel`
+        : `${persona} is mid-turn — waiting to attach…`;
+    };
+    tick();
+    timer = setInterval(tick, 1500);
+  });
+}
+
 async function openTerminal(key, persona) {
   const id = termSessionId(key, persona);
   if (terms.has(id)) { activateTerm(id); return; }
+
+  if (mateBusy(key, persona)) {
+    if (await waitForIdle(key, persona) === "cancel") return;
+    if (terms.has(id)) { activateTerm(id); return; } // raced with another attach
+  }
 
   const base = `/api/lead/${encodeURIComponent(key)}/pty/${encodeURIComponent(persona)}`;
   try {

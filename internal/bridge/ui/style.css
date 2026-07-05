@@ -291,6 +291,49 @@ aside#leads h2 {
   50% { opacity: 0.55; }
 }
 
+/* attach grace overlay: spinner while a mid-turn mate drains */
+#attach-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#attach-overlay[hidden] { display: none; }
+#attach-overlay .box {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.4rem 1.6rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  max-width: 320px;
+  text-align: center;
+}
+#attach-overlay .spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: attach-spin 0.8s linear infinite;
+}
+@keyframes attach-spin { to { transform: rotate(360deg); } }
+#attach-overlay .actions { display: flex; gap: 1rem; align-items: center; }
+#attach-overlay button#attach-now {
+  background: var(--accent);
+  color: var(--bg);
+  border: 0;
+  border-radius: 6px;
+  padding: 0.55rem 1.1rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
 /* live terminal pane — a full-screen takeover on every device: you're either
    on the bridge or in a terminal, never squinting at both */
 #term-pane {
