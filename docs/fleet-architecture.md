@@ -160,6 +160,31 @@ every ship's `bd` embedded DB pushes/pulls against it.
 - **Standup/activity logs** — time-series; plain SQL tables beside beads, not bead nodes.
 - **PTY streams** — fire-and-forget bytes; wrong shape for a graph store.
 
+**Phase-4 design (validated against bd v1.1.0 hands-on):**
+
+- **Mates are beads-native, not shipmates-mediated.** bd ships its own Claude
+  Code hook integration — `bd prime` auto-injects workflow context when a
+  beads workspace resolves, and its session-close protocol tells the agent to
+  `bd close` finished work. Shipmates does NOT shadow-write every feed event
+  into beads (a "you alive?" tell is not a task); mates create/close their own
+  work beads. Shipmates' jobs are the plumbing around that:
+  1. **Detect** — a `.beads/` dir in the project marks the ship beads-enabled.
+  2. **Prime injection** — live/PTY mates run `claude -p`, which never fires
+     SessionStart hooks, so bd's own auto-prime can't trigger. The lead server
+     runs `bd prime` at spawn and passes it via `--append-system-prompt`.
+  3. **Surface** — `GET /beads.json` on the lead shells `bd list --json`; the
+     bridge proxies it per ship for a read-only graph view.
+  4. **Sync** (phase 5) — `bd dolt push/pull` heartbeat against a dedicated
+     fleet remote.
+- **bd init gotcha:** it auto-configures `sync.remote` from the enclosing git
+  repo's origin — inside a source checkout that aims bead pushes at the source
+  repo. Shipmates' beads-enable step must set (or clear) `sync.remote`
+  explicitly; never trust the auto-detected one.
+- **Useful bd affordances observed:** `--json` on create/show/list; `bd dep add
+  <dependent> <dependency>`; comments (`comment_count`) for threading;
+  `events-export` (audit trail JSONL); no-db JSONL-only mode; embedded
+  dolt sql-server auto-starts per project.
+
 **Sync model:** embedded `bd` per ship (single-writer, file-locked) + `bd dolt push/pull`
 against the bridge's remote on a heartbeat (post-write hook + N-second poll). Hash-based
 bead IDs make concurrent multi-ship writes merge-safe (Dolt cell-level merge). Real-time

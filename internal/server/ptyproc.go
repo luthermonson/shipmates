@@ -79,12 +79,20 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 	}
 
 	args := []string{
-		"--settings", s.hookSettings(persona),
+		// observe-only hooks: interactive claude prompts for permissions
+		// natively in the terminal — the operator approves right where they
+		// are typing instead of hunting for the bridge's pending pane behind
+		// the full-screen term
+		"--settings", s.hookSettings(persona, false),
 		"--agent", persona,
 		"--name", project.SessionName(persona) + "-pty",
 	}
 	if cfg, err := project.ResolvePersonaConfig(persona); err == nil {
 		args = append(args, cfg.LaunchFlags(false)...)
+	}
+	// beads: same prime injection as live mates, for consistent context
+	if prime := beadsPrime(); prime != "" {
+		args = append(args, "--append-system-prompt", prime)
 	}
 	// go-pty resolves bare names relative to Dir — absolute path required.
 	cmd := pt.Command(claudePath, args...)

@@ -94,6 +94,7 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /api/lead/{key}/events", b.proxyGet("/events"))
 	mux.HandleFunc("GET /api/lead/{key}/pending", b.proxyGet("/pending"))
 	mux.HandleFunc("GET /api/lead/{key}/status", b.proxyGet("/status.json"))
+	mux.HandleFunc("GET /api/lead/{key}/beads", b.proxyGet("/beads.json"))
 	mux.HandleFunc("GET /api/status", b.handleAggregateStatus)
 	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/start", b.proxyPTYPost("/pty/%s/start"))
 	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/input", b.proxyPTYPost("/pty/%s/input"))

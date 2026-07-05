@@ -143,6 +143,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /pending", s.handlePending)
 	mux.HandleFunc("GET /pending.json", s.handlePendingJSON)
 	mux.HandleFunc("GET /status.json", s.handleStatusJSON)
+	mux.HandleFunc("GET /beads.json", s.handleBeadsJSON)
 	mux.HandleFunc("POST /pty/{persona}/start", s.handlePTYStart)
 	mux.HandleFunc("GET /pty/{persona}/stream", s.handlePTYStream)
 	mux.HandleFunc("GET /pty/{persona}/snapshot", s.handlePTYSnapshot)
@@ -493,25 +494,29 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 // hookSettings builds a --settings JSON string that routes a crew member's
 // tool-use hooks back to this server, tagged with the persona.
-func (s *Server) hookSettings(persona string) string {
+//
+// gate=true installs the blocking PreToolUse permission hook — right for
+// headless mates, where nobody sees a prompt and the bridge's pending pane is
+// the only approval surface. gate=false is observe-only (PostToolUse): right
+// for PTY mates, where interactive claude renders its own y/n permission
+// prompt in the terminal the operator is already looking at.
+func (s *Server) hookSettings(persona string, gate bool) string {
 	url := func(event string) string {
 		return fmt.Sprintf("http://127.0.0.1:%d/hook/%s/%s", s.port, persona, event)
 	}
-	// PreToolUse is the gate (it may block on a human decision), so give it a
-	// generous timeout. PostToolUse is observe-only.
-	preTool := map[string]any{
-		"hooks": []map[string]any{{"type": "http", "url": url("PreToolUse"), "timeout": 120}},
+	hooks := map[string]any{
+		"PostToolUse": []map[string]any{{
+			"hooks": []map[string]any{{"type": "http", "url": url("PostToolUse")}},
+		}},
 	}
-	postTool := map[string]any{
-		"hooks": []map[string]any{{"type": "http", "url": url("PostToolUse")}},
+	if gate {
+		// PreToolUse is the gate (it may block on a human decision), so give
+		// it a generous timeout.
+		hooks["PreToolUse"] = []map[string]any{{
+			"hooks": []map[string]any{{"type": "http", "url": url("PreToolUse"), "timeout": 120}},
+		}}
 	}
-	cfg := map[string]any{
-		"hooks": map[string]any{
-			"PreToolUse":  []map[string]any{preTool},
-			"PostToolUse": []map[string]any{postTool},
-		},
-	}
-	b, _ := json.Marshal(cfg)
+	b, _ := json.Marshal(map[string]any{"hooks": hooks})
 	return string(b)
 }
 
@@ -529,7 +534,7 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		"--output-format", "stream-json",
 		"--verbose", // required by claude when --print is combined with stream-json output
 		"--include-partial-messages",
-		"--settings", s.hookSettings(persona),
+		"--settings", s.hookSettings(persona, true),
 		"--agent", persona,
 		"--name", project.SessionName(persona) + "-live",
 	}
@@ -537,6 +542,11 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		// Live-server path mediates permission via the PreToolUse gate, so it
 		// passes model/effort only (permission=false).
 		args = append(args, cfg.LaunchFlags(false)...)
+	}
+	// beads: -p sessions never fire SessionStart hooks, so bd's auto-prime
+	// can't run — inject the workflow context at spawn instead.
+	if prime := beadsPrime(); prime != "" {
+		args = append(args, "--append-system-prompt", prime)
 	}
 	cmd := exec.Command("claude", args...)
 	stdin, err := cmd.StdinPipe()
