@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>shipmates bridge</title>
-<link rel="stylesheet" href="/style.css?v=29">
-<link rel="stylesheet" href="/vendor/xterm.min.css?v=29">
+<link rel="stylesheet" href="/style.css?v=30">
+<link rel="stylesheet" href="/vendor/xterm.min.css?v=30">
 </head>
 <body>
 <header>
@@ -48,8 +48,10 @@
     <div id="term-pane" hidden>
       <div id="term-header">
         <div id="term-tabs"></div>
+        <button id="term-add" class="link" type="button" title="open another mate's terminal">＋</button>
         <button id="term-close" class="link" type="button">close</button>
       </div>
+      <div id="term-add-menu" hidden></div>
       <div id="term-host"></div>
       <div id="term-scroll">
         <button id="term-scroll-up" type="button" aria-label="scroll up">▲</button>
@@ -64,8 +66,8 @@
     </form>
   </section>
 </main>
-<script src="/vendor/xterm.min.js?v=29"></script>
-<script src="/vendor/addon-fit.min.js?v=29"></script>
-<script src="/app.js?v=29"></script>
+<script src="/vendor/xterm.min.js?v=30"></script>
+<script src="/vendor/addon-fit.min.js?v=30"></script>
+<script src="/app.js?v=30"></script>
 </body>
 </html>

@@ -674,11 +674,41 @@ function renderTermTabs() {
 
 function applyFit(t) {
   try { t.fit.fit(); } catch { return; }
-  fetch(`${t.base}/resize`, {
+  // owner-wins: while another viewer types, our fit 409s — fine, we reflow
+  // to the writer's geometry instead of fighting over it
+  fetch(`${t.base}/resize?client=${t.client}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cols: t.term.cols, rows: t.term.rows }),
   });
+}
+
+// termInput sends keystrokes, enforcing the single-writer lock: a 409 means
+// another viewer holds the keyboard — surface the takeover bar instead of
+// silently eating input.
+function termInput(t, data) {
+  fetch(`${t.base}/input?client=${t.client}`, { method: "POST", body: data })
+    .then((r) => { if (r.status === 409) showTermLock(t); })
+    .catch(() => {});
+}
+
+function showTermLock(t) {
+  if (t.lockBar) { t.lockBar.hidden = false; return; }
+  const bar = document.createElement("div");
+  bar.className = "term-lock";
+  bar.appendChild(document.createTextNode("view-only — another viewer holds the keyboard "));
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "take over";
+  btn.onclick = async () => {
+    try {
+      const r = await fetch(`${t.base}/takeover?client=${t.client}`, { method: "POST" });
+      if (r.ok) bar.hidden = true;
+    } catch { /* next keystroke re-surfaces the bar */ }
+  };
+  bar.appendChild(btn);
+  t.lockBar = bar;
+  t.host.appendChild(bar);
 }
 
 function activateTerm(id) {
@@ -695,6 +725,8 @@ function activateTerm(id) {
 function closeTerm(id) {
   const t = terms.get(id);
   if (!t) return;
+  // best-effort: hand the keyboard back so the next typist claims cleanly
+  fetch(`${t.base}/release?client=${t.client}`, { method: "POST", keepalive: true }).catch(() => {});
   if (t.es) t.es.close();
   t.term.dispose();
   t.host.remove();
@@ -784,7 +816,6 @@ async function openTerminal(key, persona) {
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(host);
-  term.onData((data) => fetch(`${base}/input`, { method: "POST", body: data }));
   // Ctrl+V / Cmd+V paste: xterm.js doesn't intercept it by default and the
   // keystroke would otherwise reach the mate as a literal ^V. term.paste()
   // honors bracketed-paste mode when the TUI has it enabled.
@@ -796,7 +827,12 @@ async function openTerminal(key, persona) {
     return true;
   });
 
-  const entry = { key, persona, base, term, fit, es: null, host };
+  const entry = {
+    key, persona, base, term, fit, es: null, host,
+    client: Math.random().toString(36).slice(2, 10), // writer-lock identity
+    lockBar: null,
+  };
+  term.onData((data) => termInput(entry, data));
   const es = new EventSource(`${base}/stream`);
   entry.es = es;
   const write = (m) => term.write(b64ToBytes(m.data));
@@ -866,17 +902,26 @@ if (window.visualViewport) {
 
 // --- beads pane ---------------------------------------------------------------
 //
-// Read-only view of the selected ship's beads work graph (bd list --json via
-// the tunnel). Toggles over the feed; 404 means the ship has no beads
-// workspace. Refetched on every open — the graph is agent-written, so it
-// changes while you're not looking.
+// View of the selected ship's beads work graph (bd list --json via the
+// tunnel). Toggles over the feed; 404 means the ship has no beads workspace.
+// The graph is agent-written and changes while you're looking, so the pane
+// live-refreshes on a poll while open; expanded detail rows survive the
+// re-render. With a ship selected the pane can also write: quick-create a
+// bead, or close one from its detail row.
 
 const beadsPane = $("beads-pane");
 const beadsOpenBtn = $("beads-open");
+let beadsTimer = null;
+let beadsLastJSON = ""; // skip re-render (and detail refetch) when unchanged
+const expandedBeads = new Set(); // bead ids whose detail row is open
 
 function closeBeads() {
   beadsPane.hidden = true;
   beadsOpenBtn.classList.remove("active");
+  clearInterval(beadsTimer);
+  beadsTimer = null;
+  beadsLastJSON = "";
+  expandedBeads.clear();
   if (selected) {
     feedBody.hidden = false;
     tellForm.style.display = "";
@@ -893,6 +938,13 @@ async function openBeads() {
   leadPicker.hidden = true;
   tellForm.style.display = "none"; // no tell target while reading the graph
   beadsOpenBtn.classList.add("active");
+  await refreshBeads(true);
+  clearInterval(beadsTimer);
+  beadsTimer = setInterval(refreshBeads, 5000);
+}
+
+async function refreshBeads(force) {
+  if (beadsPane.hidden) return;
   try {
     // ship selected → that ship's graph; nothing selected → fleet-wide union
     const url = selected
@@ -905,9 +957,13 @@ async function openBeads() {
       return;
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    renderBeads(await r.json());
+    const text = await r.text();
+    if (!force && text === beadsLastJSON) return;
+    beadsLastJSON = text;
+    renderBeads(JSON.parse(text));
   } catch (err) {
-    beadsPane.innerHTML = `<div class="empty">beads unavailable: ${escape(String(err).slice(0, 120))}</div>`;
+    if (force) beadsPane.innerHTML = `<div class="empty">beads unavailable: ${escape(String(err).slice(0, 120))}</div>`;
+    // poll-tick failures keep the last good render; next tick retries
   }
 }
 
@@ -935,8 +991,12 @@ function refLink(ref, leadKey) {
 
 function renderBeads(beads) {
   beadsPane.innerHTML = "";
+  renderBeadCreate();
   if (!beads || beads.length === 0) {
-    beadsPane.innerHTML = '<div class="empty">no open beads — the crew has a clean slate</div>';
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "no open beads — the crew has a clean slate";
+    beadsPane.appendChild(empty);
     return;
   }
   for (const b of beads) {
@@ -954,16 +1014,70 @@ function renderBeads(beads) {
       (b.priority !== undefined && b.priority !== null ? `<span class="bprio" title="priority">p${escape(String(b.priority))}</span>` : "");
     if (detailKey) row.onclick = () => toggleBeadDetail(row, b.id, detailKey);
     beadsPane.appendChild(row);
+    // live refresh: reopen the detail rows the operator had expanded
+    if (detailKey && expandedBeads.has(b.id)) expandBeadDetail(row, b.id, detailKey);
   }
 }
 
+// renderBeadCreate mounts the quick-create affordance at the top of the pane:
+// a "+ new bead" button that unfolds into a title/description form. Only with
+// a ship selected — a create has to land on ONE ship's graph.
+function renderBeadCreate() {
+  if (!selected) return;
+  const bar = document.createElement("div");
+  bar.className = "bead-create";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "+ new bead";
+  btn.onclick = () => {
+    btn.hidden = true;
+    const form = document.createElement("form");
+    form.innerHTML =
+      '<input name="title" placeholder="title" maxlength="200" required>' +
+      '<textarea name="description" placeholder="description (optional)" rows="2"></textarea>' +
+      '<div class="row"><button type="submit">create</button> <button type="button" class="cancel">cancel</button></div>';
+    form.querySelector(".cancel").onclick = () => { form.remove(); btn.hidden = false; };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const title = form.title.value.trim();
+      if (!title) return;
+      form.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      try {
+        const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/bead`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title, description: form.description.value.trim() }),
+        });
+        if (r.status === 401) { window.location.href = "/login"; return; }
+        if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+        form.remove();
+        btn.hidden = false;
+        refreshBeads(true);
+      } catch (err) {
+        form.querySelectorAll("button").forEach((b) => (b.disabled = false));
+        appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 160) });
+      }
+    };
+    bar.appendChild(form);
+    form.title.focus();
+  };
+  bar.appendChild(btn);
+  beadsPane.appendChild(bar);
+}
+
 // tap a bead to expand its full record (bd show) inline; tap again to fold
-async function toggleBeadDetail(row, id, leadKey) {
+function toggleBeadDetail(row, id, leadKey) {
   const existing = row.nextElementSibling;
   if (existing && existing.classList.contains("bead-detail")) {
     existing.remove();
+    expandedBeads.delete(id);
     return;
   }
+  expandedBeads.add(id);
+  expandBeadDetail(row, id, leadKey);
+}
+
+async function expandBeadDetail(row, id, leadKey) {
   const detail = document.createElement("div");
   detail.className = "bead-detail";
   detail.textContent = "loading…";
@@ -988,6 +1102,31 @@ async function toggleBeadDetail(row, id, leadKey) {
     if (b.comment_count) meta.push(`comments: ${escape(String(b.comment_count))}`);
     lines.push(`<div class="bmeta">${meta.join(" · ")}</div>`);
     detail.innerHTML = lines.join("");
+    if (b.status !== "closed") {
+      const closeBtn = document.createElement("button");
+      closeBtn.className = "bead-close";
+      closeBtn.textContent = "close bead";
+      closeBtn.onclick = async () => {
+        const reason = prompt(`close ${id} — reason (optional):`);
+        if (reason === null) return; // cancelled
+        closeBtn.disabled = true;
+        try {
+          const cr = await fetch(
+            `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/close`,
+            { method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ reason: reason.trim() }) }
+          );
+          if (cr.status === 401) { window.location.href = "/login"; return; }
+          if (!cr.ok) throw new Error(await cr.text() || `HTTP ${cr.status}`);
+          expandedBeads.delete(id);
+          refreshBeads(true);
+        } catch (err) {
+          closeBtn.disabled = false;
+          appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 160) });
+        }
+      };
+      detail.appendChild(closeBtn);
+    }
   } catch (err) {
     detail.textContent = "detail unavailable: " + String(err).slice(0, 120);
   }
@@ -1014,6 +1153,54 @@ termOpenBtn.onclick = async () => {
 };
 termCloseBtn.onclick = () => { if (activeTermId) closeTerm(activeTermId); };
 
+// --- open-another-terminal menu ------------------------------------------------
+//
+// The term pane is a full-screen takeover, which used to make it a dead end:
+// you could close tabs but not open new ones without leaving. ＋ drops a menu
+// of the active terminal's ship roster; picking a mate opens (or focuses) its
+// terminal without ever leaving term mode.
+
+const termAddBtn = $("term-add");
+const termAddMenu = $("term-add-menu");
+
+termAddBtn.onclick = (ev) => {
+  ev.stopPropagation();
+  if (!termAddMenu.hidden) { termAddMenu.hidden = true; return; }
+  const t = activeTerm();
+  const key = t ? t.key : selected;
+  if (!key) return;
+  termAddMenu.innerHTML = "";
+  const lead = knownLeads.get(key);
+  const mates = orderMates(lead || { persona: "" }, mateStatus.get(key) || []);
+  if (mates.length === 0) {
+    const none = document.createElement("div");
+    none.className = "none";
+    none.textContent = "no crew roster yet";
+    termAddMenu.appendChild(none);
+  }
+  const ship = key.split(":")[0];
+  for (const m of mates) {
+    const item = document.createElement("button");
+    item.type = "button";
+    const isOpen = terms.has(termSessionId(key, m.persona));
+    item.className = "item" + (isOpen ? " open" : "");
+    item.textContent = `${m.persona}@${ship}` + (isOpen ? " ✓" : "");
+    item.onclick = () => {
+      termAddMenu.hidden = true;
+      openTerminal(key, m.persona);
+    };
+    termAddMenu.appendChild(item);
+  }
+  termAddMenu.hidden = false;
+};
+
+// tap-away dismiss
+document.addEventListener("pointerdown", (e) => {
+  if (termAddMenu.hidden) return;
+  if (termAddMenu.contains(e.target) || e.target === termAddBtn) return;
+  termAddMenu.hidden = true;
+});
+
 // --- terminal scroll buttons --------------------------------------------------
 //
 // Touch scrolling inside xterm.js is unreliable, so scrolling is explicit:
@@ -1032,7 +1219,7 @@ function scrollTerm(lines) {
   if (!t) return;
   if (t.term.buffer.active.type === "alternate") {
     const seq = (lines < 0 ? "\x1b[A" : "\x1b[B").repeat(Math.abs(lines));
-    fetch(`${t.base}/input`, { method: "POST", body: seq });
+    termInput(t, seq);
   } else {
     t.term.scrollLines(lines);
   }
@@ -1065,7 +1252,7 @@ function jumpToBottom() {
   const t = activeTerm();
   if (!t) return;
   if (t.term.buffer.active.type === "alternate") {
-    fetch(`${t.base}/input`, { method: "POST", body: "\x1b[F" });
+    termInput(t, "\x1b[F");
   } else {
     t.term.scrollToBottom();
   }
