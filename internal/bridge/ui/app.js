@@ -909,16 +909,22 @@ if (window.visualViewport) {
     const mobile = window.matchMedia("(max-width: 640px)").matches;
 
     // Whole-layout shrink: when the keyboard eats part of the viewport, pin
-    // the body to the visible height so header/tabs/feed compress and the
-    // tell form sits right above the keys — instead of iOS shoving the top
-    // of the page off-screen.
+    // the body to the VISIBLE rect — same trick the term pane uses. Height
+    // alone isn't enough: iOS scrolls the layout viewport to reveal the
+    // caret, and scrollTo(0,0) loses that fight, sliding the header off the
+    // top. Translating by vv.offsetTop follows whatever scroll Safari
+    // insists on, so header/tabs/feed compress above the keys instead.
+    // Skipped while the term pane is open: body transform would turn the
+    // pane's position:fixed coordinates body-relative and double-offset it.
     const keyboardUp = mobile && window.innerHeight - vv.height > 60;
-    if (keyboardUp) {
+    if (keyboardUp && termPane.hidden) {
       document.body.style.height = vv.height + "px";
+      document.body.style.transform = vv.offsetTop > 1 ? `translateY(${vv.offsetTop}px)` : "";
       window.scrollTo(0, 0);
       feedBody.scrollTop = feedBody.scrollHeight; // keep the latest lines visible
     } else {
       document.body.style.height = "";
+      document.body.style.transform = "";
     }
 
     // Full-screen terminal pane follows the visible rect too.
