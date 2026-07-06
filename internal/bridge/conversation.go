@@ -136,6 +136,17 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 			finish(conversationResponse{Error: "llm: " + err.Error()})
 			return
 		}
+		// Small models fall out of function-calling format mid-turn and emit
+		// `tool_name {json}` as CONTENT — which would otherwise become a
+		// "reply" of raw JSON, spoken aloud, with the work never done. Parse
+		// such lines back into real tool calls and run them.
+		if len(resp.ToolCalls) == 0 {
+			if rescued := rescueTextToolCalls(resp.Content); len(rescued) > 0 {
+				slog.Info("conversation: rescued text-formatted tool calls", "count", len(rescued))
+				resp.ToolCalls = rescued
+				resp.Content = ""
+			}
+		}
 		// Always append the assistant turn — including tool_calls — so the
 		// next iteration sees its own request.
 		messages = append(messages, chatMessage{
@@ -161,6 +172,37 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 	finish(conversationResponse{Error: "tool-call loop exceeded " + fmt.Sprint(conversationMaxIterations) + " iterations"})
 }
 
+// knownTools is the dispatchable set, for validating rescued text tool calls.
+var knownTools = map[string]bool{
+	"list_leads": true, "tell_lead": true, "recent_events": true,
+	"wait_for_result": true, "pending_approvals": true, "resolve": true,
+	"fleet_status": true, "list_beads": true, "dispatch_bead": true,
+}
+
+// textToolCallLine matches `tool_name {…json…}` on its own line — the shape
+// models degrade to when they stop emitting structured tool_calls. Tolerates
+// a leading "call"/colon and trailing punctuation ("Tell_lead {…}.").
+var textToolCallLine = regexp.MustCompile(`(?m)^\s*(?:call\s+)?([A-Za-z_]+):?\s*(\{.*\})[.,;!\s]*$`)
+
+// rescueTextToolCalls converts tool-calls-as-prose back into executable
+// calls. Only known tool names with valid JSON arguments qualify; anything
+// else stays prose.
+func rescueTextToolCalls(content string) []toolCall {
+	var out []toolCall
+	for _, m := range textToolCallLine.FindAllStringSubmatch(content, -1) {
+		name := strings.ToLower(strings.TrimSpace(m[1]))
+		if !knownTools[name] || !json.Valid([]byte(m[2])) {
+			continue
+		}
+		out = append(out, toolCall{
+			ID:   fmt.Sprintf("rescued_%d", len(out)),
+			Type: "function",
+			Function: toolCallFunc{Name: name, Arguments: m[2]},
+		})
+	}
+	return out
+}
+
 // prependSystemPrompt injects the captain's-mate persona at the head of the
 // message list (only if the caller didn't already provide a system message).
 // Kept tight on purpose: every token here is paid for on every turn.
@@ -182,6 +224,8 @@ Bead ids are opaque short hashes. NEVER type one from memory — ALWAYS call
 list_beads first and use the exact id whose title matches what the operator said.
 fleet_status reports MATES (crew members): "off" means asleep (normal — a tell
 wakes them), not disconnected. Ship connectivity comes from list_leads.
+Messages ONLY reach mates through the tell tools — writing "tell X ..." as
+prose does nothing. To address every ship's lead at once, call tell_all_leads.
 /no_think
 `),
 	}
@@ -294,6 +338,10 @@ func (b *Server) toolCatalog() []any {
 				"id":       strProp("the pending request id"),
 				"behavior": strProp("'allow' or 'deny'"),
 			}, "lead_key", "id", "behavior")),
+		def("tell_all_leads", "Send one message to the LEAD persona of every connected ship at once — the easy way to wake the whole fleet or ask everyone something (e.g. '/standup' or 'how is the project going?').",
+			objWith(map[string]any{
+				"message": strProp("the message text — may be a slash command like '/standup'"),
+			}, "message")),
 		def("fleet_status", "Per-mate status across every connected ship: blocked (waiting on approval), working, idle, done, or off. Use to find who is free before dispatching work.", objWith(nil)),
 		def("list_beads", "List open beads (the fleet's shared work graph): id, title, status, priority, assignee, and which ships carry each.", objWith(nil)),
 		def("dispatch_bead", "Assign a bead to persona@ship and wake that mate to work it: syncs the graph to the target ship, sets the assignee, and tells the mate to claim it.",
@@ -323,6 +371,8 @@ func (b *Server) dispatchTool(ctx context.Context, tc toolCall) string {
 		return b.toolPendingApprovals(ctx)
 	case "resolve":
 		return b.toolResolve(ctx, args)
+	case "tell_all_leads":
+		return b.toolTellAllLeads(ctx, args)
 	case "fleet_status":
 		return b.toolFleetStatus(ctx)
 	case "list_beads":
@@ -525,6 +575,37 @@ func (b *Server) toolResolve(ctx context.Context, args map[string]any) string {
 	}
 	slog.Info("conversation resolved pending", "lead", key, "id", id, "behavior", behavior)
 	return `{"ok": true}`
+}
+
+// toolTellAllLeads broadcasts one message to every connected ship's lead —
+// the single-call fan-out small models reach for reliably, where "call
+// tell_lead N times" degrades into prose.
+func (b *Server) toolTellAllLeads(ctx context.Context, args map[string]any) string {
+	msg, _ := args["message"].(string)
+	if strings.TrimSpace(msg) == "" {
+		return toolError("tell_all_leads requires message")
+	}
+	payload, _ := json.Marshal(map[string]string{"message": msg})
+	results := map[string]string{}
+	for _, key := range b.dialer.ListClients() {
+		b.mu.Lock()
+		lead := b.leads[key]
+		b.mu.Unlock()
+		persona := "lead"
+		if lead != nil && lead.Persona != "" {
+			persona = lead.Persona
+		}
+		if _, status, err := b.proxy(ctx, key, "POST", "/tell/"+url.PathEscape(persona), payload); err != nil || status >= 300 {
+			results[key] = "failed"
+			continue
+		}
+		results[key] = "sent"
+	}
+	if len(results) == 0 {
+		return toolError("no ships connected")
+	}
+	out, _ := json.Marshal(results)
+	return string(out)
 }
 
 // toolFleetStatus fans out to every connected lead's /status.json and returns

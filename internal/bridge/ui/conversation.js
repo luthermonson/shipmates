@@ -259,7 +259,10 @@ async function sendMessage(text) {
     }
     addBubble("assistant", data.reply || "(empty reply)");
     history.push({ role: "assistant", content: data.reply || "" });
-    await speak(data.reply || "");
+    // never read code at the operator: lines with braces (stray tool-call
+    // JSON, config snippets) show on screen but stay out of the speakers
+    const spoken = (data.reply || "").split("\n").filter((l) => !/[{}]/.test(l)).join(" ").trim();
+    await speak(spoken);
   } catch (err) {
     thinking.remove();
     addBubble("assistant", "network error: " + String(err));
