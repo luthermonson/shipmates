@@ -87,8 +87,8 @@ type conversationResponse struct {
 // tools the model calls against the bridge's own endpoints, until the model
 // produces a final natural-language reply (or the iteration cap trips).
 func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
-	if b.conv == nil || b.conv.url == "" {
-		http.Error(w, "conversation disabled — start bridge with --llm-url", http.StatusServiceUnavailable)
+	if b.conv == nil || (b.conv.url == "" && b.conv.brain == nil) {
+		http.Error(w, "conversation disabled — start bridge with --llm-url or --llm-backend claude-cli", http.StatusServiceUnavailable)
 		return
 	}
 	var req conversationRequest
@@ -127,6 +127,18 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 	finish := func(v conversationResponse) {
 		close(heartbeat)
 		_ = json.NewEncoder(w).Encode(v)
+	}
+
+	// claude-cli backend: the session IS the loop — tools, history, and
+	// reasoning live inside claude; we just relay one user turn.
+	if b.conv.brain != nil {
+		reply, err := b.conv.brain.turn(r.Context(), lastUserMessage(req.Messages))
+		if err != nil {
+			finish(conversationResponse{Error: err.Error()})
+			return
+		}
+		finish(conversationResponse{Reply: reply})
+		return
 	}
 
 	var called []toolCall
@@ -174,9 +186,9 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 
 // knownTools is the dispatchable set, for validating rescued text tool calls.
 var knownTools = map[string]bool{
-	"list_leads": true, "tell_lead": true, "recent_events": true,
-	"wait_for_result": true, "pending_approvals": true, "resolve": true,
-	"fleet_status": true, "list_beads": true, "dispatch_bead": true,
+	"list_leads": true, "tell_lead": true, "tell_all_leads": true,
+	"recent_events": true, "wait_for_result": true, "pending_approvals": true,
+	"resolve": true, "fleet_status": true, "list_beads": true, "dispatch_bead": true,
 }
 
 // textToolCallLine matches `tool_name {…json…}` on its own line — the shape
@@ -266,6 +278,9 @@ func (b *Server) llmChat(ctx context.Context, messages []chatMessage, tools []an
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(b.conv.url, "/")+"/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	if b.conv.key != "" {
+		req.Header.Set("Authorization", "Bearer "+b.conv.key)
+	}
 	resp, err := b.conv.client.Do(req)
 	if err != nil {
 		return nil, err
