@@ -60,6 +60,8 @@ type Server struct {
 type convConfig struct {
 	url      string // OpenAI-compatible base URL (…/v1); "" disables /api/conversation
 	model    string // model tag/name sent in requests
+	key      string // bearer key for hosted OAI-compatible endpoints; "" = no auth (local)
+	brain    *claudeBrain // non-nil when --llm-backend=claude-cli
 	voice    string // voice tag: Edge (en-US-AriaNeural) or the OAI server's voice name
 	ttsURL   string // OpenAI-compatible /v1/audio/speech endpoint; "" = Edge websocket
 	ttsModel string // model field for OAI-style TTS servers
@@ -85,8 +87,10 @@ type Options struct {
 	Addr        string // listen address (e.g. ":8443")
 	Token       string // shared secret; if empty, auth is disabled (dev only)
 	Store       string // optional SQLite path; empty = ephemeral
+	LLMBackend  string // "openai" (default: chat-completions HTTP) or "claude-cli" (spawn claude -p on this host)
 	LLMURL      string // OpenAI-compatible base URL incl. /v1 (ollama, llama.cpp, LM Studio, OpenAI…); enables /api/conversation
-	LLMModel    string // model name for the conversation loop, e.g. "qwen3:30b-a3b"
+	LLMModel    string // model name for the conversation loop, e.g. "qwen2.5:7b" or "haiku"
+	LLMKey      string // bearer key for hosted endpoints (read from env by the CLI layer); "" = no auth
 	TTSVoice    string // voice tag (Edge: en-US-AriaNeural; OAI servers: e.g. af_heart); empty + no TTSURL disables /api/tts
 	TTSURL      string // optional OpenAI-compatible /v1/audio/speech endpoint (kokoro-fastapi etc.); overrides Edge
 	TTSModel    string // model field for OAI-style TTS servers
@@ -107,10 +111,11 @@ func New(opts Options) (*Server, error) {
 		}
 		b.store = s
 	}
-	if opts.LLMURL != "" || opts.TTSVoice != "" || opts.TTSURL != "" || opts.STTURL != "" {
+	if opts.LLMURL != "" || opts.LLMBackend == "claude-cli" || opts.TTSVoice != "" || opts.TTSURL != "" || opts.STTURL != "" {
 		b.conv = &convConfig{
 			url:      strings.TrimRight(opts.LLMURL, "/"),
 			model:    opts.LLMModel,
+			key:      strings.TrimSpace(opts.LLMKey),
 			voice:    strings.TrimSpace(opts.TTSVoice),
 			ttsURL:   strings.TrimSpace(opts.TTSURL),
 			ttsModel: strings.TrimSpace(opts.TTSModel),
@@ -120,6 +125,9 @@ func New(opts Options) (*Server, error) {
 			// trips, each waiting on a lead's tunnelled response, can take a
 			// while. Voice timeouts are enforced by the UI client, not here.
 			client: &http.Client{Timeout: 5 * time.Minute},
+		}
+		if opts.LLMBackend == "claude-cli" {
+			b.conv.brain = newClaudeBrain(opts.LLMModel, opts.Addr, b.token)
 		}
 	}
 	b.dialer = remotedialer.New(b.authorize, remotedialer.DefaultErrorWriter)

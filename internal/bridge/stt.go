@@ -91,7 +91,7 @@ func (b *Server) handleSTT(w http.ResponseWriter, r *http.Request) {
 func (b *Server) handleVoiceConfig(w http.ResponseWriter, r *http.Request) {
 	caps := map[string]bool{"conversation": false, "tts": false, "stt": false}
 	if b.conv != nil {
-		caps["conversation"] = b.conv.url != ""
+		caps["conversation"] = b.conv.url != "" || b.conv.brain != nil
 		caps["tts"] = b.conv.voice != "" || b.conv.ttsURL != ""
 		caps["stt"] = b.conv.sttURL != ""
 	}
