@@ -139,7 +139,12 @@ type Config struct {
 	// writes the repo name here; an empty value means "no prefix" (session
 	// names are just the persona name). Configurable so two checkouts of the
 	// same repo (or same-named projects) don't collide on session handles.
-	SessionPrefix  string                  `yaml:"sessionPrefix"`
+	SessionPrefix string `yaml:"sessionPrefix"`
+	// LeadPersona names the coordinating persona on this ship — the front
+	// door the bridge opens and the identity in the tunnel clientKey.
+	// Defaults to "lead"; crews with themed coordinators set their own
+	// (e.g. picard, coach).
+	LeadPersona    string                  `yaml:"leadPersona"`
 	SharedMemory   bool                    `yaml:"sharedMemory"`
 	Routing        string                  `yaml:"routing"`
 	RoutingOptions RoutingOptions          `yaml:"routingOptions"`

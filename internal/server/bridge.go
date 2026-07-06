@@ -145,10 +145,14 @@ func toWebsocketURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-// leadPersona returns the configured lead persona name. Defaults to "lead".
-// (Encoded in the clientKey so the bridge can label connected leads.)
+// leadPersona returns the configured lead persona name (shipmates.yaml
+// `leadPersona:`), defaulting to "lead". Encoded in the clientKey so the
+// bridge can label connected leads and open the right front-door persona.
 func leadPersona() string {
-	// Currently the lead persona is conventionally named "lead". If we add a
-	// config knob later (e.g. config.LeadPersona), read it here.
+	if c, err := project.LoadConfig(); err == nil {
+		if p := strings.TrimSpace(c.LeadPersona); p != "" {
+			return p
+		}
+	}
 	return "lead"
 }
