@@ -288,7 +288,6 @@ const audioEl = new Audio();
 audioEl.preload = "auto";
 const ttsTest = document.getElementById("tts-test");
 const ttsInfo = document.getElementById("tts-info");
-ttsInfo.textContent = "server-side TTS (Edge neural)";
 
 // speak resolves when playback has FINISHED, not when it starts — the
 // hands-free loop awaits it so the mic can't reopen while the assistant is
