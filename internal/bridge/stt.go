@@ -78,8 +78,11 @@ func (b *Server) handleSTT(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stt server returned non-json: "+string(body[:min(len(body), 200)]), http.StatusBadGateway)
 		return
 	}
+	// whisper.cpp embeds "\n " at its segment boundaries; speech has no line
+	// structure, so collapse all whitespace runs to single spaces.
+	text := strings.Join(strings.Fields(out.Text), " ")
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"text": strings.TrimSpace(out.Text)})
+	_ = json.NewEncoder(w).Encode(map[string]string{"text": text})
 }
 
 // handleVoiceConfig tells the conversation UI which voice capabilities this
