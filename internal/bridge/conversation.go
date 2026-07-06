@@ -78,6 +78,9 @@ type conversationRequest struct {
 type conversationResponse struct {
 	Reply       string     `json:"reply"`
 	ToolsCalled []toolCall `json:"tools_called,omitempty"`
+	// Error rides the 200 envelope: by the time a slow turn fails, the
+	// heartbeat has already committed the response headers.
+	Error string `json:"error,omitempty"`
 }
 
 // handleConversation runs the operator's turn through Ollama, executing any
@@ -96,12 +99,41 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 
 	messages := prependSystemPrompt(req.Messages)
 	tools := b.toolCatalog()
-	var called []toolCall
 
+	// A slow multi-tool turn on a CPU model can exceed Cloudflare's hard
+	// 100-second proxy timeout (error 524) even though the bridge itself is
+	// happy to wait. Stream a whitespace heartbeat while the loop thinks —
+	// bytes on the wire reset the edge timer, and JSON.parse ignores leading
+	// whitespace, so the client's response handling doesn't change at all.
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fl, canFlush := w.(http.Flusher)
+	heartbeat := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeat:
+				return
+			case <-ticker.C:
+				if canFlush {
+					_, _ = w.Write([]byte(" "))
+					fl.Flush()
+				}
+			}
+		}
+	}()
+	finish := func(v conversationResponse) {
+		close(heartbeat)
+		_ = json.NewEncoder(w).Encode(v)
+	}
+
+	var called []toolCall
 	for iter := 0; iter < conversationMaxIterations; iter++ {
 		resp, err := b.llmChat(r.Context(), messages, tools)
 		if err != nil {
-			http.Error(w, "llm: "+err.Error(), http.StatusBadGateway)
+			finish(conversationResponse{Error: "llm: " + err.Error()})
 			return
 		}
 		// Always append the assistant turn — including tool_calls — so the
@@ -112,10 +144,7 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 			ToolCalls: resp.ToolCalls,
 		})
 		if len(resp.ToolCalls) == 0 {
-			_ = json.NewEncoder(w).Encode(conversationResponse{
-				Reply:       resp.Content,
-				ToolsCalled: called,
-			})
+			finish(conversationResponse{Reply: resp.Content, ToolsCalled: called})
 			return
 		}
 		for _, tc := range resp.ToolCalls {
@@ -129,7 +158,7 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	http.Error(w, "tool-call loop exceeded "+fmt.Sprint(conversationMaxIterations)+" iterations", http.StatusBadGateway)
+	finish(conversationResponse{Error: "tool-call loop exceeded " + fmt.Sprint(conversationMaxIterations) + " iterations"})
 }
 
 // prependSystemPrompt injects the captain's-mate persona at the head of the
