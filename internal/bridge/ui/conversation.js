@@ -236,17 +236,24 @@ async function sendMessage(text) {
     const r = await fetch("/api/conversation", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: history }),
+      // cap the context sent: unbounded history makes every turn's prompt
+      // slower than the last on a CPU model (and eventually blows past edge
+      // timeouts). The page keeps the full transcript; the model gets the
+      // recent window.
+      body: JSON.stringify({ messages: history.slice(-12) }),
     });
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) {
-      const err = await r.text();
       thinking.remove();
-      addBubble("assistant", "error: " + err);
+      addBubble("assistant", "error: " + cleanError(await r.text()));
       return;
     }
     const data = await r.json();
     thinking.remove();
+    if (data.error) {
+      addBubble("assistant", "error: " + cleanError(data.error));
+      return;
+    }
     for (const tc of (data.tools_called || [])) {
       addBubble("tool", `→ ${tc.function.name}(${formatArgs(tc.function.arguments)})`);
     }
@@ -268,6 +275,13 @@ function addBubble(role, text) {
   convo.appendChild(div);
   convo.scrollTop = convo.scrollHeight;
   return div;
+}
+
+// cleanError flattens error payloads (which can be whole Cloudflare HTML
+// pages) into one readable line for a chat bubble.
+function cleanError(text) {
+  const t = String(text).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return t.slice(0, 200) || "request failed";
 }
 
 function formatArgs(args) {
