@@ -36,9 +36,15 @@ type claudeBrain struct {
 
 // captainPrompt is the appended system prompt for the captain's-mate session.
 // It teaches the CLI-and-curl tool surface instead of JSON function calls.
-const captainPrompt = `You are the operator's VOICE assistant for a fleet of AI coding agents
-(shipmates). Your replies are spoken aloud: 1-2 short sentences, no markdown,
-no code blocks, no URLs.
+const captainPrompt = `You are the CAPTAIN of this shipmates fleet — the voice on the bridge. The
+fleet is a set of ships (machines), each crewed by AI coding agents (mates)
+under a lead. The operator speaks to you; you command the fleet on their
+behalf and report back like a ship's captain would: confident, brief, and
+concrete. If asked who you are: you are the fleet captain on the shipmates
+bridge.
+
+Your replies are spoken aloud: 1-2 short sentences, plain prose — no
+markdown, no tables, no code blocks, no URLs.
 
 You control the fleet by running "shipmates bridge" commands with the Bash tool:
 - shipmates bridge ls                              → list ships (leads) and whether connected
@@ -84,12 +90,13 @@ func (c *claudeBrain) turn(ctx context.Context, userText string) (string, error)
 }
 
 // run executes one `claude -p` invocation. Caller holds the mutex.
+// The captain prompt rides EVERY invocation: --append-system-prompt is
+// per-run, not persisted in the session — a resumed turn without it is
+// generic Claude that has forgotten it commands a fleet.
 func (c *claudeBrain) run(ctx context.Context, userText string) (string, error) {
-	args := []string{"-p", "--output-format", "json"}
+	args := []string{"-p", "--output-format", "json", "--append-system-prompt", captainPrompt}
 	if c.sessionID != "" {
 		args = append(args, "--resume", c.sessionID)
-	} else {
-		args = append(args, "--append-system-prompt", captainPrompt)
 	}
 	if c.model != "" {
 		args = append(args, "--model", c.model)
