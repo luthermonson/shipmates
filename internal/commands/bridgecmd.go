@@ -44,6 +44,9 @@ func Bridge() *cli.Command {
 			bridgeTell(),
 			bridgePending(),
 			bridgeResolve(),
+			bridgeStatus(),
+			bridgeBeads(),
+			bridgeDispatch(),
 		},
 	}
 }
@@ -239,6 +242,100 @@ func bridgeResolve() *cli.Command {
 			payload, _ := json.Marshal(map[string]string{"behavior": behavior})
 			_, err := bridgePost(ctx, c,"/api/lead/"+key+"/resolve/"+id, payload)
 			return err
+		},
+	}
+}
+
+func bridgeStatus() *cli.Command {
+	return &cli.Command{
+		Name:  "status",
+		Usage: "per-mate status dots across every connected ship",
+		Flags: operatorFlags(),
+		Action: func(ctx context.Context, c *cli.Command) error {
+			body, err := bridgeGet(ctx, c, "/api/status")
+			if err != nil {
+				return err
+			}
+			var mates []struct {
+				ClientKey string `json:"client_key"`
+				Persona   string `json:"persona"`
+				Status    string `json:"status"`
+			}
+			if err := json.Unmarshal(body, &mates); err != nil {
+				return fmt.Errorf("decode status: %w", err)
+			}
+			for _, m := range mates {
+				fmt.Printf("%-9s %s/%s\n", m.Status, m.ClientKey, m.Persona)
+			}
+			return nil
+		},
+	}
+}
+
+func bridgeBeads() *cli.Command {
+	return &cli.Command{
+		Name:      "beads",
+		Usage:     "list open beads (fleet-wide, or one ship's graph)",
+		ArgsUsage: "[lead-key]",
+		Flags:     operatorFlags(),
+		Action: func(ctx context.Context, c *cli.Command) error {
+			path := "/api/beads"
+			if key := c.Args().First(); key != "" {
+				path = "/api/lead/" + key + "/beads"
+			}
+			body, err := bridgeGet(ctx, c, path)
+			if err != nil {
+				return err
+			}
+			var beads []struct {
+				ID       string `json:"id"`
+				Title    string `json:"title"`
+				Status   string `json:"status"`
+				Priority *int   `json:"priority"`
+				Assignee string `json:"assignee"`
+			}
+			if err := json.Unmarshal(body, &beads); err != nil {
+				return fmt.Errorf("decode beads: %w", err)
+			}
+			if len(beads) == 0 {
+				fmt.Println("(no open beads)")
+				return nil
+			}
+			for _, b := range beads {
+				prio := ""
+				if b.Priority != nil {
+					prio = fmt.Sprintf("p%d", *b.Priority)
+				}
+				assignee := b.Assignee
+				if assignee != "" {
+					assignee = " → " + assignee
+				}
+				fmt.Printf("%-12s %-3s %-8s %s%s\n", b.ID, prio, b.Status, b.Title, assignee)
+			}
+			return nil
+		},
+	}
+}
+
+func bridgeDispatch() *cli.Command {
+	return &cli.Command{
+		Name:      "dispatch",
+		Usage:     "assign a bead to persona@ship and wake the mate to work it",
+		ArgsUsage: "<carrying-lead-key> <bead-id> <target-lead-key> <persona>",
+		Flags:     operatorFlags(),
+		Action: func(ctx context.Context, c *cli.Command) error {
+			args := c.Args().Slice()
+			if len(args) < 4 {
+				return errors.New("usage: shipmates bridge dispatch <carrying-lead-key> <bead-id> <target-lead-key> <persona>")
+			}
+			payload, _ := json.Marshal(map[string]string{"ship": args[2], "persona": args[3]})
+			out, err := bridgePost(ctx, c, "/api/lead/"+args[0]+"/bead/"+args[1]+"/assign", payload)
+			if err != nil {
+				return err
+			}
+			_, _ = os.Stdout.Write(out)
+			fmt.Println()
+			return nil
 		},
 	}
 }
