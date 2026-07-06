@@ -40,21 +40,21 @@ const captainPrompt = `You are the operator's VOICE assistant for a fleet of AI 
 (shipmates). Your replies are spoken aloud: 1-2 short sentences, no markdown,
 no code blocks, no URLs.
 
-You control the fleet by running commands with the Bash tool:
+You control the fleet by running "shipmates bridge" commands with the Bash tool:
 - shipmates bridge ls                              → list ships (leads) and whether connected
+- shipmates bridge status                          → per-mate status: blocked|working|idle|done|off
 - shipmates bridge tell <ship> <persona> <msg…>    → message a mate (wakes it if asleep)
+- shipmates bridge tail <ship>                     → recent activity feed (read replies here)
 - shipmates bridge pending <ship>                  → that ship's pending permission requests
 - shipmates bridge resolve <ship> <id> allow|deny  → decide a pending request
-- shipmates bridge tail <ship>                     → recent activity feed
-The bridge API offers more via curl (auth header is already in $SHIPMATES_BRIDGE_TOKEN):
-- curl -s -H "Authorization: Bearer $SHIPMATES_BRIDGE_TOKEN" $SHIPMATES_BRIDGE_URL/api/status    → per-mate status dots
-- …/api/beads → fleet work graph; …/api/lead/<ship>/beads → one ship's graph
-- dispatch a bead: curl -s -X POST -H "Authorization: Bearer $SHIPMATES_BRIDGE_TOKEN" -H "Content-Type: application/json" -d '{"ship":"<ship>","persona":"<p>","title":"<t>"}' $SHIPMATES_BRIDGE_URL/api/lead/<carrying-ship>/bead/<id>/assign
+- shipmates bridge beads [ship]                    → open beads (the fleet's shared work graph)
+- shipmates bridge dispatch <carrying-ship> <bead-id> <target-ship> <persona>
+                                                   → assign a bead and wake that mate to work it
 
 Ship ids look like "laptop:lead". Mates with status "off" are asleep, not
-gone — a tell wakes them. Never invent bead ids; read them from the API
-first. Do the work with commands, then give the operator the short spoken
-answer.`
+gone — a tell wakes them. Never invent bead ids; read them with the beads
+command first. Do the work with commands, then give the operator the short
+spoken answer.`
 
 // newClaudeBrain wires the backend from bridge options.
 func newClaudeBrain(model, addr, token string) *claudeBrain {
@@ -131,28 +131,59 @@ func (c *claudeBrain) readResult(out []byte) (string, error) {
 func despeak(s string) string {
 	s = strings.NewReplacer("**", "", "`", "", "__", "").Replace(s)
 	lines := strings.Split(s, "\n")
-	for i, l := range lines {
+	out := lines[:0]
+	for _, l := range lines {
 		t := strings.TrimSpace(l)
 		t = strings.TrimLeft(t, "#")
 		t = strings.TrimPrefix(strings.TrimSpace(t), "- ")
-		lines[i] = strings.TrimSpace(t)
+		t = strings.TrimSpace(t)
+		// markdown tables: drop |---|---| separator rows entirely; flatten
+		// cell rows to comma phrases so the voice reads data, not pipes
+		if strings.Contains(t, "|") {
+			if strings.Trim(t, "|-: ") == "" {
+				continue
+			}
+			var cells []string
+			for _, c := range strings.Split(t, "|") {
+				if c = strings.TrimSpace(c); c != "" && c != "—" && c != "-" {
+					cells = append(cells, c)
+				}
+			}
+			t = strings.Join(cells, ", ")
+		}
+		out = append(out, t)
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 // childEnv equips the session to reach the fleet: bridge URL + token, and the
-// shipmates binary's own directory on PATH so `shipmates` resolves even when
-// the bridge runs from a scratch copy.
+// running binary's own directory FIRST on PATH so "shipmates" resolves to
+// this exact build — not a stale copy elsewhere on the system. The prepend
+// must edit the EXISTING Path entry: appending a second "PATH=" var loses to
+// Windows' canonical "Path=" and the stale copy wins.
 func (c *claudeBrain) childEnv() []string {
 	env := os.Environ()
-	env = append(env,
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	if exeDir != "" {
+		prepended := false
+		for i, kv := range env {
+			if k, v, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, "PATH") {
+				env[i] = k + "=" + exeDir + string(os.PathListSeparator) + v
+				prepended = true
+				break
+			}
+		}
+		if !prepended {
+			env = append(env, "PATH="+exeDir)
+		}
+	}
+	return append(env,
 		"SHIPMATES_BRIDGE_URL=http://"+c.addr,
 		"SHIPMATES_BRIDGE_TOKEN="+c.token,
 	)
-	if exe, err := os.Executable(); err == nil {
-		env = append(env, "PATH="+filepath.Dir(exe)+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
-	return env
 }
 
 func firstLine(s string) string {
