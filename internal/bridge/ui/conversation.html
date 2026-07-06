@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>shipmates bridge — conversation</title>
-<link rel="stylesheet" href="/style.css?v=45">
+<link rel="stylesheet" href="/style.css?v=46">
 <style>
   main { flex-direction: column; }
   #convo {
@@ -42,9 +42,11 @@
     background: var(--accent);
     color: var(--bg);
     border: 0;
-    font-size: 1.8rem;
     cursor: pointer;
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   /* conversation ON, waiting for speech: green with a slow breathe */
   #mic.live { background: var(--good, #3fb950); animation: breathe 2.4s infinite; }
@@ -54,14 +56,34 @@
   @keyframes pulse { 50% { transform: scale(1.06); } }
   @keyframes breathe { 50% { transform: scale(1.03); opacity: 0.85; } }
   .hint { color: var(--muted); font-size: 0.75rem; padding: 0 1rem 0.5rem; text-align: center; }
+  /* header: keep the title and nav chips on one line, no ugly wraps */
+  header { gap: 0.6rem; }
+  header h1 { font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  header .right { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+  header .right .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    white-space: nowrap;
+    color: var(--muted);
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.3rem 0.8rem;
+    font-size: 0.78rem;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  header .right .chip:hover { color: var(--text); border-color: var(--accent); }
+  #mic svg { display: block; }
 </style>
 </head>
 <body>
 <header>
-  <h1>shipmates bridge — conversation</h1>
+  <h1>conversation</h1>
   <div class="right">
-    <a href="/" style="color: var(--muted); text-decoration: none; font-size: 0.85rem;">← dashboard</a>
-    <form id="logout-form" method="POST" action="/logout"><button type="submit" class="link">sign out</button></form>
+    <a href="/" class="chip">⌂ dashboard</a>
+    <form id="logout-form" method="POST" action="/logout" style="display:contents"><button type="submit" class="chip">sign out</button></form>
   </div>
 </header>
 <main>
@@ -71,9 +93,15 @@
     <span id="tts-info" style="color:var(--muted);margin-left:0.5rem;font-size:0.7rem;"></span>
   </div>
   <div class="controls">
-    <button id="mic" title="start / end the conversation">🎤</button>
+    <button id="mic" title="start / end the conversation" aria-label="start or end the conversation">
+      <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="9" y="2" width="6" height="12" rx="3"/>
+        <path d="M5 10v1a7 7 0 0 0 14 0v-1"/>
+        <line x1="12" y1="18" x2="12" y2="22"/>
+      </svg>
+    </button>
   </div>
 </main>
-<script src="/conversation.js?v=45"></script>
+<script src="/conversation.js?v=46"></script>
 </body>
 </html>
