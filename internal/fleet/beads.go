@@ -1,4 +1,4 @@
-package bridge
+package fleet
 
 import (
 	"context"
@@ -12,11 +12,11 @@ import (
 	"time"
 )
 
-// handleBeadsNudge is a lead's "we just pushed" callback: fan a pull-now out
-// to every OTHER connected ship so the shared graph converges in seconds
+// handleBeadsNudge is a captain's "we just pushed" callback: fan a pull-now
+// out to every OTHER connected ship so the shared graph converges in seconds
 // instead of a heartbeat. Fan-out is async on a background context — the
-// nudging lead shouldn't block on the slowest ship's pull, and r.Context()
-// dies when this handler returns.
+// nudging captain shouldn't block on the slowest ship's pull, and
+// r.Context() dies when this handler returns.
 func (b *Server) handleBeadsNudge(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		From string `json:"from"`
@@ -58,7 +58,7 @@ func (b *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Ship    string `json:"ship"`    // target clientKey (e.g. "homelab:lead")
+		Ship    string `json:"ship"`    // target clientKey (e.g. "homelab:captain")
 		Persona string `json:"persona"` // target mate
 		Title   string `json:"title"`   // bead title, for the dispatch message
 	}
@@ -126,7 +126,7 @@ func (b *Server) deliverDispatch(ctx context.Context, q queuedDispatch, pull boo
 		title = fmt.Sprintf(" — %q", title)
 	}
 	msg := fmt.Sprintf(
-		"[bridge dispatch] You have been assigned bead %s%s. Run `bd show %s` for the full context, claim it with `bd update %s --claim`, then do the work. Record findings as bd comments and `bd close %s` when done.",
+		"[fleet dispatch] You have been assigned bead %s%s. Run `bd show %s` for the full context, claim it with `bd update %s --claim`, then do the work. Record findings as bd comments and `bd close %s` when done.",
 		q.Bead, title, q.Bead, q.Bead, q.Bead)
 	tell, _ := json.Marshal(map[string]string{"message": msg})
 	if out, status, err := b.proxy(ctx, q.Ship, "POST", "/tell/"+url.PathEscape(q.Persona), tell); err != nil || status >= 300 {
@@ -185,7 +185,7 @@ func (b *Server) dispatchSweepLoop(ctx context.Context) {
 	}
 }
 
-// beadIDOK mirrors the lead-side guard: prefix-hash ids only, so a path
+// beadIDOK mirrors the captain-side guard: prefix-hash ids only, so a path
 // segment can never smuggle request-line framing into the tunnel proxy.
 func beadIDOK(id string) bool {
 	if id == "" || len(id) > 64 {
@@ -201,7 +201,7 @@ func beadIDOK(id string) bool {
 	return id[0] != '-'
 }
 
-// handleAggregateBeads fans /beads.json out to every connected lead and
+// handleAggregateBeads fans /beads.json out to every connected captain and
 // returns the union deduped by bead id — ships syncing one shared graph
 // (phase 5) would otherwise show every bead once per ship. Each entry lists
 // the ships it was seen on, so the UI can attribute and route detail fetches.

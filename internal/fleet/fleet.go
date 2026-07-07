@@ -1,13 +1,14 @@
-// Package bridge is the central rendezvous server a power user can run when
-// they want a single pane across many shipmates leads. Leads dial out to the
-// bridge over a websocket (rancher/remotedialer); the bridge then proxies
-// operator-facing /api/* calls back through the tunnel to each lead's local
-// 127.0.0.1 server. Optional SQLite persistence mirrors lead events for replay.
+// Package fleet is the central rendezvous server a power user can run when
+// they want a single pane across many shipmates captains. Captains dial out
+// to the fleet over a websocket (rancher/remotedialer); the fleet then
+// proxies operator-facing /api/* calls back through the tunnel to each
+// captain's local 127.0.0.1 server. Optional SQLite persistence mirrors
+// captain events for replay.
 //
-// The bridge is *not* a UI host. It exposes a JSON API consumed by the
-// shipmates CLI (`shipmates bridge ls / tail / tell / pending / resolve`). A
+// The fleet is *not* a UI host. It exposes a JSON API consumed by the
+// shipmates CLI (`shipmates fleet ls / tail / tell / pending / resolve`). A
 // browser frontend could be glued on later via the same API.
-package bridge
+package fleet
 
 import (
 	"bufio"
@@ -32,20 +33,20 @@ import (
 //go:embed all:ui
 var uiFS embed.FS
 
-// Server is the bridge: it embeds a remotedialer.Server (which accepts inbound
-// websocket connections from leads) and adds a small /api/* surface that the
-// shipmates CLI hits to list leads, tail their event feeds, and proxy commands
-// back through the tunnels.
+// Server is the fleet: it embeds a remotedialer.Server (which accepts inbound
+// websocket connections from captains) and adds a small /api/* surface that
+// the shipmates CLI hits to list captains, tail their event feeds, and proxy
+// commands back through the tunnels.
 type Server struct {
 	dialer *remotedialer.Server
 	token  string
 
-	mu    sync.Mutex
-	leads map[string]*Lead // keyed by clientKey
+	mu       sync.Mutex
+	captains map[string]*Captain // keyed by clientKey
 
 	// dispatchQ holds bead dispatches whose target ship was offline at
 	// assign time; a sweep loop delivers them when the ship reconnects.
-	// In-memory only — a bridge restart drops the queue (the assignee is
+	// In-memory only — a fleet restart drops the queue (the assignee is
 	// already on the graph, so the work isn't lost, just un-nudged).
 	dispatchQ []queuedDispatch
 
@@ -70,19 +71,19 @@ type convConfig struct {
 	client   *http.Client
 }
 
-// Lead is the bridge's record of one connected shipmates lead.
-type Lead struct {
+// Captain is the fleet's record of one connected shipmates captain.
+type Captain struct {
 	ClientKey   string    `json:"client_key"`
 	Repo        string    `json:"repo"`
 	RepoURL     string    `json:"repo_url,omitempty"` // browsable origin URL (for gh links)
 	InstallID   string    `json:"install_id"`
 	Persona     string    `json:"persona"`
-	Port        int       `json:"port"` // lead's local server port (for tunnel dial)
+	Port        int       `json:"port"` // captain's local server port (for tunnel dial)
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
 }
 
-// Options configures the bridge.
+// Options configures the fleet.
 type Options struct {
 	Addr        string // listen address (e.g. ":8443")
 	Token       string // shared secret; if empty, auth is disabled (dev only)
@@ -98,11 +99,11 @@ type Options struct {
 	STTModel    string // model name forwarded to OAI-style STT servers; whisper.cpp ignores it
 }
 
-// New constructs the bridge. The returned Server is ready to Run.
+// New constructs the fleet. The returned Server is ready to Run.
 func New(opts Options) (*Server, error) {
 	b := &Server{
 		token: strings.TrimSpace(opts.Token),
-		leads: map[string]*Lead{},
+		captains: map[string]*Captain{},
 	}
 	if opts.Store != "" {
 		s, err := openStore(opts.Store)
@@ -122,7 +123,7 @@ func New(opts Options) (*Server, error) {
 			sttURL:   strings.TrimSpace(opts.STTURL),
 			sttModel: strings.TrimSpace(opts.STTModel),
 			// Long timeout because a tool-call loop with multiple LLM round
-			// trips, each waiting on a lead's tunnelled response, can take a
+			// trips, each waiting on a captain's tunnelled response, can take a
 			// while. Voice timeouts are enforced by the UI client, not here.
 			client: &http.Client{Timeout: 5 * time.Minute},
 		}
@@ -134,39 +135,39 @@ func New(opts Options) (*Server, error) {
 	return b, nil
 }
 
-// Run binds the bridge HTTP listener and serves until ctx is cancelled.
+// Run binds the fleet HTTP listener and serves until ctx is cancelled.
 func (b *Server) Run(ctx context.Context, addr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/connect", b.dialer)
 	mux.HandleFunc("GET /login", b.handleLogin)
 	mux.HandleFunc("POST /login", b.handleLogin)
 	mux.HandleFunc("POST /logout", b.handleLogout)
-	mux.HandleFunc("GET /api/leads", b.handleLeads)
+	mux.HandleFunc("GET /api/captains", b.handleCaptains)
 	mux.HandleFunc("GET /api/pending", b.handleAggregatePending)
-	mux.HandleFunc("GET /api/lead/{key}/feed", b.proxyGet("/feed"))
-	mux.HandleFunc("GET /api/lead/{key}/events", b.proxyGet("/events"))
-	mux.HandleFunc("GET /api/lead/{key}/pending", b.proxyGet("/pending"))
-	mux.HandleFunc("GET /api/lead/{key}/status", b.proxyGet("/status.json"))
-	mux.HandleFunc("GET /api/lead/{key}/beads", b.proxyGet("/beads.json"))
-	mux.HandleFunc("GET /api/lead/{key}/beads/summary", b.proxyGet("/beads/summary"))
+	mux.HandleFunc("GET /api/captain/{key}/feed", b.proxyGet("/feed"))
+	mux.HandleFunc("GET /api/captain/{key}/events", b.proxyGet("/events"))
+	mux.HandleFunc("GET /api/captain/{key}/pending", b.proxyGet("/pending"))
+	mux.HandleFunc("GET /api/captain/{key}/status", b.proxyGet("/status.json"))
+	mux.HandleFunc("GET /api/captain/{key}/beads", b.proxyGet("/beads.json"))
+	mux.HandleFunc("GET /api/captain/{key}/beads/summary", b.proxyGet("/beads/summary"))
 	mux.HandleFunc("GET /api/status", b.handleAggregateStatus)
-	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/start", b.proxyPTYPost("/pty/%s/start"))
-	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/input", b.proxyPTYPost("/pty/%s/input"))
-	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/resize", b.proxyPTYPost("/pty/%s/resize"))
-	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/takeover", b.proxyPTYPost("/pty/%s/takeover"))
-	mux.HandleFunc("POST /api/lead/{key}/pty/{persona}/release", b.proxyPTYPost("/pty/%s/release"))
-	mux.HandleFunc("GET /api/lead/{key}/pty/{persona}/snapshot", b.proxyGet2("/pty/%s/snapshot", "persona"))
-	mux.HandleFunc("GET /api/lead/{key}/bead/{id}", b.proxyGet2("/bead/%s", "id"))
-	mux.HandleFunc("POST /api/lead/{key}/bead", b.proxyPost("/bead"))
-	mux.HandleFunc("POST /api/lead/{key}/bead/{id}/close", b.proxyPost2("/bead/%s/close", "id"))
-	mux.HandleFunc("POST /api/lead/{key}/bead/{id}/update", b.proxyPost2("/bead/%s/update", "id"))
-	mux.HandleFunc("POST /api/lead/{key}/bead/{id}/assign", b.handleBeadAssign)
+	mux.HandleFunc("POST /api/captain/{key}/pty/{persona}/start", b.proxyPTYPost("/pty/%s/start"))
+	mux.HandleFunc("POST /api/captain/{key}/pty/{persona}/input", b.proxyPTYPost("/pty/%s/input"))
+	mux.HandleFunc("POST /api/captain/{key}/pty/{persona}/resize", b.proxyPTYPost("/pty/%s/resize"))
+	mux.HandleFunc("POST /api/captain/{key}/pty/{persona}/takeover", b.proxyPTYPost("/pty/%s/takeover"))
+	mux.HandleFunc("POST /api/captain/{key}/pty/{persona}/release", b.proxyPTYPost("/pty/%s/release"))
+	mux.HandleFunc("GET /api/captain/{key}/pty/{persona}/snapshot", b.proxyGet2("/pty/%s/snapshot", "persona"))
+	mux.HandleFunc("GET /api/captain/{key}/bead/{id}", b.proxyGet2("/bead/%s", "id"))
+	mux.HandleFunc("POST /api/captain/{key}/bead", b.proxyPost("/bead"))
+	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/close", b.proxyPost2("/bead/%s/close", "id"))
+	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/update", b.proxyPost2("/bead/%s/update", "id"))
+	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/assign", b.handleBeadAssign)
 	mux.HandleFunc("GET /api/beads", b.handleAggregateBeads)
 	mux.HandleFunc("POST /api/beads/nudge", b.handleBeadsNudge)
-	mux.HandleFunc("GET /api/lead/{key}/pty/{persona}/stream", b.handlePTYStreamProxy)
-	mux.HandleFunc("GET /api/lead/{key}/stream", b.handleStream)
-	mux.HandleFunc("POST /api/lead/{key}/tell/{persona}", b.handleTell)
-	mux.HandleFunc("POST /api/lead/{key}/resolve/{id}", b.handleResolve)
+	mux.HandleFunc("GET /api/captain/{key}/pty/{persona}/stream", b.handlePTYStreamProxy)
+	mux.HandleFunc("GET /api/captain/{key}/stream", b.handleStream)
+	mux.HandleFunc("POST /api/captain/{key}/tell/{persona}", b.handleTell)
+	mux.HandleFunc("POST /api/captain/{key}/resolve/{id}", b.handleResolve)
 	mux.HandleFunc("POST /api/conversation", b.handleConversation)
 	mux.HandleFunc("POST /api/tts", b.handleTTS)
 	mux.HandleFunc("POST /api/stt", b.handleSTT)
@@ -203,15 +204,15 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	}
 	go b.dispatchSweepLoop(ctx)
 
-	slog.Info("bridge listening", "addr", addr, "auth", b.token != "", "store", b.store != nil)
+	slog.Info("fleet listening", "addr", addr, "auth", b.token != "", "store", b.store != nil)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
 }
 
-// authorize is the remotedialer Authorizer: validates the lead's bearer token,
-// extracts identity headers, and records the lead in the registry. Returning
+// authorize is the remotedialer Authorizer: validates the captain's bearer token,
+// extracts identity headers, and records the captain in the registry. Returning
 // authed=false (with no error) rejects the connection with 401.
 func (b *Server) authorize(req *http.Request) (clientKey string, authed bool, err error) {
 	if b.token != "" {
@@ -230,10 +231,10 @@ func (b *Server) authorize(req *http.Request) (clientKey string, authed bool, er
 	}
 	now := time.Now()
 	b.mu.Lock()
-	existing, ok := b.leads[clientKey]
+	existing, ok := b.captains[clientKey]
 	if !ok {
-		existing = &Lead{ClientKey: clientKey, FirstSeen: now}
-		b.leads[clientKey] = existing
+		existing = &Captain{ClientKey: clientKey, FirstSeen: now}
+		b.captains[clientKey] = existing
 	}
 	existing.Repo = req.Header.Get("X-Shipmates-Repo")
 	existing.RepoURL = req.Header.Get("X-Shipmates-Repo-URL")
@@ -243,29 +244,29 @@ func (b *Server) authorize(req *http.Request) (clientKey string, authed bool, er
 	existing.LastSeen = now
 	b.mu.Unlock()
 	if b.store != nil {
-		_ = b.store.upsertLead(existing)
+		_ = b.store.upsertCaptain(existing)
 	}
-	slog.Info("bridge: lead connected", "client_key", clientKey, "port", port)
+	slog.Info("fleet: captain connected", "client_key", clientKey, "port", port)
 	return clientKey, true, nil
 }
 
-// handleLeads lists all leads the bridge knows about, intersected with the set
-// currently connected (so stale entries from prior runs don't show up). When a
-// store is configured, disconnected leads still surface from the store so an
-// operator can replay their history.
-func (b *Server) handleLeads(w http.ResponseWriter, r *http.Request) {
+// handleCaptains lists all captains the fleet knows about, intersected with
+// the set currently connected (so stale entries from prior runs don't show
+// up). When a store is configured, disconnected captains still surface from
+// the store so an operator can replay their history.
+func (b *Server) handleCaptains(w http.ResponseWriter, r *http.Request) {
 	connected := map[string]bool{}
 	for _, k := range b.dialer.ListClients() {
 		connected[k] = true
 	}
 	type wire struct {
-		Lead
+		Captain
 		Connected bool `json:"connected"`
 	}
 	b.mu.Lock()
-	out := make([]wire, 0, len(b.leads))
-	for k, l := range b.leads {
-		out = append(out, wire{Lead: *l, Connected: connected[k]})
+	out := make([]wire, 0, len(b.captains))
+	for k, l := range b.captains {
+		out = append(out, wire{Captain: *l, Connected: connected[k]})
 	}
 	b.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -273,12 +274,12 @@ func (b *Server) handleLeads(w http.ResponseWriter, r *http.Request) {
 }
 
 // proxyGet returns a handler that reverse-proxies an inbound GET to the named
-// path on a specific lead's local server, via the remotedialer tunnel. The
+// path on a specific captain's local server, via the remotedialer tunnel. The
 // query string rides along (e.g. /beads?all=1 → /beads.json?all=1).
-func (b *Server) proxyGet(leadPath string) http.HandlerFunc {
+func (b *Server) proxyGet(captainPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
-		path := leadPath
+		path := captainPath
 		if r.URL.RawQuery != "" {
 			path += "?" + r.URL.RawQuery
 		}
@@ -303,7 +304,7 @@ func (b *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	writeProxied(w, status, body, err)
 }
 
-// handleAggregatePending fans out to every connected lead's /pending.json,
+// handleAggregatePending fans out to every connected captain's /pending.json,
 // flattens the results, and returns one array tagged with client_key. Lets the
 // UI poll once per tick instead of (N leads) calls.
 func (b *Server) handleAggregatePending(w http.ResponseWriter, r *http.Request) {
@@ -333,11 +334,11 @@ func (b *Server) handleAggregatePending(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 			b.mu.Lock()
-			lead, _ := b.leads[key]
+			captain, _ := b.captains[key]
 			b.mu.Unlock()
 			repo := ""
-			if lead != nil {
-				repo = lead.Repo
+			if captain != nil {
+				repo = captain.Repo
 			}
 			out := make([]entry, 0, len(raw))
 			for _, p := range raw {
@@ -354,7 +355,7 @@ func (b *Server) handleAggregatePending(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(all)
 }
 
-// handleStream is an SSE endpoint that polls the lead's /events through the
+// handleStream is an SSE endpoint that polls the captain's /events through the
 // tunnel and pushes new events to the connected browser. The connection lives
 // for as long as the client holds it open; closing the EventSource (e.g. the
 // operator navigates away from the tab) ends the goroutine and drops history,
@@ -362,10 +363,10 @@ func (b *Server) handleAggregatePending(w http.ResponseWriter, r *http.Request) 
 func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	b.mu.Lock()
-	_, known := b.leads[key]
+	_, known := b.captains[key]
 	b.mu.Unlock()
 	if !known {
-		http.Error(w, "no such lead", http.StatusNotFound)
+		http.Error(w, "no such captain", http.StatusNotFound)
 		return
 	}
 
@@ -384,7 +385,7 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	keepalive := time.NewTicker(30 * time.Second)
 	defer keepalive.Stop()
-	// Index watermark, not timestamp: the lead's event log is append-only, so
+	// Index watermark, not timestamp: the captain's event log is append-only, so
 	// "everything past what we already sent" is exact. A timestamp watermark
 	// silently dropped all-but-the-first of any same-second batch — which is
 	// precisely what a broadcast tell produces.
@@ -408,7 +409,7 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		if err != nil || status >= 300 {
 			continue
 		}
-		// Raw passthrough: the lead's event schema grows (timeline stats,
+		// Raw passthrough: the captain's event schema grows (timeline stats,
 		// permission fields) and re-marshaling a named subset here silently
 		// stripped every field this proxy didn't know about.
 		var events []json.RawMessage
@@ -416,7 +417,7 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if len(events) < sent {
-			sent = 0 // lead restarted and its log reset; replay from the top
+			sent = 0 // captain restarted and its log reset; replay from the top
 		}
 		if len(events) == sent {
 			continue
@@ -431,30 +432,30 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// proxy opens a tunneled TCP connection to the named lead's local server,
+// proxy opens a tunneled TCP connection to the named captain's local server,
 // writes a single HTTP request, and returns the response body. We use
 // http.NewRequestWithContext + http.ReadResponse on a hand-rolled connection
 // because the standard http.Transport doesn't accept an arbitrary net.Conn.
 func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body []byte) ([]byte, int, error) {
 	b.mu.Lock()
-	lead, ok := b.leads[clientKey]
+	captain, ok := b.captains[clientKey]
 	b.mu.Unlock()
 	if !ok {
-		return nil, http.StatusNotFound, fmt.Errorf("no such lead: %s", clientKey)
+		return nil, http.StatusNotFound, fmt.Errorf("no such captain: %s", clientKey)
 	}
 	if !b.dialer.HasSession(clientKey) {
-		return nil, http.StatusGatewayTimeout, fmt.Errorf("lead %s not currently connected", clientKey)
+		return nil, http.StatusGatewayTimeout, fmt.Errorf("captain %s not currently connected", clientKey)
 	}
 	dial := b.dialer.Dialer(clientKey)
-	addr := fmt.Sprintf("127.0.0.1:%d", lead.Port)
+	addr := fmt.Sprintf("127.0.0.1:%d", captain.Port)
 	conn, err := dial(ctx, "tcp", addr)
 	if err != nil {
-		return nil, http.StatusBadGateway, fmt.Errorf("dial lead: %w", err)
+		return nil, http.StatusBadGateway, fmt.Errorf("dial captain: %w", err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
-	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: lead\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", method, path, len(body))
+	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: captain\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", method, path, len(body))
 	if _, err := io.WriteString(conn, req); err != nil {
 		return nil, http.StatusBadGateway, err
 	}
@@ -503,8 +504,8 @@ func writeProxied(w http.ResponseWriter, status int, body []byte, err error) {
 	_, _ = w.Write(body)
 }
 
-// mirrorLoop polls each connected lead's /events endpoint at a fixed interval
-// and persists any new events to SQLite. The lead-side feed is monotonically
+// mirrorLoop polls each connected captain's /events endpoint at a fixed interval
+// and persists any new events to SQLite. The captain-side feed is monotonically
 // appended, so we dedupe by tracking the highest (Time, Persona, Type, Text)
 // composite per client_key.
 func (b *Server) mirrorLoop(ctx context.Context) {
@@ -558,7 +559,7 @@ func openStore(path string) (*store, error) {
 		return nil, err
 	}
 	const schema = `
-	CREATE TABLE IF NOT EXISTS leads (
+	CREATE TABLE IF NOT EXISTS captains (
 		client_key TEXT PRIMARY KEY,
 		repo TEXT, install_id TEXT, persona TEXT,
 		first_seen INTEGER, last_seen INTEGER
@@ -576,9 +577,9 @@ func openStore(path string) (*store, error) {
 	return &store{db: db}, nil
 }
 
-func (s *store) upsertLead(l *Lead) error {
+func (s *store) upsertCaptain(l *Captain) error {
 	_, err := s.db.Exec(`
-		INSERT INTO leads (client_key, repo, install_id, persona, first_seen, last_seen)
+		INSERT INTO captains (client_key, repo, install_id, persona, first_seen, last_seen)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(client_key) DO UPDATE SET
 			repo=excluded.repo,

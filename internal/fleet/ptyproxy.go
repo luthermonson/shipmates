@@ -1,4 +1,4 @@
-package bridge
+package fleet
 
 import (
 	"context"
@@ -11,43 +11,44 @@ import (
 
 // PTY proxying. The buffered b.proxy() helper is fine for start/input/resize
 // (small request, small response), but the stream endpoint is a long-lived SSE
-// byte flow — it needs a real streaming path: dial the lead through the
+// byte flow — it needs a real streaming path: dial the captain through the
 // remotedialer tunnel, issue the GET, and pump the response body to the
 // browser flush-per-chunk.
 
-// leadTransport returns an http.RoundTripper that dials the given lead's
-// local server through its tunnel, regardless of the request URL's host.
-func (b *Server) leadTransport(clientKey string) (http.RoundTripper, error) {
+// captainTransport returns an http.RoundTripper that dials the given
+// captain's local server through its tunnel, regardless of the request URL's
+// host.
+func (b *Server) captainTransport(clientKey string) (http.RoundTripper, error) {
 	b.mu.Lock()
-	lead, ok := b.leads[clientKey]
+	captain, ok := b.captains[clientKey]
 	b.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("no such lead: %s", clientKey)
+		return nil, fmt.Errorf("no such captain: %s", clientKey)
 	}
 	if !b.dialer.HasSession(clientKey) {
-		return nil, fmt.Errorf("lead %s not currently connected", clientKey)
+		return nil, fmt.Errorf("captain %s not currently connected", clientKey)
 	}
 	dial := b.dialer.Dialer(clientKey)
-	addr := fmt.Sprintf("127.0.0.1:%d", lead.Port)
+	addr := fmt.Sprintf("127.0.0.1:%d", captain.Port)
 	return &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dial(ctx, "tcp", addr)
 		},
-		// One conn per stream; don't pool tunneled conns across leads.
+		// One conn per stream; don't pool tunneled conns across captains.
 		DisableKeepAlives:     true,
 		ResponseHeaderTimeout: 15 * time.Second,
 	}, nil
 }
 
 // proxyPTYPost forwards a small POST (start/input/resize/takeover/release)
-// to the lead. The query string rides along — it carries the viewer's writer-
-// lock client id.
-func (b *Server) proxyPTYPost(leadPathFmt string) http.HandlerFunc {
+// to the captain. The query string rides along — it carries the viewer's
+// writer-lock client id.
+func (b *Server) proxyPTYPost(captainPathFmt string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
 		persona := r.PathValue("persona")
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-		path := fmt.Sprintf(leadPathFmt, persona)
+		path := fmt.Sprintf(captainPathFmt, persona)
 		if r.URL.RawQuery != "" {
 			path += "?" + r.URL.RawQuery
 		}
@@ -56,45 +57,45 @@ func (b *Server) proxyPTYPost(leadPathFmt string) http.HandlerFunc {
 	}
 }
 
-// proxyPost forwards a small POST to a fixed path on the lead.
-func (b *Server) proxyPost(leadPath string) http.HandlerFunc {
+// proxyPost forwards a small POST to a fixed path on the captain.
+func (b *Server) proxyPost(captainPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-		out, status, err := b.proxy(r.Context(), key, "POST", leadPath, body)
+		out, status, err := b.proxy(r.Context(), key, "POST", captainPath, body)
 		writeProxied(w, status, out, err)
 	}
 }
 
 // proxyPost2 is proxyPost with one extra path parameter interpolated.
-func (b *Server) proxyPost2(leadPathFmt, param string) http.HandlerFunc {
+func (b *Server) proxyPost2(captainPathFmt, param string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
 		val := r.PathValue(param)
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-		out, status, err := b.proxy(r.Context(), key, "POST", fmt.Sprintf(leadPathFmt, val), body)
+		out, status, err := b.proxy(r.Context(), key, "POST", fmt.Sprintf(captainPathFmt, val), body)
 		writeProxied(w, status, out, err)
 	}
 }
 
 // proxyGet2 is proxyGet with one extra path parameter interpolated.
-func (b *Server) proxyGet2(leadPathFmt, param string) http.HandlerFunc {
+func (b *Server) proxyGet2(captainPathFmt, param string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
 		val := r.PathValue(param)
-		out, status, err := b.proxy(r.Context(), key, "GET", fmt.Sprintf(leadPathFmt, val), nil)
+		out, status, err := b.proxy(r.Context(), key, "GET", fmt.Sprintf(captainPathFmt, val), nil)
 		writeProxied(w, status, out, err)
 	}
 }
 
-// handlePTYStreamProxy pipes the lead's /pty/{persona}/stream SSE response
+// handlePTYStreamProxy pipes the captain's /pty/{persona}/stream SSE response
 // through to the browser. Chunks are flushed as they arrive so xterm.js sees
 // keystroke-latency updates, not 4KB buffers.
 func (b *Server) handlePTYStreamProxy(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	persona := r.PathValue("persona")
 
-	rt, err := b.leadTransport(key)
+	rt, err := b.captainTransport(key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -106,14 +107,14 @@ func (b *Server) handlePTYStreamProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req, err := http.NewRequestWithContext(r.Context(), "GET",
-		fmt.Sprintf("http://lead/pty/%s/stream", persona), nil)
+		fmt.Sprintf("http://captain/pty/%s/stream", persona), nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
-		http.Error(w, "dial lead stream: "+err.Error(), http.StatusBadGateway)
+		http.Error(w, "dial captain stream: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()

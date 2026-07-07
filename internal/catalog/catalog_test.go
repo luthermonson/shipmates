@@ -6,17 +6,17 @@ import (
 	"testing/fstest"
 )
 
-// fakeCatalog builds an in-memory catalog FS with two personas. "lead" ships an
+// fakeCatalog builds an in-memory catalog FS with two personas. "captain" ships an
 // agent file plus two memory seeds; "tester" ships only an agent file.
 func fakeCatalog() fstest.MapFS {
 	return fstest.MapFS{
-		"catalog/lead/.claude/agents/lead.md": {
-			Data: []byte("---\nname: lead\n---\nlead body\n"),
+		"catalog/captain/.claude/agents/captain.md": {
+			Data: []byte("---\nname: captain\n---\ncaptain body\n"),
 		},
-		"catalog/lead/memory-seeds/seed.md": {
+		"catalog/captain/memory-seeds/seed.md": {
 			Data: []byte("seed one\n"),
 		},
-		"catalog/lead/memory-seeds/log.md": {
+		"catalog/captain/memory-seeds/log.md": {
 			Data: []byte("seed two\n"),
 		},
 		"catalog/tester/.claude/agents/tester.md": {
@@ -31,7 +31,7 @@ func TestPersonasSorted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Personas: %v", err)
 	}
-	want := []string{"lead", "tester"}
+	want := []string{"captain", "tester"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Personas() = %v, want %v (sorted)", got, want)
 	}
@@ -43,7 +43,7 @@ func TestHas(t *testing.T) {
 		name string
 		want bool
 	}{
-		{"lead", true},
+		{"captain", true},
 		{"tester", true},
 		{"ghost", false},
 	}
@@ -58,13 +58,13 @@ func TestHas(t *testing.T) {
 
 func TestAgentFile(t *testing.T) {
 	c := New(fakeCatalog())
-	got, err := c.AgentFile("lead")
+	got, err := c.AgentFile("captain")
 	if err != nil {
 		t.Fatalf("AgentFile: %v", err)
 	}
-	want := "---\nname: lead\n---\nlead body\n"
+	want := "---\nname: captain\n---\ncaptain body\n"
 	if string(got) != want {
-		t.Fatalf("AgentFile(lead) = %q, want %q", got, want)
+		t.Fatalf("AgentFile(captain) = %q, want %q", got, want)
 	}
 
 	if _, err := c.AgentFile("ghost"); err == nil {
@@ -75,7 +75,7 @@ func TestAgentFile(t *testing.T) {
 func TestMemorySeeds(t *testing.T) {
 	c := New(fakeCatalog())
 
-	seeds, err := c.MemorySeeds("lead")
+	seeds, err := c.MemorySeeds("captain")
 	if err != nil {
 		t.Fatalf("MemorySeeds: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestMemorySeeds(t *testing.T) {
 		"log.md":  []byte("seed two\n"),
 	}
 	if !reflect.DeepEqual(seeds, want) {
-		t.Fatalf("MemorySeeds(lead) = %v, want %v", seeds, want)
+		t.Fatalf("MemorySeeds(captain) = %v, want %v", seeds, want)
 	}
 
 	none, err := c.MemorySeeds("tester")

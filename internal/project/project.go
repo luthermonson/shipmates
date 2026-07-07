@@ -112,7 +112,7 @@ func InstallIDPath() string { return filepath.Join(Dir, InstallIDName) }
 
 // InstallID returns the stable per-install UUID, generating and persisting one
 // on first read. Used to disambiguate multi-clone of the same repo connecting
-// to the same bridge (clientKey = <repo>/<install-id>/<persona>).
+// to the same fleet (clientKey = <repo>/<install-id>/<persona>).
 func InstallID() (string, error) {
 	b, err := os.ReadFile(InstallIDPath())
 	if err == nil {
@@ -140,49 +140,49 @@ type Config struct {
 	// names are just the persona name). Configurable so two checkouts of the
 	// same repo (or same-named projects) don't collide on session handles.
 	SessionPrefix string `yaml:"sessionPrefix"`
-	// LeadPersona names the coordinating persona on this ship — the front
-	// door the bridge opens and the identity in the tunnel clientKey.
-	// Defaults to "lead"; crews with themed coordinators set their own
+	// CaptainPersona names the coordinating persona on this ship — the front
+	// door the fleet opens and the identity in the tunnel clientKey.
+	// Defaults to "captain"; crews with themed coordinators set their own
 	// (e.g. picard, coach).
-	LeadPersona    string                  `yaml:"leadPersona"`
+	CaptainPersona string                  `yaml:"captainPersona"`
 	SharedMemory   bool                    `yaml:"sharedMemory"`
 	Routing        string                  `yaml:"routing"`
 	RoutingOptions RoutingOptions          `yaml:"routingOptions"`
 	RoutingOnBoot  bool                    `yaml:"routingOnBoot"`
-	Bridge         BridgeConfig            `yaml:"bridge"`
+	Fleet          FleetConfig             `yaml:"fleet"`
 	Crew           map[string]CrewOverride `yaml:"crew"`
 }
 
-// BridgeConfig points the lead at a central `shipmates bridge serve` instance.
-// When URL is non-empty the lead opens an outbound websocket on boot using
-// rancher/remotedialer; the bridge can then dial back through the tunnel to the
-// lead's existing 127.0.0.1 server.
+// FleetConfig points the captain at a central `shipmates fleet serve` instance.
+// When URL is non-empty the captain opens an outbound websocket on boot using
+// rancher/remotedialer; the fleet can then dial back through the tunnel to the
+// captain's existing 127.0.0.1 server.
 //
 // The secret is NEVER stored in shipmates.yaml (it gets committed to git).
-// TokenEnv names an environment variable the lead reads at boot to get the
-// bearer token; default is SHIPMATES_BRIDGE_TOKEN. Set this var in your shell
+// TokenEnv names an environment variable the captain reads at boot to get the
+// bearer token; default is SHIPMATES_FLEET_TOKEN. Set this var in your shell
 // (or systemd unit, launchd plist, etc.) — the config file stays clean.
 //
-// Name overrides the lead's identity on the bridge. Defaults to the repo
+// Name overrides the captain's identity on the fleet. Defaults to the repo
 // directory name, so the clientKey is `<repo>:<persona>`. Set this if two
-// clones of the same repo connect to the same bridge and collide (e.g.
+// clones of the same repo connect to the same fleet and collide (e.g.
 // "card-cannon-dev" vs "card-cannon-scratch").
-type BridgeConfig struct {
+type FleetConfig struct {
 	URL      string `yaml:"url"`
 	TokenEnv string `yaml:"tokenEnv"`
 	Name     string `yaml:"name"`
 }
 
-// DefaultBridgeTokenEnv is the env var the lead reads when BridgeConfig.TokenEnv
-// is empty. Matches the var the bridge server and operator commands also read.
-const DefaultBridgeTokenEnv = "SHIPMATES_BRIDGE_TOKEN"
+// DefaultFleetTokenEnv is the env var the captain reads when FleetConfig.TokenEnv
+// is empty. Matches the var the fleet server and operator commands also read.
+const DefaultFleetTokenEnv = "SHIPMATES_FLEET_TOKEN"
 
 // Token returns the resolved bearer token, read from the env var named by
-// TokenEnv (or DefaultBridgeTokenEnv when unset). Empty result means "no auth".
-func (b BridgeConfig) Token() string {
+// TokenEnv (or DefaultFleetTokenEnv when unset). Empty result means "no auth".
+func (b FleetConfig) Token() string {
 	name := strings.TrimSpace(b.TokenEnv)
 	if name == "" {
-		name = DefaultBridgeTokenEnv
+		name = DefaultFleetTokenEnv
 	}
 	return strings.TrimSpace(os.Getenv(name))
 }

@@ -1,4 +1,4 @@
-package bridge
+package fleet
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 
 // Speech-to-text: the browser records the operator's utterance as 16kHz mono
 // WAV (Web Audio capture — chosen over MediaRecorder codecs so whisper.cpp
-// can decode it without ffmpeg) and POSTs the bytes here. The bridge wraps
+// can decode it without ffmpeg) and POSTs the bytes here. The fleet wraps
 // them in the multipart form both whisper.cpp's /inference and any
 // OpenAI-compatible /v1/audio/transcriptions server accept, and returns
 // {"text": "..."} either way. This replaces the Web Speech API, whose
@@ -24,7 +24,7 @@ const sttMaxBytes = 4 << 20
 
 func (b *Server) handleSTT(w http.ResponseWriter, r *http.Request) {
 	if b.conv == nil || b.conv.sttURL == "" {
-		http.Error(w, "stt not configured (start the bridge with --stt-url)", http.StatusNotImplemented)
+		http.Error(w, "stt not configured (start the fleet with --stt-url)", http.StatusNotImplemented)
 		return
 	}
 	audio, err := io.ReadAll(io.LimitReader(r.Body, sttMaxBytes+1))
@@ -86,7 +86,7 @@ func (b *Server) handleSTT(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleVoiceConfig tells the conversation UI which voice capabilities this
-// bridge was started with, so it can grey out the mic / skip TTS instead of
+// fleet was started with, so it can grey out the mic / skip TTS instead of
 // failing on first use.
 func (b *Server) handleVoiceConfig(w http.ResponseWriter, r *http.Request) {
 	caps := map[string]bool{"conversation": false, "tts": false, "stt": false}

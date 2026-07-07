@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>shipmates bridge</title>
+<title>shipmates fleet</title>
 <link rel="stylesheet" href="/style.css?v=48">
 <link rel="stylesheet" href="/vendor/xterm.min.css?v=48">
 </head>
 <body>
 <header>
-  <button id="leads-toggle" type="button" aria-label="toggle leads list">☰</button>
-  <h1>shipmates bridge</h1>
+  <button id="captains-toggle" type="button" aria-label="toggle captains list">☰</button>
+  <h1>shipmates fleet</h1>
   <div class="right">
     <span id="status">connecting…</span>
     <a href="/conversation.html" id="voice-link" title="voice conversation">🎤</a>
@@ -19,13 +19,13 @@
 </header>
 <main>
   <div id="drawer-backdrop"></div>
-  <aside id="leads">
-    <h2>leads</h2>
-    <ul id="leads-list"><li class="empty">no leads connected</li></ul>
+  <aside id="captains">
+    <h2>captains</h2>
+    <ul id="captains-list"><li class="empty">no captains connected</li></ul>
   </aside>
   <section id="feed">
     <div id="feed-header">
-      <h2 id="feed-title">select a lead</h2>
+      <h2 id="feed-title">select a captain</h2>
       <span class="right">
         <small id="feed-meta"></small>
         <button id="beads-open" type="button" title="show this ship's beads work graph">⛃ beads</button>
@@ -33,7 +33,7 @@
       </span>
     </div>
     <div id="feed-tabs"></div>
-    <div id="lead-picker" hidden></div>
+    <div id="captain-picker" hidden></div>
     <div id="beads-pane" hidden></div>
     <pre id="feed-body"></pre>
     <div id="attach-overlay" hidden>

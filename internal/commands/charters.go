@@ -205,18 +205,18 @@ func DrainMany(cat *catalog.Catalog) *cli.Command {
 	}
 }
 
-// Autonomous renders the lead scheduler charter and prints it. Shipmates stays
+// Autonomous renders the captain scheduler charter and prints it. Shipmates stays
 // harness-neutral and can't wire the schedule itself: Claude Code's durable cron
 // only persists when created from an interactive session (a headless `claude -p`
 // cron is session-only and evaporates), so the actual scheduling is done by
-// running the /autonomous slash command in an interactive lead session.
+// running the /autonomous slash command in an interactive captain session.
 func Autonomous(cat *catalog.Catalog) *cli.Command {
 	return &cli.Command{
 		Name:  "autonomous",
-		Usage: "print the lead scheduler charter (wire it via the /autonomous slash command)",
+		Usage: "print the captain scheduler charter (wire it via the /autonomous slash command)",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "print-charter", Usage: "print the charter to stdout"},
-			&cli.StringFlag{Name: "persona", Value: "lead", Usage: "the lead/scheduler persona"},
+			&cli.StringFlag{Name: "persona", Value: "captain", Usage: "the captain/scheduler persona"},
 			&cli.StringFlag{Name: "cadence", Value: "5min,10,15,20,30", Usage: "backoff cadence ladder"},
 			&cli.IntFlag{Name: "cap", Value: 3, Usage: "max drain per persona per cycle"},
 		},
@@ -231,21 +231,21 @@ func Autonomous(cat *catalog.Catalog) *cli.Command {
 	}
 }
 
-// autonomousCharter renders the scheduler charter for the given lead, with the
-// crew read from the installed fleet personas (excluding the lead).
-func autonomousCharter(cat *catalog.Catalog, lead, cadence string, cap int) (string, error) {
+// autonomousCharter renders the scheduler charter for the given captain, with the
+// crew read from the installed fleet personas (excluding the captain).
+func autonomousCharter(cat *catalog.Catalog, captain, cadence string, cap int) (string, error) {
 	all, err := installedPersonas()
 	if err != nil {
 		return "", err
 	}
 	var crew []string
 	for _, p := range all {
-		if p != lead {
+		if p != captain {
 			crew = append(crew, p)
 		}
 	}
 	return renderCharter(cat, "autonomous", map[string]any{
-		"Lead":        lead,
+		"Captain":     captain,
 		"CrewList":    strings.Join(crew, ", "),
 		"Cap":         cap,
 		"Cadence":     cadence,

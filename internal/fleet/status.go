@@ -1,14 +1,14 @@
-package bridge
+package fleet
 
 import (
 	"encoding/json"
 	"net/http"
 )
 
-// handleAggregateStatus fans a /status.json poll out to every connected lead
-// and returns the union, each mate tagged with its lead's client key and repo.
-// This is the one-poll feed for the UI's fleet-wide status dots; the per-lead
-// form lives at /api/lead/{key}/status.
+// handleAggregateStatus fans a /status.json poll out to every connected captain
+// and returns the union, each mate tagged with its captain's client key and repo.
+// This is the one-poll feed for the UI's fleet-wide status dots; the per-captain
+// form lives at /api/captain/{key}/status.
 func (b *Server) handleAggregateStatus(w http.ResponseWriter, r *http.Request) {
 	type entry struct {
 		ClientKey string `json:"client_key"`
@@ -43,7 +43,7 @@ func (b *Server) handleAggregateStatus(w http.ResponseWriter, r *http.Request) {
 			}
 			b.mu.Lock()
 			repo := ""
-			if l := b.leads[key]; l != nil {
+			if l := b.captains[key]; l != nil {
 				repo = l.Repo
 			}
 			b.mu.Unlock()
