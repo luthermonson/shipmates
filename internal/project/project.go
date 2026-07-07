@@ -19,14 +19,15 @@ import (
 )
 
 const (
-	Dir             = ".shipmates"
-	MemoryDirName   = "memory"
-	SessionsDirName = "sessions"
-	ManifestName    = "manifest.json"
-	ConfigName      = "shipmates.yaml"
-	InstallIDName   = "install-id"
-	AgentsDir       = ".claude/agents"
-	CommandsDir     = ".claude/commands"
+	Dir              = ".shipmates"
+	MemoryDirName    = "memory"
+	SessionsDirName  = "sessions"
+	PoliciesDirName  = "policies"
+	ManifestName     = "manifest.json"
+	ConfigName       = "shipmates.yaml"
+	InstallIDName    = "install-id"
+	AgentsDir        = ".claude/agents"
+	CommandsDir      = ".claude/commands"
 )
 
 // MemoryDir is a persona's persistent memory directory.
@@ -42,6 +43,19 @@ func AgentPath(persona string) string {
 // CommandPath is where a slash command is vendored for Claude Code.
 func CommandPath(name string) string {
 	return filepath.Join(CommandsDir, name+".md")
+}
+
+// PoliciesDir is where per-persona policy overlays are vendored on install.
+// Kept under .shipmates/ (not .claude/) because they're shipmates-owned rules
+// consumed by the shipmates permission evaluator, not by Claude Code itself.
+func PoliciesDir() string {
+	return filepath.Join(Dir, PoliciesDirName)
+}
+
+// PolicyPath is the vendored location of a persona's policy.yaml overlay.
+// See PoliciesDir for why it lives under .shipmates/.
+func PolicyPath(persona string) string {
+	return filepath.Join(PoliciesDir(), persona+".yaml")
 }
 
 // ManifestPath is the location of the install manifest.

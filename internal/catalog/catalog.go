@@ -83,6 +83,22 @@ func (c *Catalog) CharterFile(name string) ([]byte, error) {
 	return fs.ReadFile(c.fsys, path.Join("catalog", "charters", name+".md"))
 }
 
+// PolicyFile returns the raw bytes of a persona's policy.yaml, if it ships one.
+// Location: catalog/<persona>/policy.yaml. Returns fs.ErrNotExist when the
+// persona has no per-persona policy — that's the common case; not every
+// persona needs an overlay, and callers should treat missing as "no rules".
+func (c *Catalog) PolicyFile(name string) ([]byte, error) {
+	return fs.ReadFile(c.fsys, path.Join("catalog", name, "policy.yaml"))
+}
+
+// HasPolicyFile reports whether a persona ships a policy.yaml. Convenience for
+// install/update code that wants to decide whether to vendor without paying
+// the read cost twice.
+func (c *Catalog) HasPolicyFile(name string) bool {
+	_, err := fs.Stat(c.fsys, path.Join("catalog", name, "policy.yaml"))
+	return err == nil
+}
+
 // MemorySeeds returns the starter memory files for a persona, keyed by base
 // filename. Returns an empty map if the persona ships no seeds.
 func (c *Catalog) MemorySeeds(name string) (map[string][]byte, error) {
