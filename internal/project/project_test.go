@@ -47,7 +47,7 @@ func TestManifestRoundTrip(t *testing.T) {
 	want := &Manifest{
 		Version: "1",
 		Files: map[string]string{
-			".claude/agents/lead.md": SHA([]byte("body")),
+			".claude/agents/captain.md": SHA([]byte("body")),
 			"shipmates.yaml":          SHA([]byte("cfg")),
 		},
 	}
@@ -93,8 +93,8 @@ func TestSessionName(t *testing.T) {
 		persona    string
 		want       string
 	}{
-		{"with prefix", "sessionPrefix: myrepo\n", "lead", "myrepo-lead"},
-		{"empty prefix", "sessionPrefix: \"\"\n", "lead", "lead"},
+		{"with prefix", "sessionPrefix: myrepo\n", "captain", "myrepo-captain"},
+		{"empty prefix", "sessionPrefix: \"\"\n", "captain", "captain"},
 		{"no config file", "", "tester", "tester"},
 	}
 	for _, tt := range tests {
@@ -138,18 +138,18 @@ func writeAgent(t *testing.T, persona, frontmatter string) {
 
 func TestResolvePersonaConfigFrontmatterOnly(t *testing.T) {
 	t.Chdir(t.TempDir())
-	writeAgent(t, "lead",
+	writeAgent(t, "captain",
 		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\neffort: high\n")
 
-	cfg, err := ResolvePersonaConfig("lead")
+	cfg, err := ResolvePersonaConfig("captain")
 	if err != nil {
 		t.Fatalf("ResolvePersonaConfig: %v", err)
 	}
 	if cfg.Mode != "acceptEdits" {
 		t.Errorf("Mode = %q, want acceptEdits", cfg.Mode)
 	}
-	if cfg.RemoteControl != "lead" {
-		t.Errorf("RemoteControl = %q, want lead", cfg.RemoteControl)
+	if cfg.RemoteControl != "captain" {
+		t.Errorf("RemoteControl = %q, want captain", cfg.RemoteControl)
 	}
 	if !cfg.DangerouslySkipPermissions {
 		t.Error("DangerouslySkipPermissions = false, want true")
@@ -164,11 +164,11 @@ func TestResolvePersonaConfigFrontmatterOnly(t *testing.T) {
 
 func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 	t.Chdir(t.TempDir())
-	writeAgent(t, "lead",
+	writeAgent(t, "captain",
 		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\neffort: high\n")
 
 	cfgYAML := "crew:\n" +
-		"  lead:\n" +
+		"  captain:\n" +
 		"    permissions:\n" +
 		"      mode: plan\n" +
 		"    remoteControl: custom-handle\n" +
@@ -179,7 +179,7 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := ResolvePersonaConfig("lead")
+	got, err := ResolvePersonaConfig("captain")
 	if err != nil {
 		t.Fatalf("ResolvePersonaConfig: %v", err)
 	}
@@ -262,19 +262,19 @@ func TestLaunchFlags(t *testing.T) {
 func TestSessionMetaRoundTrip(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	if _, ok := ReadSessionMeta("lead"); ok {
+	if _, ok := ReadSessionMeta("captain"); ok {
 		t.Fatal("ReadSessionMeta ok=true before any session exists")
 	}
 
-	if err := WriteSessionMeta("lead", "repo-lead", "uuid-1", "abc123"); err != nil {
+	if err := WriteSessionMeta("captain", "repo-captain", "uuid-1", "abc123"); err != nil {
 		t.Fatalf("WriteSessionMeta: %v", err)
 	}
-	meta, ok := ReadSessionMeta("lead")
+	meta, ok := ReadSessionMeta("captain")
 	if !ok {
 		t.Fatal("ReadSessionMeta ok=false after write")
 	}
-	if meta.Name != "repo-lead" || meta.ID != "uuid-1" || meta.ConfigHash != "abc123" {
-		t.Fatalf("meta = %+v, want {repo-lead uuid-1 abc123}", meta)
+	if meta.Name != "repo-captain" || meta.ID != "uuid-1" || meta.ConfigHash != "abc123" {
+		t.Fatalf("meta = %+v, want {repo-captain uuid-1 abc123}", meta)
 	}
 
 	// Legacy plain-name marker: read as name with empty hash (suppresses auto-fresh).
@@ -306,7 +306,7 @@ func TestNewUUID(t *testing.T) {
 }
 
 func TestAgentPath(t *testing.T) {
-	if got := AgentPath("lead"); got != filepath.Join(AgentsDir, "lead.md") {
-		t.Fatalf("AgentPath(lead) = %q", got)
+	if got := AgentPath("captain"); got != filepath.Join(AgentsDir, "captain.md") {
+		t.Fatalf("AgentPath(captain) = %q", got)
 	}
 }

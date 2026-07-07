@@ -6,20 +6,20 @@ Companion to [`architecture.md`](architecture.md). Four views: system topology, 
 
 ## 1. System topology
 
-How the pieces sit at runtime. The **lead session** is the only long-running `claude`; **crew** are transient subprocesses spawned per delegation; the **server** is a transient local HTTP process the lead owns. Memory is plain files on disk, one dir per persona.
+How the pieces sit at runtime. The **captain session** is the only long-running `claude`; **crew** are transient subprocesses spawned per delegation; the **server** is a transient local HTTP process the captain owns. Memory is plain files on disk, one dir per persona.
 
 ```mermaid
 flowchart TB
-    Human(["👤 Human captain<br/>(at desk, or phone via remote-control)"])
+    Human(["👤 Human operator<br/>(at desk, or phone via remote-control)"])
 
-    subgraph LeadSession["Lead session — long-running: claude --agent lead"]
+    subgraph CaptainSession["Captain session — long-running: claude --agent captain"]
         direction TB
-        LeadAI["Lead persona<br/>strategy · files issues · pushes back<br/>does NOT ship code"]
-        LeadMem[("memory/lead/")]
-        LeadAI -. reads/writes .-> LeadMem
+        CaptainAI["Captain persona<br/>strategy · files issues · pushes back<br/>does NOT ship code"]
+        CaptainMem[("memory/captain/")]
+        CaptainAI -. reads/writes .-> CaptainMem
     end
 
-    Server{{"Lead-spawned HTTP server<br/>127.0.0.1:PORT · transient<br/>/events /permission /feed<br/>/register /resolve /shutdown"}}
+    Server{{"Captain-spawned HTTP server<br/>127.0.0.1:PORT · transient<br/>/events /permission /feed<br/>/register /resolve /shutdown"}}
 
     subgraph CrewBox["Crew — transient subprocesses: claude -p (one per delegation)"]
         direction LR
@@ -36,11 +36,11 @@ flowchart TB
 
     Routing[["Routing layer (optional, external)<br/>Code Conductor · Agent Teams · …"]]
 
-    Human <-->|chat| LeadAI
-    LeadAI -->|"1 . spawns on first delegation"| Server
-    LeadAI -->|"2 . shipmates ask / fanout"| CrewBox
+    Human <-->|chat| CaptainAI
+    CaptainAI -->|"1 . spawns on first delegation"| Server
+    CaptainAI -->|"2 . shipmates ask / fanout"| CrewBox
     CrewBox -->|"hooks: PreToolUse, Stop,<br/>SessionStart/End, PermissionRequest"| Server
-    Server -->|"GET /feed (live activity)"| LeadAI
+    Server -->|"GET /feed (live activity)"| CaptainAI
     Server -. "PermissionRequest →<br/>approve from phone/Slack" .-> Human
 
     Sec -. reads/writes .-> SecMem
@@ -49,14 +49,14 @@ flowchart TB
     Front -. reads/writes .-> OtherMem
     Test -. reads/writes .-> OtherMem
 
-    LeadAI -. "files issues" .-> Routing
+    CaptainAI -. "files issues" .-> Routing
     Routing -. "dispatches work" .-> CrewBox
 
     classDef transient stroke-dasharray: 5 5
     class Server,CrewBox transient
 ```
 
-> Dashed-border boxes (server, crew) are **transient** — they exist only while work is happening. Solid = persistent (lead session, memory dirs).
+> Dashed-border boxes (server, crew) are **transient** — they exist only while work is happening. Solid = persistent (captain session, memory dirs).
 
 ---
 
@@ -67,15 +67,15 @@ One `shipmates ask security "review PR 10"` from start to finish. The crew membe
 ```mermaid
 sequenceDiagram
     actor Human
-    participant Lead as Lead session
-    participant Srv as Lead server<br/>(127.0.0.1:PORT)
+    participant Captain as Captain session
+    participant Srv as Captain server<br/>(127.0.0.1:PORT)
     participant Crew as security<br/>(claude -p, transient)
     participant Mem as memory/security/
 
-    Human->>Lead: "tell security to double-check PR 10"
-    Note over Lead: server up? if not, spawn it,<br/>write server.port + server.pid
-    Lead->>Srv: GET /health (wait-for-ready)
-    Lead->>Crew: exec claude -p --agent security<br/>--session-id <uuid> --settings <hooks><br/>"double-check PR 10"
+    Human->>Captain: "tell security to double-check PR 10"
+    Note over Captain: server up? if not, spawn it,<br/>write server.port + server.pid
+    Captain->>Srv: GET /health (wait-for-ready)
+    Captain->>Crew: exec claude -p --agent security<br/>--session-id <uuid> --settings <hooks><br/>"double-check PR 10"
 
     Crew->>Srv: SessionStart hook → POST /register (ref++)
     Crew->>Mem: load persona + accumulated memory
@@ -90,9 +90,9 @@ sequenceDiagram
     end
     Crew->>Mem: write new learnings
     Crew->>Srv: SessionEnd hook → POST /deregister (ref--)
-    Crew-->>Lead: final response (stdout)
+    Crew-->>Captain: final response (stdout)
     Note over Srv: ref==0 → POST /shutdown<br/>(or stays warm for next delegation)
-    Lead-->>Human: summary + what security found
+    Captain-->>Human: summary + what security found
 ```
 
 ---

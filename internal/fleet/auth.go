@@ -1,4 +1,4 @@
-package bridge
+package fleet
 
 import (
 	"crypto/subtle"
@@ -6,11 +6,13 @@ import (
 	"strings"
 )
 
-// cookieName is the bridge's session cookie. We store the raw shared secret in
-// it (not a derived session id) because the bridge already trusts whoever holds
+// cookieName is the fleet's session cookie. We store the raw shared secret in
+// it (not a derived session id) because the fleet already trusts whoever holds
 // the secret — the cookie is just a way for a browser to present it on every
 // request, including EventSource (which can't set Authorization headers).
-const cookieName = "shipmates_bridge"
+// Renamed from "shipmates_bridge" during the fleet rename — existing browser
+// sessions are invalidated on upgrade and users must log in once.
+const cookieName = "shipmates_fleet"
 
 // publicPaths are reachable without auth. /connect runs its own bearer check
 // inside remotedialer's Authorizer. /login serves the login page (GET) and
@@ -42,8 +44,8 @@ var publicPrefixes = []string{"/vendor/", "/connect"}
 // authGate wraps the given mux so /api/* and the UI require either a valid
 // Bearer header OR a session cookie carrying the shared secret. Unauthenticated
 // browsers are redirected to /login; unauthenticated API callers get 401 JSON.
-// When the bridge was started with no token, auth is disabled and all requests
-// pass through (dev only — bridge logs auth=false at startup).
+// When the fleet was started with no token, auth is disabled and all requests
+// pass through (dev only — fleet logs auth=false at startup).
 func (b *Server) authGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if b.token == "" {

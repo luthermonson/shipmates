@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>shipmates bridge — login</title>
+<title>shipmates fleet — login</title>
 <link rel="stylesheet" href="/style.css">
 <style>
   body { display: flex; align-items: center; justify-content: center; }
@@ -49,11 +49,11 @@
 </head>
 <body>
 <div class="card">
-  <h1>shipmates bridge</h1>
-  <p>Enter the bridge token to continue. The same secret your leads use.</p>
+  <h1>shipmates fleet</h1>
+  <p>Enter the fleet token to continue. The same secret your captains use.</p>
   <!--ERR-->
   <form method="POST" action="/login">
-    <input type="password" name="token" placeholder="bridge token" autofocus required>
+    <input type="password" name="token" placeholder="fleet token" autofocus required>
     <button type="submit">sign in</button>
   </form>
 </div>

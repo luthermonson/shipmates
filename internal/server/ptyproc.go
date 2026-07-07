@@ -142,7 +142,7 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 		args := []string{
 			// observe-only hooks: interactive claude prompts for permissions
 			// natively in the terminal — the operator approves right where they
-			// are typing instead of hunting for the bridge's pending pane behind
+			// are typing instead of hunting for the fleet's pending pane behind
 			// the full-screen term
 			"--settings", s.hookSettings(persona, false),
 		}
@@ -327,7 +327,7 @@ func (s *Server) handlePTYStart(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePTYSnapshot returns the current backscroll as raw bytes. Debug/attach
-// bootstrap; the live stream endpoint lands with the bridge proxy work.
+// bootstrap; the live stream endpoint lands with the fleet proxy work.
 func (s *Server) handlePTYSnapshot(w http.ResponseWriter, r *http.Request) {
 	persona := r.PathValue("persona")
 	s.mu.Lock()
@@ -477,7 +477,7 @@ func (s *Server) handlePTYResize(w http.ResponseWriter, r *http.Request) {
 
 // handlePTYStream streams the mate's screen over SSE: one base64 data event
 // per chunk, prefixed by a snapshot event carrying the backscroll. SSE rides
-// plain HTTP, so the existing bridge tunnel proxies it without a websocket
+// plain HTTP, so the existing fleet tunnel proxies it without a websocket
 // dependency; the browser feeds decoded bytes straight into xterm.js.
 func (s *Server) handlePTYStream(w http.ResponseWriter, r *http.Request) {
 	persona := r.PathValue("persona")

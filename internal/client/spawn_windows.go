@@ -8,7 +8,7 @@ import (
 )
 
 // detach starts the server in its own process group, decoupled from the
-// caller's console so a Ctrl-C in the lead's terminal doesn't kill it directly.
+// caller's console so a Ctrl-C in the captain's terminal doesn't kill it directly.
 func detach(cmd *exec.Cmd) {
 	const (
 		detachedProcess     = 0x00000008

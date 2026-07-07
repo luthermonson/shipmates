@@ -20,13 +20,13 @@ import (
 
 // Beads integration (fleet phase 4, single ship). Mates are beads-native: bd
 // ships its own Claude Code integration and the mates create/close their own
-// work beads. The lead server only provides plumbing:
+// work beads. The captain server only provides plumbing:
 //
 //   - detect a beads workspace (.beads/ in the project root)
 //   - inject `bd prime` output into mate spawns — live/PTY mates run
 //     `claude -p`/`claude` under our control and bd's SessionStart auto-prime
 //     doesn't fire there, so we pass it via --append-system-prompt
-//   - serve GET /beads.json (bd list --json) so the bridge can render the
+//   - serve GET /beads.json (bd list --json) so the fleet can render the
 //     ship's work graph read-only
 //
 // No shadow-writing of feed events: a "you alive?" tell is not a task. The
@@ -158,7 +158,7 @@ func beadsStateSig() string {
 
 // markBeadsDirty records a local graph write and wakes the sync loop: the
 // change should be pushed AND announced to the fleet. Called by the watcher
-// and by the bridge-mediated write endpoints (create/close).
+// and by the fleet-mediated write endpoints (create/close).
 func (s *Server) markBeadsDirty() {
 	s.beadsMu.Lock()
 	s.beadsDirty = true
@@ -169,7 +169,7 @@ func (s *Server) markBeadsDirty() {
 	}
 }
 
-// requestBeadsPull wakes the sync loop without marking dirty — the bridge
+// requestBeadsPull wakes the sync loop without marking dirty — the fleet
 // says another ship pushed; pull now, nothing local to announce.
 func (s *Server) requestBeadsPull() {
 	select {
@@ -178,7 +178,7 @@ func (s *Server) requestBeadsPull() {
 	}
 }
 
-// handleBeadsPull is the bridge's nudge target. ?wait=1 pulls synchronously
+// handleBeadsPull is the fleet's nudge target. ?wait=1 pulls synchronously
 // before answering — the dispatch path needs "the bead is HERE now" before
 // telling a mate to bd show it, not "a pull is queued".
 func (s *Server) handleBeadsPull(w http.ResponseWriter, r *http.Request) {
@@ -204,7 +204,7 @@ func (s *Server) handleBeadsPull(w http.ResponseWriter, r *http.Request) {
 
 // handleBeadUpdate applies field updates to one bead: assignee (persona@ship
 // — the fleet dispatch convention), priority, and human edits to title/
-// description from the bridge UI. Values ride flag=value form, same
+// description from the fleet UI. Values ride flag=value form, same
 // injection rules as create.
 func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 	if !beadsEnabled() {
@@ -252,7 +252,7 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bd update: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.addEvent(Event{Persona: "(bridge)", Type: "bead:update", Text: id + " → " + strings.TrimSpace(body.Assignee+" "+body.Priority)})
+	s.addEvent(Event{Persona: "(fleet)", Type: "bead:update", Text: id + " → " + strings.TrimSpace(body.Assignee+" "+body.Priority)})
 	invalidateBeadsSummary()
 	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	_, _ = w.Write([]byte(out))
@@ -290,8 +290,8 @@ func (s *Server) beadsWatchLoop(ctx context.Context) {
 }
 
 // beadsSyncLoop pulls then pushes the bead graph — on the heartbeat, and
-// immediately when woken (local write detected, or the bridge nudged us to
-// pull another ship's push). After a dirty sync it notifies the bridge so
+// immediately when woken (local write detected, or the fleet nudged us to
+// pull another ship's push). After a dirty sync it notifies the fleet so
 // the rest of the fleet pulls within seconds instead of a heartbeat.
 // Failures log and never disturb serving.
 func (s *Server) beadsSyncLoop(ctx context.Context) {
@@ -340,12 +340,12 @@ func (s *Server) beadsSyncLoop(ctx context.Context) {
 	}
 }
 
-// notifyBeadsNudge tells the bridge "we pushed — have the other ships pull."
+// notifyBeadsNudge tells the fleet "we pushed — have the other ships pull."
 // Plain outbound HTTPS with the same bearer token the tunnel uses; a failure
 // just means the fleet falls back to heartbeat freshness.
 func (s *Server) notifyBeadsNudge() {
 	s.mu.Lock()
-	url, token, key := s.bridgeURL, s.bridgeToken, s.bridgeKey
+	url, token, key := s.fleetURL, s.fleetToken, s.fleetKey
 	s.mu.Unlock()
 	if url == "" {
 		return
@@ -386,7 +386,7 @@ func invalidateBeadsSummary() {
 	beadsSummaryMu.Unlock()
 }
 
-// handleBeadsSummary serves a tiny {open: N} for the bridge's badge.
+// handleBeadsSummary serves a tiny {open: N} for the fleet's badge.
 func (s *Server) handleBeadsSummary(w http.ResponseWriter, r *http.Request) {
 	if !beadsEnabled() {
 		http.Error(w, "no beads workspace", http.StatusNotFound)
@@ -450,7 +450,7 @@ func (s *Server) handleBeadShow(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(out))
 }
 
-// handleBeadCreate creates a bead from the bridge: `bd create --json` with
+// handleBeadCreate creates a bead from the fleet: `bd create --json` with
 // the fields the UI's quick form offers. Values ride flag=value form so a
 // leading dash in user text can never be parsed as a flag.
 func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
@@ -497,7 +497,7 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bd create: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.addEvent(Event{Persona: "(bridge)", Type: "bead:create", Text: strings.TrimSpace(body.Title)})
+	s.addEvent(Event{Persona: "(fleet)", Type: "bead:create", Text: strings.TrimSpace(body.Title)})
 	invalidateBeadsSummary()
 	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	w.Header().Set("Content-Type", "application/json")
@@ -528,14 +528,14 @@ func (s *Server) handleBeadClose(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bd close: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.addEvent(Event{Persona: "(bridge)", Type: "bead:close", Text: id})
+	s.addEvent(Event{Persona: "(fleet)", Type: "bead:close", Text: id})
 	invalidateBeadsSummary()
 	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	_, _ = w.Write([]byte(out))
 }
 
 // handleBeadsJSON serves the ship's bead graph: `bd list --json`, passed
-// through verbatim. 404 when the project has no beads workspace so the bridge
+// through verbatim. 404 when the project has no beads workspace so the fleet
 // can distinguish "no beads here" from "empty graph".
 func (s *Server) handleBeadsJSON(w http.ResponseWriter, r *http.Request) {
 	if !beadsEnabled() {

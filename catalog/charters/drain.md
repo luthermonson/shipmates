@@ -14,7 +14,7 @@ loop again.
 Exit conditions (any one):
   - Nothing actionable found — log "DRAINED".
   - Hit the {{.Cap}}-issue cap — log "CAPPED".
-  - Hit a hard blocker needing the lead/human — file a comment on the blocked
+  - Hit a hard blocker needing the captain/human — file a comment on the blocked
     issue, log "BLOCKED ON #N: <reason>", and exit.
 
 Make the FINAL line of your reply one of:
