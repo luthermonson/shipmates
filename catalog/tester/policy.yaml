@@ -1,0 +1,20 @@
+# Tester policy overlay: the tester runs test suites all day, so the common
+# test-runner incantations are pre-approved. Anything that could publish or
+# mutate remote state stays gated.
+allow:
+  - Bash(pnpm test *)
+  - Bash(pnpm run test *)
+  - Bash(npm test *)
+  - Bash(go test *)
+  - Bash(go vet *)
+  - Bash(cargo test *)
+  - Bash(pytest *)
+  - Bash(python -m pytest *)
+ask:
+  - Bash(pnpm publish *)
+  - Bash(npm publish *)
+  - Bash(cargo publish *)
+deny:
+  - Bash(rm -rf /)
+  - Bash(sudo *)
+  - Bash(curl * | sh)

@@ -357,5 +357,27 @@ func addPersona(cat *catalog.Catalog, name string) error {
 		slog.Info("seeded memory", "file", mp)
 	}
 
+	// Vendor the persona's policy overlay (permissions.allow/ask/deny) into
+	// .shipmates/policies/<persona>.yaml. Same "don't clobber user edits"
+	// discipline as installCommands: if the file already exists and its
+	// content diverges from what shipmates last installed, leave it alone.
+	if pol, err := cat.PolicyFile(name); err == nil {
+		polPath := project.PolicyPath(name)
+		if err := os.MkdirAll(filepath.Dir(polPath), 0o755); err != nil {
+			return err
+		}
+		if existing, err := os.ReadFile(polPath); err == nil && project.SHA(existing) != m.Files[polPath] {
+			slog.Debug("policy exists and was user-edited, leaving untouched", "file", polPath)
+		} else {
+			if err := os.WriteFile(polPath, pol, 0o644); err != nil {
+				return err
+			}
+			m.Files[polPath] = project.SHA(pol)
+			slog.Info("installed persona policy", "persona", name, "path", polPath)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read policy for %s: %w", name, err)
+	}
+
 	return m.Save()
 }
