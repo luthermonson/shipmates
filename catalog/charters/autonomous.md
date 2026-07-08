@@ -1,5 +1,5 @@
-[{{.Lead}} scheduler cycle | cadence-ladder={{.Cadence}}]
-You are {{.Lead}}. This cycle is read-only-then-dispatch + diagnose-on-block.
+[{{.Captain}} scheduler cycle | cadence-ladder={{.Cadence}}]
+You are {{.Captain}}. This cycle is read-only-then-dispatch + diagnose-on-block.
 Never do implementation work yourself.
 
 STATE FIRST:
@@ -52,7 +52,7 @@ DIAGNOSE (you are first responder, not pass-through escalator):
 
         # Pin: <persona> blocked on <short description>
 
-        **Reported:** <ISO timestamp> by {{.Lead}} after drain cycle
+        **Reported:** <ISO timestamp> by {{.Captain}} after drain cycle
 
         ## Blocker (from worker)
 
@@ -91,7 +91,7 @@ ADAPT (exponential backoff on the cadence ladder {{.Cadence}}):
      cadence. If nothing happened (everyone idle or blocked, no merges) → step
      one rung slower, up to the slowest.
   9. Reschedule yourself at the new cadence: CronDelete then CronCreate the
-     job named "shipmates-autonomous-{{.Lead}}" (reuse that exact name so you
+     job named "shipmates-autonomous-{{.Captain}}" (reuse that exact name so you
      stay in lockstep with `shipmates autonomous --schedule` / `--stop`),
      recurring + durable, prompt = this same charter.
 

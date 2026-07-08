@@ -1,4 +1,4 @@
-package bridge
+package fleet
 
 import (
 	"bytes"
@@ -15,20 +15,20 @@ import (
 	"time"
 )
 
-// The /api/conversation endpoint is the bridge's "captain's mate" — a local-LLM
-// proxy that wraps Ollama with a tool catalog mapped 1:1 to the bridge's own
+// The /api/conversation endpoint is the fleet's "captain's mate" — a local-LLM
+// proxy that wraps Ollama with a tool catalog mapped 1:1 to the fleet's own
 // HTTP surface. The operator's voice (or text) turn comes in here; the model
-// can call fleet operations (list_leads, tell_lead, wait_for_result, etc.) to
-// orchestrate the crew, and the final natural-language reply is what gets
-// spoken back to the operator.
+// can call fleet operations (list_captains, tell_captain, wait_for_result,
+// etc.) to orchestrate the crew, and the final natural-language reply is what
+// gets spoken back to the operator.
 //
-// Why this lives on the bridge, not on the lead: the bridge already has the
-// authenticated edge surface and the connection registry; the lead is project-
-// scoped. Cross-fleet questions ("which crew is idle?", "tell the busiest one
-// to stop") need bridge-wide context, which only the bridge has.
+// Why this lives on the fleet, not on the captain: the fleet already has the
+// authenticated edge surface and the connection registry; the captain is
+// project-scoped. Cross-fleet questions ("which crew is idle?", "tell the
+// busiest one to stop") need fleet-wide context, which only the fleet has.
 
 // conversationMaxIterations caps the chat→tool→chat loop so a misbehaving
-// model can't pin the bridge. Five iterations covers "list leads, find one,
+// model can't pin the fleet. Five iterations covers "list captains, find one,
 // tell it, wait for result, summarize" — anything richer should be split
 // into multiple operator turns.
 const conversationMaxIterations = 5
@@ -73,7 +73,7 @@ type conversationRequest struct {
 }
 
 // conversationResponse is what the UI gets back. ToolsCalled is exposed so the
-// UI can show a quick "I checked the leads, picked picard, dispatched standup"
+// UI can show a quick "I checked the captains, picked picard, dispatched standup"
 // timeline instead of an opaque reply.
 type conversationResponse struct {
 	Reply       string     `json:"reply"`
@@ -84,11 +84,11 @@ type conversationResponse struct {
 }
 
 // handleConversation runs the operator's turn through Ollama, executing any
-// tools the model calls against the bridge's own endpoints, until the model
+// tools the model calls against the fleet's own endpoints, until the model
 // produces a final natural-language reply (or the iteration cap trips).
 func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 	if b.conv == nil || (b.conv.url == "" && b.conv.brain == nil) {
-		http.Error(w, "conversation disabled — start bridge with --llm-url or --llm-backend claude-cli", http.StatusServiceUnavailable)
+		http.Error(w, "conversation disabled — start fleet with --llm-url or --llm-backend claude-cli", http.StatusServiceUnavailable)
 		return
 	}
 	var req conversationRequest
@@ -101,7 +101,7 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 	tools := b.toolCatalog()
 
 	// A slow multi-tool turn on a CPU model can exceed Cloudflare's hard
-	// 100-second proxy timeout (error 524) even though the bridge itself is
+	// 100-second proxy timeout (error 524) even though the fleet itself is
 	// happy to wait. Stream a whitespace heartbeat while the loop thinks —
 	// bytes on the wire reset the edge timer, and JSON.parse ignores leading
 	// whitespace, so the client's response handling doesn't change at all.
@@ -186,14 +186,14 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 
 // knownTools is the dispatchable set, for validating rescued text tool calls.
 var knownTools = map[string]bool{
-	"list_leads": true, "tell_lead": true, "tell_all_leads": true,
+	"list_captains": true, "tell_captain": true, "tell_all_captains": true,
 	"recent_events": true, "wait_for_result": true, "pending_approvals": true,
 	"resolve": true, "fleet_status": true, "list_beads": true, "dispatch_bead": true,
 }
 
 // textToolCallLine matches `tool_name {…json…}` on its own line — the shape
 // models degrade to when they stop emitting structured tool_calls. Tolerates
-// a leading "call"/colon and trailing punctuation ("Tell_lead {…}.").
+// a leading "call"/colon and trailing punctuation ("Tell_captain {…}.").
 var textToolCallLine = regexp.MustCompile(`(?m)^\s*(?:call\s+)?([A-Za-z_]+):?\s*(\{.*\})[.,;!\s]*$`)
 
 // rescueTextToolCalls converts tool-calls-as-prose back into executable
@@ -225,19 +225,32 @@ func prependSystemPrompt(in []chatMessage) []chatMessage {
 	system := chatMessage{
 		Role: "system",
 		Content: strings.TrimSpace(`
-You are the operator's voice assistant for a fleet of AI coding agents (shipmates).
-Reply tersely — your output will be spoken aloud. One or two sentences max.
-Use the provided tools when the operator asks about fleet status, wants to
-dispatch work, or needs to approve/deny pending permission requests. If a tool
-returns no matches, say so plainly rather than guessing.
-Lead identifiers look like "<repo>:<persona>" (e.g. "card-cannon:lead").
-If the operator names a lead by repo only, list leads to find the exact key.
+You are the Commodore — the AI officer serving the Admiral (the human
+operator) on the deck of Fleet Command, coordinating a fleet of AI coding
+agents (shipmates). Each ship has a Captain (its lead persona) leading a crew
+of mates. The Admiral gives the orders; you execute on their behalf and report
+back like a naval XO briefing the CO: crisp, confident, deferential without
+being subservient. Acknowledge the order, then state the result — "Aye,
+Admiral. Both captains are on watch." Vary the acknowledgment; not every reply
+needs "Aye, Admiral". Address the operator as "Admiral", never "you" or
+"operator". Refer to the fleet as "the fleet" or "the Admiral's fleet"; refer
+to captains by their persona name or ship name. If the Admiral asks something
+outside fleet coordination, help anyway, but stay in Commodore voice.
+Reply tersely — your output will be spoken aloud. One or two sentences max,
+plain prose, no markdown.
+Use the provided tools when the Admiral wants fleet status, wants to signal
+a captain or the whole fleet, or needs to approve/deny pending requests. To
+reach one captain, use tell_captain. To signal every ship's captain at once,
+use tell_all_captains. For status of who's on watch, use list_captains and
+fleet_status. If a tool returns no matches, say so plainly rather than guessing.
+Captain identifiers look like "<repo>:<persona>" (e.g. "card-cannon:captain").
+If the Admiral names a captain by repo only, list_captains to find the exact key.
 Bead ids are opaque short hashes. NEVER type one from memory — ALWAYS call
-list_beads first and use the exact id whose title matches what the operator said.
-fleet_status reports MATES (crew members): "off" means asleep (normal — a tell
-wakes them), not disconnected. Ship connectivity comes from list_leads.
-Messages ONLY reach mates through the tell tools — writing "tell X ..." as
-prose does nothing. To address every ship's lead at once, call tell_all_leads.
+list_beads first and use the exact id whose title matches what the Admiral said.
+fleet_status reports MATES (crew members): "off" means at anchor (asleep —
+normal; a tell wakes them), not disconnected. Ship connectivity comes from
+list_captains. Messages ONLY reach mates through the tell tools — writing
+"tell X ..." as prose does nothing.
 /no_think
 `),
 	}
@@ -309,7 +322,7 @@ func (b *Server) llmChat(ctx context.Context, messages []chatMessage, tools []an
 }
 
 // toolCatalog is the set of tools the local model can invoke. Mirrors the
-// bridge's own HTTP surface so a model competent at OpenAI-style function
+// fleet's own HTTP surface so a model competent at OpenAI-style function
 // calling (Qwen 2.5+, Llama 3.1+, Mistral Nemo+) can drive the fleet end-to-end.
 func (b *Server) toolCatalog() []any {
 	def := func(name, desc string, params map[string]any) any {
@@ -329,31 +342,31 @@ func (b *Server) toolCatalog() []any {
 	intProp := func(desc string) map[string]any { return map[string]any{"type": "integer", "description": desc} }
 
 	return []any{
-		def("list_leads", "List all shipmates leads (online and recently-seen). Returns an array of {client_key, repo, persona, connected}.", objWith(nil)),
-		def("tell_lead", "Send a message to a persona on a specific lead. Use this to dispatch work or kick off a slash command like /standup.",
+		def("list_captains", "List all shipmates captains (online and recently-seen). Returns an array of {client_key, repo, persona, connected}.", objWith(nil)),
+		def("tell_captain", "Send a message to a persona on a specific captain. Use this to dispatch work or kick off a slash command like /standup.",
 			objWith(map[string]any{
-				"lead_key": strProp("the lead's client_key, e.g. 'card-cannon:lead'"),
-				"persona":  strProp("which crew persona to address, e.g. 'lead', 'picard', 'data'"),
-				"message":  strProp("the message text — may be a slash command like '/standup'"),
-			}, "lead_key", "persona", "message")),
-		def("recent_events", "Get the most recent activity-feed events for a lead. Use this to read back results after a tell.",
+				"captain_key": strProp("the captain's client_key, e.g. 'card-cannon:captain'"),
+				"persona":     strProp("which crew persona to address, e.g. 'captain', 'picard', 'data'"),
+				"message":     strProp("the message text — may be a slash command like '/standup'"),
+			}, "captain_key", "persona", "message")),
+		def("recent_events", "Get the most recent activity-feed events for a captain. Use this to read back results after a tell.",
 			objWith(map[string]any{
-				"lead_key": strProp("the lead's client_key"),
-				"limit":    intProp("max events to return (default 20)"),
-			}, "lead_key")),
-		def("wait_for_result", "Block until the named lead emits its next 'result' event (a turn-complete marker) or the timeout fires. Returns the final assistant text.",
+				"captain_key": strProp("the captain's client_key"),
+				"limit":       intProp("max events to return (default 20)"),
+			}, "captain_key")),
+		def("wait_for_result", "Block until the named captain emits its next 'result' event (a turn-complete marker) or the timeout fires. Returns the final assistant text.",
 			objWith(map[string]any{
-				"lead_key":    strProp("the lead's client_key"),
+				"captain_key": strProp("the captain's client_key"),
 				"timeout_sec": intProp("max seconds to wait (default 90)"),
-			}, "lead_key")),
-		def("pending_approvals", "List permission requests awaiting a decision across all leads.", objWith(nil)),
+			}, "captain_key")),
+		def("pending_approvals", "List permission requests awaiting a decision across all captains.", objWith(nil)),
 		def("resolve", "Allow or deny a pending permission request by its id.",
 			objWith(map[string]any{
-				"lead_key": strProp("the lead's client_key"),
-				"id":       strProp("the pending request id"),
-				"behavior": strProp("'allow' or 'deny'"),
-			}, "lead_key", "id", "behavior")),
-		def("tell_all_leads", "Send one message to the LEAD persona of every connected ship at once — the easy way to wake the whole fleet or ask everyone something (e.g. '/standup' or 'how is the project going?').",
+				"captain_key": strProp("the captain's client_key"),
+				"id":          strProp("the pending request id"),
+				"behavior":    strProp("'allow' or 'deny'"),
+			}, "captain_key", "id", "behavior")),
+		def("tell_all_captains", "Send one message to the CAPTAIN persona of every connected ship at once — the easy way to wake the whole fleet or ask everyone something (e.g. '/standup' or 'how is the project going?').",
 			objWith(map[string]any{
 				"message": strProp("the message text — may be a slash command like '/standup'"),
 			}, "message")),
@@ -361,10 +374,10 @@ func (b *Server) toolCatalog() []any {
 		def("list_beads", "List open beads (the fleet's shared work graph): id, title, status, priority, assignee, and which ships carry each.", objWith(nil)),
 		def("dispatch_bead", "Assign a bead to persona@ship and wake that mate to work it: syncs the graph to the target ship, sets the assignee, and tells the mate to claim it.",
 			objWith(map[string]any{
-				"bead_id":  strProp("the exact bead id as returned by list_beads — do not guess"),
-				"lead_key": strProp("target ship's client_key, e.g. 'homelab:lead'"),
-				"persona":  strProp("target crew persona, e.g. 'backend'"),
-			}, "bead_id", "lead_key", "persona")),
+				"bead_id":     strProp("the exact bead id as returned by list_beads — do not guess"),
+				"captain_key": strProp("target ship's client_key, e.g. 'homelab:captain'"),
+				"persona":     strProp("target crew persona, e.g. 'backend'"),
+			}, "bead_id", "captain_key", "persona")),
 	}
 }
 
@@ -374,10 +387,10 @@ func (b *Server) toolCatalog() []any {
 func (b *Server) dispatchTool(ctx context.Context, tc toolCall) string {
 	args := tc.Args()
 	switch tc.Function.Name {
-	case "list_leads":
-		return b.toolListLeads()
-	case "tell_lead":
-		return b.toolTellLead(ctx, args)
+	case "list_captains":
+		return b.toolListCaptains()
+	case "tell_captain":
+		return b.toolTellCaptain(ctx, args)
 	case "recent_events":
 		return b.toolRecentEvents(ctx, args)
 	case "wait_for_result":
@@ -386,8 +399,8 @@ func (b *Server) dispatchTool(ctx context.Context, tc toolCall) string {
 		return b.toolPendingApprovals(ctx)
 	case "resolve":
 		return b.toolResolve(ctx, args)
-	case "tell_all_leads":
-		return b.toolTellAllLeads(ctx, args)
+	case "tell_all_captains":
+		return b.toolTellAllCaptains(ctx, args)
 	case "fleet_status":
 		return b.toolFleetStatus(ctx)
 	case "list_beads":
@@ -404,7 +417,7 @@ func toolError(msg string) string {
 	return string(b)
 }
 
-func (b *Server) toolListLeads() string {
+func (b *Server) toolListCaptains() string {
 	connected := map[string]bool{}
 	for _, k := range b.dialer.ListClients() {
 		connected[k] = true
@@ -416,8 +429,8 @@ func (b *Server) toolListLeads() string {
 		Connected bool   `json:"connected"`
 	}
 	b.mu.Lock()
-	out := make([]wire, 0, len(b.leads))
-	for k, l := range b.leads {
+	out := make([]wire, 0, len(b.captains))
+	for k, l := range b.captains {
 		out = append(out, wire{ClientKey: k, Repo: l.Repo, Persona: l.Persona, Connected: connected[k]})
 	}
 	b.mu.Unlock()
@@ -425,12 +438,12 @@ func (b *Server) toolListLeads() string {
 	return string(raw)
 }
 
-func (b *Server) toolTellLead(ctx context.Context, args map[string]any) string {
-	key, _ := args["lead_key"].(string)
+func (b *Server) toolTellCaptain(ctx context.Context, args map[string]any) string {
+	key, _ := args["captain_key"].(string)
 	persona, _ := args["persona"].(string)
 	msg, _ := args["message"].(string)
 	if key == "" || persona == "" || msg == "" {
-		return toolError("tell_lead requires lead_key, persona, message")
+		return toolError("tell_captain requires captain_key, persona, message")
 	}
 	payload, _ := json.Marshal(map[string]string{"message": msg})
 	_, status, err := b.proxy(ctx, key, "POST", "/tell/"+persona, payload)
@@ -438,15 +451,15 @@ func (b *Server) toolTellLead(ctx context.Context, args map[string]any) string {
 		return toolError("dispatch failed: " + err.Error())
 	}
 	if status >= 300 {
-		return toolError(fmt.Sprintf("lead returned status %d", status))
+		return toolError(fmt.Sprintf("captain returned status %d", status))
 	}
 	return `{"ok": true}`
 }
 
 func (b *Server) toolRecentEvents(ctx context.Context, args map[string]any) string {
-	key, _ := args["lead_key"].(string)
+	key, _ := args["captain_key"].(string)
 	if key == "" {
-		return toolError("recent_events requires lead_key")
+		return toolError("recent_events requires captain_key")
 	}
 	limit := 20
 	if v, ok := args["limit"].(float64); ok && v > 0 {
@@ -468,16 +481,16 @@ func (b *Server) toolRecentEvents(ctx context.Context, args map[string]any) stri
 }
 
 func (b *Server) toolWaitForResult(ctx context.Context, args map[string]any) string {
-	key, _ := args["lead_key"].(string)
+	key, _ := args["captain_key"].(string)
 	if key == "" {
-		return toolError("wait_for_result requires lead_key")
+		return toolError("wait_for_result requires captain_key")
 	}
 	timeout := 90 * time.Second
 	if v, ok := args["timeout_sec"].(float64); ok && v > 0 {
 		timeout = time.Duration(v) * time.Second
 	}
 	// Snapshot the highest event time we've already seen so we only count NEW
-	// result events (the lead may have older results from prior turns).
+	// result events (the captain may have older results from prior turns).
 	high := snapshotMaxEventTime(ctx, b, key)
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -562,11 +575,11 @@ func (b *Server) toolPendingApprovals(ctx context.Context) string {
 			continue
 		}
 		b.mu.Lock()
-		lead := b.leads[key]
+		captain := b.captains[key]
 		b.mu.Unlock()
 		repo := ""
-		if lead != nil {
-			repo = lead.Repo
+		if captain != nil {
+			repo = captain.Repo
 		}
 		for _, p := range raw {
 			all = append(all, entry{ClientKey: key, Repo: repo, ID: p.ID, Persona: p.Persona, Tool: p.Tool, Input: p.Input})
@@ -577,38 +590,38 @@ func (b *Server) toolPendingApprovals(ctx context.Context) string {
 }
 
 func (b *Server) toolResolve(ctx context.Context, args map[string]any) string {
-	key, _ := args["lead_key"].(string)
+	key, _ := args["captain_key"].(string)
 	id, _ := args["id"].(string)
 	behavior, _ := args["behavior"].(string)
 	if key == "" || id == "" || (behavior != "allow" && behavior != "deny") {
-		return toolError("resolve requires lead_key, id, behavior (allow|deny)")
+		return toolError("resolve requires captain_key, id, behavior (allow|deny)")
 	}
 	payload, _ := json.Marshal(map[string]string{"behavior": behavior})
 	_, status, err := b.proxy(ctx, key, "POST", "/resolve/"+id, payload)
 	if err != nil || status >= 300 {
 		return toolError("resolve failed")
 	}
-	slog.Info("conversation resolved pending", "lead", key, "id", id, "behavior", behavior)
+	slog.Info("conversation resolved pending", "captain", key, "id", id, "behavior", behavior)
 	return `{"ok": true}`
 }
 
-// toolTellAllLeads broadcasts one message to every connected ship's lead —
-// the single-call fan-out small models reach for reliably, where "call
-// tell_lead N times" degrades into prose.
-func (b *Server) toolTellAllLeads(ctx context.Context, args map[string]any) string {
+// toolTellAllCaptains broadcasts one message to every connected ship's captain
+// — the single-call fan-out small models reach for reliably, where "call
+// tell_captain N times" degrades into prose.
+func (b *Server) toolTellAllCaptains(ctx context.Context, args map[string]any) string {
 	msg, _ := args["message"].(string)
 	if strings.TrimSpace(msg) == "" {
-		return toolError("tell_all_leads requires message")
+		return toolError("tell_all_captains requires message")
 	}
 	payload, _ := json.Marshal(map[string]string{"message": msg})
 	results := map[string]string{}
 	for _, key := range b.dialer.ListClients() {
 		b.mu.Lock()
-		lead := b.leads[key]
+		captain := b.captains[key]
 		b.mu.Unlock()
-		persona := "lead"
-		if lead != nil && lead.Persona != "" {
-			persona = lead.Persona
+		persona := "captain"
+		if captain != nil && captain.Persona != "" {
+			persona = captain.Persona
 		}
 		if _, status, err := b.proxy(ctx, key, "POST", "/tell/"+url.PathEscape(persona), payload); err != nil || status >= 300 {
 			results[key] = "failed"
@@ -623,7 +636,7 @@ func (b *Server) toolTellAllLeads(ctx context.Context, args map[string]any) stri
 	return string(out)
 }
 
-// toolFleetStatus fans out to every connected lead's /status.json and returns
+// toolFleetStatus fans out to every connected captain's /status.json and returns
 // a flat [{ship, persona, status}] — the same data behind the UI's dots.
 func (b *Server) toolFleetStatus(ctx context.Context) string {
 	type mate struct {
@@ -698,10 +711,10 @@ func (b *Server) toolListBeads(ctx context.Context) string {
 // the UI's dispatch button runs.
 func (b *Server) toolDispatchBead(ctx context.Context, args map[string]any) string {
 	id, _ := args["bead_id"].(string)
-	key, _ := args["lead_key"].(string)
+	key, _ := args["captain_key"].(string)
 	persona, _ := args["persona"].(string)
 	if id == "" || key == "" || persona == "" {
-		return toolError("dispatch_bead requires bead_id, lead_key, persona")
+		return toolError("dispatch_bead requires bead_id, captain_key, persona")
 	}
 	if !beadIDOK(id) {
 		return toolError("bad bead id")

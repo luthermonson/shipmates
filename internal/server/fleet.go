@@ -14,42 +14,42 @@ import (
 	"github.com/rancher/remotedialer"
 )
 
-// bridgeReconnectBackoff is how long to wait between failed dial attempts to
-// the bridge. Kept short so a transient bridge restart heals quickly.
-const bridgeReconnectBackoff = 5 * time.Second
+// fleetReconnectBackoff is how long to wait between failed dial attempts to
+// the fleet. Kept short so a transient fleet restart heals quickly.
+const fleetReconnectBackoff = 5 * time.Second
 
-// startBridge opens (and keeps open) an outbound websocket from the lead to a
-// central `shipmates bridge serve` instance, when one is configured. The bridge
+// startFleet opens (and keeps open) an outbound websocket from the captain to a
+// central `shipmates fleet serve` instance, when one is configured. The fleet
 // can then dial back through the tunnel to reach this server's local API. No-op
-// when no bridge URL is configured. Returns immediately; the connect loop runs
+// when no fleet URL is configured. Returns immediately; the connect loop runs
 // until ctx is cancelled or the parent stopCh closes.
-func (s *Server) startBridge(ctx context.Context, conf *project.Config) {
-	if conf == nil || strings.TrimSpace(conf.Bridge.URL) == "" {
+func (s *Server) startFleet(ctx context.Context, conf *project.Config) {
+	if conf == nil || strings.TrimSpace(conf.Fleet.URL) == "" {
 		return
 	}
 
-	name := strings.TrimSpace(conf.Bridge.Name)
+	name := strings.TrimSpace(conf.Fleet.Name)
 	if name == "" {
 		name = project.RepoName()
 	}
-	clientKey := fmt.Sprintf("%s:%s", name, leadPersona())
+	clientKey := fmt.Sprintf("%s:%s", name, captainPersona())
 	// Install id is no longer part of the clientKey (kept human-readable), but
 	// we still surface it in the X-Shipmates-Install-ID header for audit and
-	// to let the bridge correlate sessions across reconnects when a lead's
+	// to let the fleet correlate sessions across reconnects when a captain's
 	// configured name is ambiguous.
 	installID, _ := project.InstallID()
 
-	wsURL, err := toWebsocketURL(conf.Bridge.URL)
+	wsURL, err := toWebsocketURL(conf.Fleet.URL)
 	if err != nil {
-		slog.Warn("bridge disabled: bad url", "url", conf.Bridge.URL, "err", err)
+		slog.Warn("fleet disabled: bad url", "url", conf.Fleet.URL, "err", err)
 		return
 	}
 
-	// identity for lead→bridge callbacks (the beads nudge)
+	// identity for captain→fleet callbacks (the beads nudge)
 	s.mu.Lock()
-	s.bridgeURL = strings.TrimSpace(conf.Bridge.URL)
-	s.bridgeToken = conf.Bridge.Token()
-	s.bridgeKey = clientKey
+	s.fleetURL = strings.TrimSpace(conf.Fleet.URL)
+	s.fleetToken = conf.Fleet.Token()
+	s.fleetKey = clientKey
 	s.mu.Unlock()
 
 	headers := http.Header{}
@@ -59,18 +59,18 @@ func (s *Server) startBridge(ctx context.Context, conf *project.Config) {
 		headers.Set("X-Shipmates-Repo-URL", u)
 	}
 	headers.Set("X-Shipmates-Install-ID", installID)
-	headers.Set("X-Shipmates-Persona", leadPersona())
+	headers.Set("X-Shipmates-Persona", captainPersona())
 	headers.Set("X-Shipmates-Port", fmt.Sprintf("%d", s.port))
-	if t := conf.Bridge.Token(); t != "" {
+	if t := conf.Fleet.Token(); t != "" {
 		headers.Set("Authorization", "Bearer "+t)
 	}
 
-	go s.bridgeLoop(ctx, wsURL, headers, clientKey)
+	go s.fleetLoop(ctx, wsURL, headers, clientKey)
 }
 
-// bridgeLoop reconnects to the bridge with a small backoff until the context is
+// fleetLoop reconnects to the fleet with a small backoff until the context is
 // cancelled or the server stops.
-func (s *Server) bridgeLoop(ctx context.Context, wsURL string, headers http.Header, clientKey string) {
+func (s *Server) fleetLoop(ctx context.Context, wsURL string, headers http.Header, clientKey string) {
 	dialCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
@@ -81,31 +81,31 @@ func (s *Server) bridgeLoop(ctx context.Context, wsURL string, headers http.Head
 		}
 	}()
 
-	auth := s.bridgeAuthorizer()
+	auth := s.fleetAuthorizer()
 	for {
 		if dialCtx.Err() != nil {
 			return
 		}
-		slog.Info("bridge: connecting", "url", wsURL, "client_key", clientKey)
+		slog.Info("fleet: connecting", "url", wsURL, "client_key", clientKey)
 		err := remotedialer.ClientConnect(dialCtx, wsURL, headers, nil, auth, nil)
 		if dialCtx.Err() != nil {
 			return
 		}
 		if err != nil {
-			slog.Warn("bridge: disconnected", "err", err)
+			slog.Warn("fleet: disconnected", "err", err)
 		}
 		select {
 		case <-dialCtx.Done():
 			return
-		case <-time.After(bridgeReconnectBackoff):
+		case <-time.After(fleetReconnectBackoff):
 		}
 	}
 }
 
-// bridgeAuthorizer is the lead-side ConnectAuthorizer: it gates which inbound
-// dial requests (initiated by the bridge through the tunnel) the lead will
+// fleetAuthorizer is the captain-side ConnectAuthorizer: it gates which inbound
+// dial requests (initiated by the fleet through the tunnel) the captain will
 // honor. We only allow dialing back into our own local server on its port.
-func (s *Server) bridgeAuthorizer() remotedialer.ConnectAuthorizer {
+func (s *Server) fleetAuthorizer() remotedialer.ConnectAuthorizer {
 	return func(proto, address string) bool {
 		if proto != "tcp" {
 			return false
@@ -121,9 +121,9 @@ func (s *Server) bridgeAuthorizer() remotedialer.ConnectAuthorizer {
 	}
 }
 
-// toWebsocketURL converts the user's bridge URL to a ws:// or wss:// connect
+// toWebsocketURL converts the user's fleet URL to a ws:// or wss:// connect
 // URL. We accept http(s):// for convenience and rewrite the scheme. The path
-// defaults to /connect to match `shipmates bridge serve`.
+// defaults to /connect to match `shipmates fleet serve`.
 func toWebsocketURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -145,14 +145,14 @@ func toWebsocketURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-// leadPersona returns the configured lead persona name (shipmates.yaml
-// `leadPersona:`), defaulting to "lead". Encoded in the clientKey so the
-// bridge can label connected leads and open the right front-door persona.
-func leadPersona() string {
+// captainPersona returns the configured captain persona name (shipmates.yaml
+// `captainPersona:`), defaulting to "captain". Encoded in the clientKey so the
+// fleet can label connected captains and open the right front-door persona.
+func captainPersona() string {
 	if c, err := project.LoadConfig(); err == nil {
-		if p := strings.TrimSpace(c.LeadPersona); p != "" {
+		if p := strings.TrimSpace(c.CaptainPersona); p != "" {
 			return p
 		}
 	}
-	return "lead"
+	return "captain"
 }

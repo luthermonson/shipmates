@@ -1,14 +1,14 @@
-// shipmates bridge UI — vanilla JS, no build step, no framework.
+// shipmates fleet UI — vanilla JS, no build step, no framework.
 //
 // Model:
-//   - Poll /api/leads every 5s to refresh the lead list.
-//   - When the operator clicks a lead, open an EventSource to
-//     /api/lead/<key>/stream and append events to the feed pane.
-//   - Closing/switching leads tears the EventSource down — no history is
+//   - Poll /api/captains every 5s to refresh the captain list.
+//   - When the operator clicks a captain, open an EventSource to
+//     /api/captain/<key>/stream and append events to the feed pane.
+//   - Closing/switching captains tears the EventSource down — no history is
 //     retained on navigate-away (matches the stream-to-browser model).
 
 const $ = (id) => document.getElementById(id);
-const leadsList = $("leads-list");
+const captainsList = $("captains-list");
 const status = $("status");
 const feedTitle = $("feed-title");
 const feedMeta = $("feed-meta");
@@ -19,52 +19,52 @@ const tellMessage = $("tell-message");
 
 let selected = null;
 let stream = null;
-let knownLeads = new Map();
+let knownCaptains = new Map();
 let mateStatus = new Map(); // client_key -> [{persona, status, tool, input, pending_id, since}]
 
-async function refreshLeads() {
+async function refreshCaptains() {
   try {
-    const r = await fetch("/api/leads");
+    const r = await fetch("/api/captains");
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     status.textContent = `${data.filter(l => l.connected).length} online`;
     status.className = data.some(l => l.connected) ? "online" : "offline";
-    renderLeads(data);
+    renderCaptains(data);
   } catch (err) {
-    status.textContent = "bridge unreachable";
+    status.textContent = "fleet unreachable";
     status.className = "offline";
   }
 }
 
 // The first-load empty state: instead of a blank feed and a hidden drawer,
 // show every ship as a tappable card with its live status. Disappears once a
-// lead is selected.
-const leadPicker = $("lead-picker");
+// captain is selected.
+const captainPicker = $("captain-picker");
 
-function renderLeadPicker() {
-  if (selected || knownLeads.size === 0) {
-    leadPicker.hidden = true;
-    leadPicker.innerHTML = "";
+function renderCaptainPicker() {
+  if (selected || knownCaptains.size === 0) {
+    captainPicker.hidden = true;
+    captainPicker.innerHTML = "";
     return;
   }
-  leadPicker.hidden = false;
-  leadPicker.innerHTML = "";
-  const leads = [...knownLeads.values()].sort((a, b) => a.client_key.localeCompare(b.client_key));
-  for (const lead of leads) {
+  captainPicker.hidden = false;
+  captainPicker.innerHTML = "";
+  const captains = [...knownCaptains.values()].sort((a, b) => a.client_key.localeCompare(b.client_key));
+  for (const captain of captains) {
     const card = document.createElement("div");
     card.className = "ship-card";
     const head = document.createElement("div");
     head.className = "head";
     const dot = document.createElement("span");
-    dot.className = "dot" + (lead.connected ? " online" : "");
+    dot.className = "dot" + (captain.connected ? " online" : "");
     head.appendChild(dot);
-    head.appendChild(document.createTextNode(lead.client_key));
+    head.appendChild(document.createTextNode(captain.client_key));
     const meta = document.createElement("small");
-    meta.textContent = lead.connected ? `online · ${lead.repo}` : "offline";
+    meta.textContent = captain.connected ? `online · ${captain.repo}` : "offline";
     head.appendChild(meta);
     card.appendChild(head);
-    const mates = orderMates(lead, mateStatus.get(lead.client_key) || []);
+    const mates = orderMates(captain, mateStatus.get(captain.client_key) || []);
     if (mates.length > 0) {
       const row = document.createElement("div");
       row.className = "mates";
@@ -76,41 +76,41 @@ function renderLeadPicker() {
       }
       card.appendChild(row);
     }
-    card.onclick = () => selectLead(lead.client_key);
-    leadPicker.appendChild(card);
+    card.onclick = () => selectCaptain(captain.client_key);
+    captainPicker.appendChild(card);
   }
 }
 
-// orderMates puts the ship's own lead persona first, crew alphabetical after
+// orderMates puts the ship's own captain persona first, crew alphabetical after
 // — mirrors the tab/dropdown ordering so every surface reads the same.
-function orderMates(lead, mates) {
+function orderMates(captain, mates) {
   return [...mates].sort((a, b) => {
-    if (a.persona === lead.persona) return -1;
-    if (b.persona === lead.persona) return 1;
+    if (a.persona === captain.persona) return -1;
+    if (b.persona === captain.persona) return 1;
     return a.persona.localeCompare(b.persona);
   });
 }
 
-function renderLeads(data) {
-  knownLeads = new Map(data.map(l => [l.client_key, l]));
-  updateTellEnabled(); // selected lead's online state may have flipped
-  renderLeadPicker();
+function renderCaptains(data) {
+  knownCaptains = new Map(data.map(l => [l.client_key, l]));
+  updateTellEnabled(); // selected captain's online state may have flipped
+  renderCaptainPicker();
   if (data.length === 0) {
-    leadsList.innerHTML = '<li class="empty">no leads connected</li>';
+    captainsList.innerHTML = '<li class="empty">no captains connected</li>';
     return;
   }
   data.sort((a, b) => a.client_key.localeCompare(b.client_key));
-  leadsList.innerHTML = "";
-  for (const lead of data) {
+  captainsList.innerHTML = "";
+  for (const captain of data) {
     const li = document.createElement("li");
-    if (lead.client_key === selected) li.classList.add("selected");
+    if (captain.client_key === selected) li.classList.add("selected");
     const dot = document.createElement("span");
-    dot.className = "dot" + (lead.connected ? " online" : "");
+    dot.className = "dot" + (captain.connected ? " online" : "");
     li.appendChild(dot);
-    li.appendChild(document.createTextNode(lead.client_key));
-    li.title = `repo=${lead.repo}\npersona=${lead.persona}\nport=${lead.port}\nlast_seen=${lead.last_seen}`;
-    li.onclick = () => selectLead(lead.client_key);
-    const mates = orderMates(lead, mateStatus.get(lead.client_key) || []);
+    li.appendChild(document.createTextNode(captain.client_key));
+    li.title = `repo=${captain.repo}\npersona=${captain.persona}\nport=${captain.port}\nlast_seen=${captain.last_seen}`;
+    li.onclick = () => selectCaptain(captain.client_key);
+    const mates = orderMates(captain, mateStatus.get(captain.client_key) || []);
     if (mates.length > 0) {
       const row = document.createElement("div");
       row.className = "mates";
@@ -121,12 +121,12 @@ function renderLeads(data) {
         md.title = m.status === "blocked"
           ? `${m.persona}: blocked on ${m.tool}${m.input ? " — " + m.input : ""}`
           : `${m.persona}: ${m.status}${m.since ? " since " + m.since : ""}`;
-        // Every chip is a talk-to affordance: select the lead and target the
+        // Every chip is a talk-to affordance: select the captain and target the
         // persona in the tell form. For blocked mates that also surfaces the
-        // pending pane (it filters to the selected lead).
+        // pending pane (it filters to the selected captain).
         md.onclick = (ev) => {
           ev.stopPropagation();
-          selectLead(lead.client_key);
+          selectCaptain(captain.client_key);
           setTellPersona(m.persona);
           updateFeedTitle();
           feedFilter = m.persona; // chip tap = open that agent's conversation
@@ -140,15 +140,15 @@ function renderLeads(data) {
       }
       li.appendChild(row);
     }
-    leadsList.appendChild(li);
+    captainsList.appendChild(li);
   }
 }
 
 // updateFeedTitle shows WHO you're addressing, not just which ship you're on:
-// "security @ laptop:lead" when the tell form targets a persona, the bare
+// "security @ laptop:captain" when the tell form targets a persona, the bare
 // client key otherwise. Feed content stays ship-wide either way.
 function updateFeedTitle() {
-  if (!selected) { feedTitle.textContent = "select a lead"; return; }
+  if (!selected) { feedTitle.textContent = "select a captain"; return; }
   const persona = tellPersona.value.trim();
   feedTitle.textContent = persona ? `${persona} @ ${selected}` : selected;
 }
@@ -191,50 +191,50 @@ tellPersona.addEventListener("change", () => {
   renderFeed();
 });
 
-function selectLead(key) {
+function selectCaptain(key) {
   document.body.classList.remove("drawer-open"); // mobile: give the feed full width
   if (selected === key) return;
   selected = key;
-  leadPicker.hidden = true;
-  leadPicker.innerHTML = "";
+  captainPicker.hidden = true;
+  captainPicker.innerHTML = "";
   closeBeads();
   feedBody.innerHTML = "";
   feedEvents = [];
-  // picking a ship drops you into its LEAD's conversation — the lead is the
+  // picking a ship drops you into its CAPTAIN's conversation — the captain is the
   // natural front door; "all" and crew tabs are one tap away
-  const picked = knownLeads.get(key);
+  const picked = knownCaptains.get(key);
   feedFilter = picked && picked.persona ? picked.persona : "all";
   renderFeedTabs();
-  refreshLeads(); // re-render to update .selected
-  const lead = knownLeads.get(key);
-  feedMeta.textContent = lead && lead.connected
-    ? `online · port ${lead.port}`
+  refreshCaptains(); // re-render to update .selected
+  const captain = knownCaptains.get(key);
+  feedMeta.textContent = captain && captain.connected
+    ? `online · port ${captain.port}`
     : "offline";
   // Rebuild the target dropdown for this ship's roster and default it to the
-  // lead's own persona (rosters differ per ship, so carrying the previous
+  // captain's own persona (rosters differ per ship, so carrying the previous
   // selection across would leave a dangling target).
   renderTellOptions();
-  setTellPersona(lead && lead.persona ? lead.persona : "all");
+  setTellPersona(captain && captain.persona ? captain.persona : "all");
   updateFeedTitle();
   updateTellEnabled();
-  refreshPending(); // switch the pending pane to this lead immediately
+  refreshPending(); // switch the pending pane to this captain immediately
   refreshBeadsBadge(); // the ⛃ count is per-ship
   openStream(key);
 }
 
 
-// updateTellEnabled greys out the tell form when the selected lead is offline
+// updateTellEnabled greys out the tell form when the selected captain is offline
 // or unselected. Stops the operator from firing 504s into a dead tunnel.
 function updateTellEnabled() {
-  const lead = selected ? knownLeads.get(selected) : null;
-  const enabled = lead && lead.connected;
+  const captain = selected ? knownCaptains.get(selected) : null;
+  const enabled = captain && captain.connected;
   tellPersona.disabled = !enabled;
   tellMessage.disabled = !enabled;
   const btn = tellForm.querySelector("button");
   if (btn) btn.disabled = !enabled;
   tellMessage.placeholder = enabled
     ? "message…"
-    : (selected ? "lead offline" : "select a lead first");
+    : (selected ? "captain offline" : "select a captain first");
 }
 
 function openStream(key) {
@@ -243,7 +243,7 @@ function openStream(key) {
     stream = null;
   }
   if (!key) return;
-  stream = new EventSource(`/api/lead/${encodeURIComponent(key)}/stream`);
+  stream = new EventSource(`/api/captain/${encodeURIComponent(key)}/stream`);
   let disconnected = false;
   stream.onopen = () => { disconnected = false; };
   stream.onmessage = (m) => {
@@ -254,13 +254,13 @@ function openStream(key) {
       // ignore malformed lines
     }
   };
-  // onerror fires on EVERY auto-reconnect attempt while the bridge is down,
+  // onerror fires on EVERY auto-reconnect attempt while the fleet is down,
   // so we only log the first one per disconnect to avoid filling the feed
   // with noise. onopen clears the flag when the stream reconnects.
   stream.onerror = () => {
     if (!disconnected) {
       disconnected = true;
-      appendEvent({ time: nowISO(), persona: "(bridge)", type: "stream", text: "disconnected — reconnecting…" });
+      appendEvent({ time: nowISO(), persona: "(fleet)", type: "stream", text: "disconnected — reconnecting…" });
     }
   };
 }
@@ -270,7 +270,7 @@ function openStream(key) {
 // The stream is ship-wide (every persona's events interleave); tabs give each
 // agent its own conversation view, same mental model as the terminal tabs.
 // "all" shows everything; picking a persona filters the feed AND targets the
-// tell form at them. Bridge-status lines ("(bridge)" persona) always show.
+// tell form at them. Fleet-status lines ("(fleet)" persona) always show.
 
 const feedTabsEl = $("feed-tabs");
 let feedEvents = [];
@@ -278,16 +278,16 @@ let feedFilter = "all";
 
 function eventMatchesFilter(e) {
   if (feedFilter === "all") return true;
-  if (e.persona && e.persona.startsWith("(")) return true; // bridge notices
+  if (e.persona && e.persona.startsWith("(")) return true; // fleet notices
   return e.persona === feedFilter;
 }
 
-// Persona display order: "all" first, the ship's lead persona second (it
+// Persona display order: "all" first, the ship's captain persona second (it
 // announces itself in the tunnel identity headers), crew alphabetical after.
 function orderedPersonas(personas) {
-  const leadPersona = selected && knownLeads.get(selected) ? knownLeads.get(selected).persona : "";
-  const rest = [...personas].filter((p) => p !== leadPersona).sort();
-  return personas.has(leadPersona) ? [leadPersona, ...rest] : rest;
+  const captainPersona = selected && knownCaptains.get(selected) ? knownCaptains.get(selected).persona : "";
+  const rest = [...personas].filter((p) => p !== captainPersona).sort();
+  return personas.has(captainPersona) ? [captainPersona, ...rest] : rest;
 }
 
 function renderFeedTabs() {
@@ -367,10 +367,10 @@ function shortModel(m) {
 // matches after whitespace/punctuation-openers so escaped entities
 // (&amp;#39;) and code fragments don't false-link.
 function linkifyRefs(html) {
-  const lead = selected ? knownLeads.get(selected) : null;
-  if (!lead || !lead.repo_url) return html;
+  const captain = selected ? knownCaptains.get(selected) : null;
+  if (!captain || !captain.repo_url) return html;
   const link = (label, n) =>
-    `<a href="${lead.repo_url}/issues/${n}" target="_blank" rel="noopener">${label}</a>`;
+    `<a href="${captain.repo_url}/issues/${n}" target="_blank" rel="noopener">${label}</a>`;
   return html
     .replace(/\bgh-(\d+)\b/g, (m, n) => link(m, n))
     .replace(/(^|[\s(,:])#(\d+)\b/g, (m, pre, n) => pre + link("#" + n, n));
@@ -408,14 +408,14 @@ tellForm.onsubmit = async (e) => {
   if (persona === "all") {
     targets = (mateStatus.get(selected) || []).map((m) => m.persona);
     if (targets.length === 0) {
-      appendEvent({ time: nowISO(), persona: "(bridge)", type: "tell-error", text: "no crew roster yet — wait for status" });
+      appendEvent({ time: nowISO(), persona: "(fleet)", type: "tell-error", text: "no crew roster yet — wait for status" });
       return;
     }
   }
 
   const results = await Promise.allSettled(targets.map(async (p) => {
     const r = await fetch(
-      `/api/lead/${encodeURIComponent(selected)}/tell/${encodeURIComponent(p)}`,
+      `/api/captain/${encodeURIComponent(selected)}/tell/${encodeURIComponent(p)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -431,7 +431,7 @@ tellForm.onsubmit = async (e) => {
     // no local echo: the server-side tell events arrive through the stream
   } else {
     for (const f of failures) {
-      appendEvent({ time: nowISO(), persona: "(bridge)", type: "tell-error", text: String(f.reason) });
+      appendEvent({ time: nowISO(), persona: "(fleet)", type: "tell-error", text: String(f.reason) });
     }
   }
 };
@@ -446,7 +446,7 @@ document.addEventListener("visibilitychange", () => {
     feedEvents = [];
     openStream(selected);
   }
-  refreshLeads();
+  refreshCaptains();
   refreshPending();
   refreshStatus();
 });
@@ -454,7 +454,7 @@ document.addEventListener("visibilitychange", () => {
 // --- pending permission pane ----------------------------------------------
 //
 // Polls /api/pending every 1.5s. Renders rows in a sticky pane above the tell
-// form, filtered to the SELECTED lead. The bottom-most row is the keyboard
+// form, filtered to the SELECTED captain. The bottom-most row is the keyboard
 // target: pressing 1 allows it, 2 denies it (ignored while typing in inputs).
 // New entries play a short ping so the operator notices when away from the tab.
 
@@ -481,7 +481,7 @@ let expandedPendingGroups = new Set();
 
 function renderPending(items) {
   items = (items || []).filter(it => it.client_key === selected);
-  // Ping on any newly-seen id, globally (so cross-lead pendings still alert).
+  // Ping on any newly-seen id, globally (so cross-captain pendings still alert).
   const currentIds = new Set((items || []).map(i => i.client_key + ":" + i.id));
   for (const id of currentIds) {
     if (!seenPendingIds.has(id)) ping();
@@ -581,7 +581,7 @@ function renderPendingRow(it, indent) {
 async function resolveAll(list, behavior, head) {
   head.querySelectorAll("button").forEach(b => b.disabled = true);
   await Promise.allSettled(list.map((it) =>
-    fetch(`/api/lead/${encodeURIComponent(it.client_key)}/resolve/${encodeURIComponent(it.id)}`,
+    fetch(`/api/captain/${encodeURIComponent(it.client_key)}/resolve/${encodeURIComponent(it.id)}`,
       { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ behavior }) })
   ));
@@ -592,7 +592,7 @@ async function resolvePending(it, behavior, row) {
   row.querySelectorAll("button").forEach(b => b.disabled = true);
   try {
     const r = await fetch(
-      `/api/lead/${encodeURIComponent(it.client_key)}/resolve/${encodeURIComponent(it.id)}`,
+      `/api/captain/${encodeURIComponent(it.client_key)}/resolve/${encodeURIComponent(it.id)}`,
       { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ behavior }) }
     );
@@ -635,8 +635,8 @@ function ping() {
 
 // --- mate status dots -------------------------------------------------------
 //
-// Polls /api/status (the bridge fans out to every connected lead's
-// /status.json) and re-renders the lead list so each row shows its mates as
+// Polls /api/status (the fleet fans out to every connected captain's
+// /status.json) and re-renders the captain list so each row shows its mates as
 // colored chips: red=blocked, yellow=working, green=idle, blue=done. Status is
 // derived server-side from hook events and the pending queue — no heuristics.
 
@@ -652,7 +652,7 @@ async function refreshStatus() {
       next.get(it.client_key).push(it);
     }
     mateStatus = next;
-    renderLeads([...knownLeads.values()]);
+    renderCaptains([...knownCaptains.values()]);
     renderFeedTabs(); // roster changes grow/shrink the conversation tabs
     renderTellOptions(); // ...and the tell dropdown
   } catch {
@@ -660,9 +660,9 @@ async function refreshStatus() {
   }
 }
 
-updateTellEnabled(); // initial: form starts disabled until a lead is selected
-refreshLeads();
-setInterval(refreshLeads, 5000);
+updateTellEnabled(); // initial: form starts disabled until a captain is selected
+refreshCaptains();
+setInterval(refreshCaptains, 5000);
 refreshPending();
 setInterval(refreshPending, 1500);
 refreshStatus();
@@ -671,7 +671,7 @@ setInterval(refreshStatus, 3000);
 // --- live terminal pane (multi-session, tabbed) -------------------------------
 //
 // "⌨ term" opens a PTY-hosted mate for whatever persona the tell form targets
-// (tap a mate chip to target it) on the selected lead. Multiple terminals stay
+// (tap a mate chip to target it) on the selected captain. Multiple terminals stay
 // open concurrently — each keeps its EventSource + xterm instance alive; tabs
 // on top switch between them. Tab label is persona@ship so you always know
 // which mate you're typing into. The big close button closes the ACTIVE tab.
@@ -702,7 +702,7 @@ function renderTermTabs() {
     tab.type = "button";
     tab.className = "term-tab" + (id === activeTermId ? " active" : "");
     const label = document.createElement("span");
-    // persona@ship — ship is the lead name (client_key up to the colon)
+    // persona@ship — ship is the captain name (client_key up to the colon)
     label.textContent = `${t.persona}@${t.key.split(":")[0]}`;
     tab.appendChild(label);
     const x = document.createElement("span");
@@ -854,7 +854,7 @@ async function openTerminal(key, persona) {
     if (terms.has(id)) { activateTerm(id); return; } // raced with another attach
   }
 
-  const base = `/api/lead/${encodeURIComponent(key)}/pty/${encodeURIComponent(persona)}`;
+  const base = `/api/captain/${encodeURIComponent(key)}/pty/${encodeURIComponent(persona)}`;
   try {
     const r = await fetch(`${base}/start`, { method: "POST" });
     if (r.status === 401) { window.location.href = "/login"; return; }
@@ -862,7 +862,7 @@ async function openTerminal(key, persona) {
   } catch (err) {
     // upstream failures can hand back whole HTML error pages — keep one line
     const msg = String(err).replace(/\s+/g, " ").slice(0, 200);
-    appendEvent({ time: nowISO(), persona: "(bridge)", type: "term-error", text: msg });
+    appendEvent({ time: nowISO(), persona: "(fleet)", type: "term-error", text: msg });
     return;
   }
 
@@ -990,7 +990,7 @@ function closeBeads() {
     feedBody.hidden = false;
     tellForm.style.display = "";
   } else {
-    renderLeadPicker(); // back to the fleet overview
+    renderCaptainPicker(); // back to the fleet overview
   }
 }
 
@@ -999,7 +999,7 @@ async function openBeads() {
   beadsPane.innerHTML = '<div class="empty">loading beads…</div>';
   beadsPane.hidden = false;
   feedBody.hidden = true;
-  leadPicker.hidden = true;
+  captainPicker.hidden = true;
   tellForm.style.display = "none"; // no tell target while reading the graph
   beadsOpenBtn.classList.add("active");
   await refreshBeads(true);
@@ -1012,7 +1012,7 @@ async function refreshBeads(force) {
   try {
     // ship selected → that ship's graph; nothing selected → fleet-wide union
     const url = selected
-      ? `/api/lead/${encodeURIComponent(selected)}/beads`
+      ? `/api/captain/${encodeURIComponent(selected)}/beads`
       : "/api/beads";
     const r = await fetch(url);
     if (r.status === 401) { window.location.href = "/login"; return; }
@@ -1036,20 +1036,20 @@ async function refreshBeads(force) {
 // pass through; the `gh-<n>` convention resolves against the carrying ship's
 // repo origin (GitHub redirects /issues/<n> to /pull/<n> when it's a PR, so
 // one path shape covers both).
-function externalRefURL(ref, leadKey) {
+function externalRefURL(ref, captainKey) {
   if (!ref) return null;
   if (/^https?:\/\//.test(ref)) return ref;
   const m = /^gh-(\d+)$/.exec(ref);
   if (!m) return null;
-  const lead = knownLeads.get(leadKey);
-  if (!lead || !lead.repo_url) return null;
-  return `${lead.repo_url}/issues/${m[1]}`;
+  const captain = knownCaptains.get(captainKey);
+  if (!captain || !captain.repo_url) return null;
+  return `${captain.repo_url}/issues/${m[1]}`;
 }
 
 // refLink renders an external_ref as an anchor when resolvable, a plain chip
 // otherwise. Anchor clicks must not toggle the bead detail row.
-function refLink(ref, leadKey) {
-  const url = externalRefURL(ref, leadKey);
+function refLink(ref, captainKey) {
+  const url = externalRefURL(ref, captainKey);
   if (!url) return `<span class="bref">${escape(ref)}</span>`;
   return `<a class="bref" href="${escape(url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${escape(ref)}</a>`;
 }
@@ -1110,7 +1110,7 @@ function renderBeadCreate() {
       if (!title) return;
       form.querySelectorAll("button").forEach((b) => (b.disabled = true));
       try {
-        const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/bead`, {
+        const r = await fetch(`/api/captain/${encodeURIComponent(selected)}/bead`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title, description: form.elements.description.value.trim() }),
@@ -1122,7 +1122,7 @@ function renderBeadCreate() {
         refreshBeads(true);
       } catch (err) {
         form.querySelectorAll("button").forEach((b) => (b.disabled = false));
-        appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 160) });
+        appendEvent({ time: nowISO(), persona: "(fleet)", type: "bead-error", text: String(err).slice(0, 160) });
       }
     };
     bar.appendChild(form);
@@ -1133,7 +1133,7 @@ function renderBeadCreate() {
 }
 
 // tap a bead to expand its full record (bd show) inline; tap again to fold
-function toggleBeadDetail(row, id, leadKey) {
+function toggleBeadDetail(row, id, captainKey) {
   const existing = row.nextElementSibling;
   if (existing && existing.classList.contains("bead-detail")) {
     existing.remove();
@@ -1141,16 +1141,16 @@ function toggleBeadDetail(row, id, leadKey) {
     return;
   }
   expandedBeads.add(id);
-  expandBeadDetail(row, id, leadKey);
+  expandBeadDetail(row, id, captainKey);
 }
 
-async function expandBeadDetail(row, id, leadKey) {
+async function expandBeadDetail(row, id, captainKey) {
   const detail = document.createElement("div");
   detail.className = "bead-detail";
   detail.textContent = "loading…";
   row.after(detail);
   try {
-    const r = await fetch(`/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}`);
+    const r = await fetch(`/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}`);
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const arr = await r.json();
@@ -1159,7 +1159,7 @@ async function expandBeadDetail(row, id, leadKey) {
     const lines = [];
     if (b.description) lines.push(`<div class="bdesc">${escape(b.description)}</div>`);
     const meta = [];
-    if (b.external_ref) meta.push(`ref: ${refLink(b.external_ref, leadKey)}`);
+    if (b.external_ref) meta.push(`ref: ${refLink(b.external_ref, captainKey)}`);
     if (b.assignee) meta.push(`assignee: ${escape(b.assignee)}`);
     if (b.issue_type) meta.push(`type: ${escape(b.issue_type)}`);
     if (b.owner) meta.push(`owner: ${escape(b.owner)}`);
@@ -1171,12 +1171,12 @@ async function expandBeadDetail(row, id, leadKey) {
     lines.push(`<div class="bmeta">${meta.join(" · ")}</div>`);
     detail.innerHTML = lines.join("");
     if (b.status !== "closed") {
-      renderBeadClose(detail, id, leadKey); // red ✕, absolute top-right of the card
+      renderBeadClose(detail, id, captainKey); // red ✕, absolute top-right of the card
       const actions = document.createElement("div");
       actions.className = "bead-actions";
       // one row that wraps as a unit: [✎][assign to…][priority][dispatch]
-      const grp = renderBeadAssign(actions, b, id, leadKey);
-      renderBeadEdit(grp, b, id, leadKey, detail);
+      const grp = renderBeadAssign(actions, b, id, captainKey);
+      renderBeadEdit(grp, b, id, captainKey, detail);
       detail.appendChild(actions);
     }
   } catch (err) {
@@ -1186,10 +1186,10 @@ async function expandBeadDetail(row, id, leadKey) {
 
 // beadActionError surfaces a failed write without leaving the pane.
 function beadActionError(err) {
-  appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead-error", text: String(err).slice(0, 200) });
+  appendEvent({ time: nowISO(), persona: "(fleet)", type: "bead-error", text: String(err).slice(0, 200) });
 }
 
-function renderBeadClose(actions, id, leadKey) {
+function renderBeadClose(actions, id, captainKey) {
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.className = "bead-close icon";
@@ -1201,7 +1201,7 @@ function renderBeadClose(actions, id, leadKey) {
     closeBtn.disabled = true;
     try {
       const cr = await fetch(
-        `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/close`,
+        `/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}/close`,
         { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ reason: reason.trim() }) }
       );
@@ -1219,7 +1219,7 @@ function renderBeadClose(actions, id, leadKey) {
 
 // buildBeadPriority is a lone select that applies on change — a priority
 // tweak is low-stakes, so no confirm button cluttering the bar.
-function buildBeadPriority(b, id, leadKey) {
+function buildBeadPriority(b, id, captainKey) {
   const pSel = document.createElement("select");
   pSel.className = "prio";
   pSel.title = "priority (applies immediately)";
@@ -1234,7 +1234,7 @@ function buildBeadPriority(b, id, leadKey) {
     pSel.disabled = true;
     try {
       const r = await fetch(
-        `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/update`,
+        `/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}/update`,
         { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ priority: pSel.value }) }
       );
@@ -1251,7 +1251,7 @@ function buildBeadPriority(b, id, leadKey) {
 
 // renderBeadEdit: ✎ toggles an inline title/description editor — beads are a
 // shared human+agent surface, not agent-only. Saves via /bead/{id}/update.
-function renderBeadEdit(container, b, id, leadKey, detail) {
+function renderBeadEdit(container, b, id, captainKey, detail) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "icon";
@@ -1276,7 +1276,7 @@ function renderBeadEdit(container, b, id, leadKey, detail) {
       form.querySelectorAll("button").forEach((x) => (x.disabled = true));
       try {
         const r = await fetch(
-          `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/update`,
+          `/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}/update`,
           { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title, description: form.elements.description.value.trim() }) }
         );
@@ -1295,10 +1295,10 @@ function renderBeadEdit(container, b, id, leadKey, detail) {
 }
 
 // renderBeadAssign mounts the cross-ship dispatch control: a fleet-wide
-// persona@ship picker + dispatch button. Assigning routes through the bridge,
+// persona@ship picker + dispatch button. Assigning routes through the fleet,
 // which updates the graph, force-pulls the target ship, and TELLS the mate —
 // assignment IS dispatch, not just bookkeeping.
-function renderBeadAssign(actions, b, id, leadKey) {
+function renderBeadAssign(actions, b, id, captainKey) {
   const row = document.createElement("div");
   row.className = "grp";
   const sel = document.createElement("select");
@@ -1307,10 +1307,10 @@ function renderBeadAssign(actions, b, id, leadKey) {
   ph.textContent = "assign to…";
   sel.appendChild(ph);
   for (const [key, mates] of mateStatus) {
-    const lead = knownLeads.get(key);
-    if (!lead || !lead.connected) continue;
+    const captain = knownCaptains.get(key);
+    if (!captain || !captain.connected) continue;
     const ship = key.split(":")[0];
-    for (const m of orderMates(lead, mates)) {
+    for (const m of orderMates(captain, mates)) {
       const o = document.createElement("option");
       o.value = JSON.stringify({ ship: key, persona: m.persona });
       o.textContent = `${m.persona}@${ship}`;
@@ -1327,14 +1327,14 @@ function renderBeadAssign(actions, b, id, leadKey) {
     btn.disabled = true;
     try {
       const r = await fetch(
-        `/api/lead/${encodeURIComponent(leadKey)}/bead/${encodeURIComponent(id)}/assign`,
+        `/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}/assign`,
         { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ship: target.ship, persona: target.persona, title: b.title || "" }) }
       );
       if (r.status === 401) { window.location.href = "/login"; return; }
       if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
       const res = await r.json();
-      appendEvent({ time: nowISO(), persona: "(bridge)", type: "bead:dispatch",
+      appendEvent({ time: nowISO(), persona: "(fleet)", type: "bead:dispatch",
         text: res.queued
           ? `${id} assigned to ${res.assignee} — ship offline, dispatch queued for reconnect`
           : `${id} → ${target.persona}@${target.ship.split(":")[0]}` });
@@ -1345,7 +1345,7 @@ function renderBeadAssign(actions, b, id, leadKey) {
     }
   };
   row.appendChild(sel);
-  row.appendChild(buildBeadPriority(b, id, leadKey)); // priority sits before the verb
+  row.appendChild(buildBeadPriority(b, id, captainKey)); // priority sits before the verb
   row.appendChild(btn);
   actions.appendChild(row);
   return row;
@@ -1356,13 +1356,13 @@ beadsOpenBtn.onclick = openBeads;
 // --- beads count badge ---------------------------------------------------------
 //
 // The ⛃ button shows the selected ship's open-bead count so graph activity is
-// visible without opening the pane. The lead caches the count (30s TTL,
-// invalidated on bridge-mediated writes), so this poll is cheap.
+// visible without opening the pane. The captain caches the count (30s TTL,
+// invalidated on fleet-mediated writes), so this poll is cheap.
 
 async function refreshBeadsBadge() {
   if (!selected) { beadsOpenBtn.textContent = "⛃ beads"; return; }
   try {
-    const r = await fetch(`/api/lead/${encodeURIComponent(selected)}/beads/summary`);
+    const r = await fetch(`/api/captain/${encodeURIComponent(selected)}/beads/summary`);
     if (!r.ok) { beadsOpenBtn.textContent = "⛃ beads"; return; }
     const s = await r.json();
     beadsOpenBtn.textContent = s.open > 0 ? `⛃ beads (${s.open})` : "⛃ beads";
@@ -1379,7 +1379,7 @@ termOpenBtn.onclick = async () => {
     // all` would create a nameless mate. Open a tab per crew member instead.
     const roster = (mateStatus.get(selected) || []).map((m) => m.persona);
     if (roster.length === 0) {
-      appendEvent({ time: nowISO(), persona: "(bridge)", type: "term-error", text: "no crew roster yet — wait for status" });
+      appendEvent({ time: nowISO(), persona: "(fleet)", type: "term-error", text: "no crew roster yet — wait for status" });
       return;
     }
     for (const p of roster) await openTerminal(selected, p);
@@ -1406,8 +1406,8 @@ termAddBtn.onclick = (ev) => {
   const key = t ? t.key : selected;
   if (!key) return;
   termAddMenu.innerHTML = "";
-  const lead = knownLeads.get(key);
-  const mates = orderMates(lead || { persona: "" }, mateStatus.get(key) || []);
+  const captain = knownCaptains.get(key);
+  const mates = orderMates(captain || { persona: "" }, mateStatus.get(key) || []);
   if (mates.length === 0) {
     const none = document.createElement("div");
     none.className = "none";
@@ -1514,14 +1514,14 @@ for (const [btn, dir] of [[termScrollUp, -1], [termScrollDown, 1]]) {
   }
 }
 
-// --- mobile leads drawer ------------------------------------------------------
+// --- mobile captains drawer ------------------------------------------------------
 //
-// On narrow screens (<=640px, see style.css) the leads rail is an off-canvas
-// drawer toggled by the header hamburger. Selecting a lead closes it so the
+// On narrow screens (<=640px, see style.css) the captains rail is an off-canvas
+// drawer toggled by the header hamburger. Selecting a captain closes it so the
 // feed gets the full width; the backdrop tap dismisses without selecting.
 
-const leadsToggle = $("leads-toggle");
+const captainsToggle = $("captains-toggle");
 const drawerBackdrop = $("drawer-backdrop");
 
-leadsToggle.onclick = () => document.body.classList.toggle("drawer-open");
+captainsToggle.onclick = () => document.body.classList.toggle("drawer-open");
 drawerBackdrop.onclick = () => document.body.classList.remove("drawer-open");

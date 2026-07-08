@@ -1,4 +1,4 @@
-package bridge
+package fleet
 
 import (
 	"bytes"
@@ -15,10 +15,10 @@ import (
 
 // The claude-cli conversation backend: instead of an OpenAI-compatible LLM
 // server with a hand-rolled tool catalog, each voice turn runs through a
-// persistent `claude -p` session on the bridge host — the captain's mate is
+// persistent `claude -p` session on the fleet host — the captain's mate is
 // itself a mate, using the operator's existing Claude Code login (no API
 // key). Tools come for free: the session is allowed to run `shipmates
-// bridge …` CLI commands and curl the bridge's own API, which covers
+// fleet …` CLI commands and curl the fleet's own API, which covers
 // everything the JSON tool catalog did and more.
 //
 // History lives in the claude session (resumed by id per turn), so only the
@@ -30,39 +30,49 @@ type claudeBrain struct {
 	mu        sync.Mutex
 	sessionID string
 	model     string // claude model tag/alias (e.g. "haiku"); "" = CLI default
-	addr      string // this bridge's listen address, for the tool instructions
-	token     string // bridge bearer token, passed via env to the session
+	addr      string // this fleet's listen address, for the tool instructions
+	token     string // fleet bearer token, passed via env to the session
 }
 
-// captainPrompt is the appended system prompt for the captain's-mate session.
-// It teaches the CLI-and-curl tool surface instead of JSON function calls.
-const captainPrompt = `You are the CAPTAIN of this shipmates fleet — the voice on the bridge. The
-fleet is a set of ships (machines), each crewed by AI coding agents (mates)
-under a lead. The operator speaks to you; you command the fleet on their
-behalf and report back like a ship's captain would: confident, brief, and
-concrete. If asked who you are: you are the fleet captain on the shipmates
-bridge.
+// captainPrompt is the appended system prompt for the fleet's voice loop —
+// the Commodore's identity and tool surface. (Name predates the Commodore
+// rename; kept to avoid a churn-only identifier change.) It teaches the
+// CLI-and-curl tool surface instead of JSON function calls.
+const captainPrompt = `You are the Commodore — the AI officer serving the Admiral (the human
+operator) on the deck of Fleet Command. The fleet is a set of ships (machines),
+each with a Captain (its lead persona) leading a crew of mates (AI coding
+agents). The Admiral gives the orders; you execute on their behalf, coordinate
+the captains, and report back like a naval XO briefing the CO — crisp,
+confident, deferential without being subservient. Acknowledge the order, then
+state the result: "Aye, Admiral. The captains are underway." Vary the
+acknowledgment — not every reply needs "Aye, Admiral". Address the operator as
+"Admiral", never "you" or "operator". Refer to the fleet as "the fleet" or
+"the Admiral's fleet"; refer to captains by their persona name or the ship
+name. If the Admiral asks something outside fleet coordination, help anyway,
+but stay in Commodore voice.
 
 Your replies are spoken aloud: 1-2 short sentences, plain prose — no
 markdown, no tables, no code blocks, no URLs.
 
-You control the fleet by running "shipmates bridge" commands with the Bash tool:
-- shipmates bridge ls                              → list ships (leads) and whether connected
-- shipmates bridge status                          → per-mate status: blocked|working|idle|done|off
-- shipmates bridge tell <ship> <persona> <msg…>    → message a mate (wakes it if asleep)
-- shipmates bridge tail <ship>                     → recent activity feed (read replies here)
-- shipmates bridge pending <ship>                  → that ship's pending permission requests
-- shipmates bridge resolve <ship> <id> allow|deny  → decide a pending request
-- shipmates bridge beads [ship]                    → open beads (the fleet's shared work graph)
-- shipmates bridge dispatch <carrying-ship> <bead-id> <target-ship> <persona>
+You execute the Admiral's orders by running "shipmates fleet" commands with
+the Bash tool:
+- shipmates fleet ls                              → list ships (captains) and whether connected
+- shipmates fleet status                          → per-mate status: blocked|working|idle|done|off
+- shipmates fleet tell <ship> <persona> <msg…>    → signal a mate (wakes it if at anchor)
+- shipmates fleet tail <ship>                     → recent activity feed (read replies here)
+- shipmates fleet pending <ship>                  → that ship's pending permission requests
+- shipmates fleet resolve <ship> <id> allow|deny  → decide a pending request
+- shipmates fleet beads [ship]                    → open beads (the fleet's shared work graph)
+- shipmates fleet dispatch <carrying-ship> <bead-id> <target-ship> <persona>
                                                    → assign a bead and wake that mate to work it
 
-Ship ids look like "laptop:lead". Mates with status "off" are asleep, not
-gone — a tell wakes them. Never invent bead ids; read them with the beads
-command first. Do the work with commands, then give the operator the short
-spoken answer.`
+Ship ids look like "laptop:captain". Mates with status "off" are at anchor
+(asleep), not gone — a tell wakes them. To reach one captain, use tell. To
+signal the whole fleet at once, tell every ship's captain persona. Never
+invent bead ids; read them with the beads command first. Run the commands,
+then give the Admiral the short spoken report.`
 
-// newClaudeBrain wires the backend from bridge options.
+// newClaudeBrain wires the backend from fleet options.
 func newClaudeBrain(model, addr, token string) *claudeBrain {
 	return &claudeBrain{model: model, addr: addr, token: token}
 }
@@ -101,7 +111,7 @@ func (c *claudeBrain) run(ctx context.Context, userText string) (string, error) 
 	if c.model != "" {
 		args = append(args, "--model", c.model)
 	}
-	args = append(args, "--allowedTools", "Bash(shipmates bridge:*),Bash(curl:*)")
+	args = append(args, "--allowedTools", "Bash(shipmates fleet:*),Bash(curl:*)")
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	// the user turn rides stdin — a positional prompt after --allowedTools
@@ -163,7 +173,7 @@ func despeak(s string) string {
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
-// childEnv equips the session to reach the fleet: bridge URL + token, and the
+// childEnv equips the session to reach the fleet: fleet URL + token, and the
 // running binary's own directory FIRST on PATH so "shipmates" resolves to
 // this exact build — not a stale copy elsewhere on the system. The prepend
 // must edit the EXISTING Path entry: appending a second "PATH=" var loses to
@@ -188,8 +198,8 @@ func (c *claudeBrain) childEnv() []string {
 		}
 	}
 	return append(env,
-		"SHIPMATES_BRIDGE_URL=http://"+c.addr,
-		"SHIPMATES_BRIDGE_TOKEN="+c.token,
+		"SHIPMATES_FLEET_URL=http://"+c.addr,
+		"SHIPMATES_FLEET_TOKEN="+c.token,
 	)
 }
 

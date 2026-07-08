@@ -10,16 +10,16 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// Ship manages the per-host supervisor: one daemon that keeps a lead server
+// Ship manages the per-host supervisor: one daemon that keeps a captain server
 // alive in every project dir listed in ~/.shipmates/ship.yaml.
 func Ship() *cli.Command {
 	return &cli.Command{
 		Name:  "ship",
-		Usage: "supervise this host's leads (one daemon per machine)",
+		Usage: "supervise this host's captains (one daemon per machine)",
 		Commands: []*cli.Command{
 			{
 				Name:  "serve",
-				Usage: "run the supervisor: a lead server per configured project, restart on crash",
+				Usage: "run the supervisor: a captain server per configured project, restart on crash",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "config", Usage: "ship.yaml path (default ~/.shipmates/ship.yaml)"},
 					&cli.StringFlag{Name: "log-file", Usage: "append supervisor logs to this file instead of stderr"},
@@ -70,7 +70,7 @@ func Ship() *cli.Command {
 			},
 			{
 				Name:  "status",
-				Usage: "show each configured project's lead state",
+				Usage: "show each configured project's captain state",
 				Action: func(ctx context.Context, c *cli.Command) error {
 					path, err := ship.ConfigPath()
 					if err != nil {
