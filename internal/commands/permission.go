@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/luthermonson/shipmates/internal/client"
 	"github.com/urfave/cli/v3"
@@ -30,32 +31,73 @@ func Pending() *cli.Command {
 }
 
 // Allow approves a pending permission request by id.
+//
+// A --for flag turns the one-time approval into a time-box: the ship
+// remembers the (persona, exact-command) pair and auto-allows it for the
+// given duration without prompting again. `--for 5m`, `--for 30m`, `--for 1h`
+// are the common forms; any Go time.ParseDuration string is accepted.
+// Omitting the flag preserves the historical one-time-only behavior.
 func Allow() *cli.Command {
-	return resolveCmd("allow", "approve a pending crew tool request")
-}
-
-// Deny rejects a pending permission request by id.
-func Deny() *cli.Command {
-	return resolveCmd("deny", "reject a pending crew tool request")
-}
-
-func resolveCmd(behavior, usage string) *cli.Command {
 	return &cli.Command{
-		Name:      behavior,
-		Usage:     usage,
+		Name:      "allow",
+		Usage:     "approve a pending crew tool request",
 		ArgsUsage: "<id>",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:  "for",
+				Usage: "auto-allow this exact command from this persona for the given duration (e.g. 5m, 30m, 1h)",
+			},
+		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			id := c.Args().First()
 			if id == "" {
-				return fmt.Errorf("usage: shipmates %s <id>", behavior)
+				return errors.New("usage: shipmates allow <id> [--for <duration>]")
 			}
 			if !client.Healthy() {
 				return errors.New("no server running")
 			}
-			if _, err := client.Post("/resolve/"+id, map[string]string{"behavior": behavior}); err != nil {
+			body := map[string]string{"behavior": "allow"}
+			if raw := c.String("for"); raw != "" {
+				d, err := time.ParseDuration(raw)
+				if err != nil {
+					return fmt.Errorf("bad --for duration %q: %w", raw, err)
+				}
+				if d <= 0 {
+					return fmt.Errorf("--for duration must be positive, got %s", raw)
+				}
+				body["duration"] = d.String()
+			}
+			if _, err := client.Post("/resolve/"+id, body); err != nil {
 				return err
 			}
-			fmt.Printf("%sed %s\n", behavior, id)
+			if body["duration"] != "" {
+				fmt.Printf("allowed %s (time-boxed for %s)\n", id, body["duration"])
+			} else {
+				fmt.Printf("allowed %s\n", id)
+			}
+			return nil
+		},
+	}
+}
+
+// Deny rejects a pending permission request by id.
+func Deny() *cli.Command {
+	return &cli.Command{
+		Name:      "deny",
+		Usage:     "reject a pending crew tool request",
+		ArgsUsage: "<id>",
+		Action: func(ctx context.Context, c *cli.Command) error {
+			id := c.Args().First()
+			if id == "" {
+				return errors.New("usage: shipmates deny <id>")
+			}
+			if !client.Healthy() {
+				return errors.New("no server running")
+			}
+			if _, err := client.Post("/resolve/"+id, map[string]string{"behavior": "deny"}); err != nil {
+				return err
+			}
+			fmt.Printf("denied %s\n", id)
 			return nil
 		},
 	}

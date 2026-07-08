@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/permissions"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/streamjson"
 )
@@ -86,6 +87,12 @@ type Server struct {
 	fleetURL   string
 	fleetToken string
 	fleetKey   string
+
+	// permissions gate: mirrors Claude Code's own settings-driven decision
+	// model so we can auto-allow anything the CLI itself would have. Built
+	// once at server start against the project root (os.Getwd()); the
+	// evaluator lazy-loads settings on first use and caches per-server.
+	perms *permissions.Evaluator
 }
 
 // idleTimeoutEphemeral is the lifecycle bound for a server spawned by a
@@ -102,8 +109,11 @@ const idleTimeoutEphemeral = 5 * time.Minute
 // crew: the ship never sleeps, only the mates do.
 const idleTimeoutFleeted = 1 * time.Hour
 
-// New constructs an empty server.
+// New constructs an empty server. The permissions evaluator is bound to the
+// current working directory — captains always start from the repo root, so
+// this is where `.claude/settings.json` lives.
 func New() *Server {
+	root, _ := os.Getwd()
 	return &Server{
 		live:         map[string]*liveProc{},
 		ptys:         map[string]*ptyProc{},
@@ -112,6 +122,7 @@ func New() *Server {
 		exited:       map[string]bool{},
 		stopCh:       make(chan struct{}),
 		beadsTrigger: make(chan struct{}, 1),
+		perms:        permissions.NewEvaluator(root),
 	}
 }
 
@@ -247,6 +258,9 @@ func (s *Server) Run(ctx context.Context) error {
 	idleBound := idleTimeoutEphemeral
 	if conf, err := project.LoadConfig(); err == nil {
 		s.startFleet(ctx, conf)
+		// Fleet-wide deny list: fetch once on boot and refresh every 5 min.
+		// No-op when the ship isn't wired to a fleet.
+		s.startFleetPolicy(ctx, conf)
 		if conf != nil && strings.TrimSpace(conf.Fleet.URL) != "" {
 			idleBound = idleTimeoutFleeted
 			s.mu.Lock()
@@ -371,22 +385,21 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 
 	// In headless -p mode there is no separate PermissionRequest event: the
 	// PreToolUse hook *is* the gate. It returns a permissionDecision of
-	// allow/deny. For risky tools we block on a human decision; everything else
-	// is auto-allowed. (An empty 200 would be treated as allow — never do that
-	// for a gated tool.)
+	// allow/deny/ask. The evaluator consults the persona's Claude Code
+	// settings.json rules and the built-in read-only allowlist; anything
+	// it would auto-decide is auto-decided here without waking the human.
+	// (An empty 200 would be treated as allow — never do that for a gated
+	// tool.)
 	if event == "PreToolUse" {
-		decision := "allow"
-		if gatedTool(text) && !personaPermissive(persona) {
-			decision = s.awaitDecision(persona, text, inputSummary)
-		}
+		decision, reason := s.decidePermission(persona, text, input, inputSummary)
 		out := map[string]any{
 			"hookSpecificOutput": map[string]any{
 				"hookEventName":      "PreToolUse",
 				"permissionDecision": decision,
 			},
 		}
-		if decision == "deny" {
-			out["hookSpecificOutput"].(map[string]any)["permissionDecisionReason"] = "denied via shipmates captain"
+		if reason != "" {
+			out["hookSpecificOutput"].(map[string]any)["permissionDecisionReason"] = reason
 		}
 		_ = json.NewEncoder(w).Encode(out)
 		return
@@ -395,15 +408,73 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("{}"))
 }
 
-// gatedTool reports whether a tool category requires human approval — shell
-// execution. Whether gating actually applies also depends on the persona's
-// permission mode (see personaPermissive).
-func gatedTool(tool string) bool {
-	switch tool {
-	case "Bash", "PowerShell":
-		return true
+// decidePermission is the PreToolUse decision engine. It short-circuits on
+// personas running in bypass mode, then consults the permissions evaluator
+// (which mirrors Claude Code's settings-driven rules). Only an "ask" verdict
+// blocks on the human — allow and deny both return immediately. All three
+// outcomes emit an event so the UI shows what was auto-decided and why.
+func (s *Server) decidePermission(persona, tool string, input map[string]any, inputSummary string) (string, string) {
+	// Persona in permissive/bypass mode: allow without evaluating rules.
+	// This preserves the existing escape hatch and skips even the deny
+	// list — the user asked for no gate.
+	if personaPermissive(persona) {
+		s.addEvent(Event{
+			Persona: persona, Type: "permission:auto-allow",
+			Text:  tool + ": bypass mode",
+			Tool:  tool, Input: inputSummary,
+		})
+		return "allow", ""
+	}
+
+	// Fall through to the settings evaluator. A nil evaluator (New wasn't
+	// used, or Getwd failed) degrades to the prior coarse behavior — ask
+	// on Bash/PowerShell, allow everything else.
+	if s.perms == nil {
+		if tool == "Bash" || tool == "PowerShell" {
+			decision := s.awaitDecision(persona, tool, inputSummary)
+			if decision == "deny" {
+				return "deny", "denied via shipmates captain"
+			}
+			return decision, ""
+		}
+		return "allow", ""
+	}
+
+	d := s.perms.EvaluateFor(persona, tool, input)
+	switch d.Effect {
+	case permissions.EffectAllow:
+		eventType := "permission:auto-allow"
+		if strings.HasPrefix(d.Reason, "time-boxed until ") {
+			eventType = "permission:time-box-allow"
+		}
+		s.addEvent(Event{
+			Persona: persona, Type: eventType,
+			Text:  tool + ": " + d.Reason,
+			Tool:  tool, Input: inputSummary,
+		})
+		return "allow", d.Reason
+	case permissions.EffectDeny:
+		s.addEvent(Event{
+			Persona: persona, Type: "permission:auto-deny",
+			Text:  tool + ": " + d.Reason,
+			Tool:  tool, Input: inputSummary,
+		})
+		return "deny", d.Reason
+	case permissions.EffectAsk:
+		// Human-gated path: block on awaitDecision, which posts a
+		// permission? event and waits for a resolve.
+		human := s.awaitDecision(persona, tool, inputSummary)
+		if human == "deny" {
+			return "deny", "denied by operator"
+		}
+		return human, "approved by operator"
 	default:
-		return false
+		// Belt-and-suspenders: unknown effect falls back to ask.
+		human := s.awaitDecision(persona, tool, inputSummary)
+		if human == "deny" {
+			return "deny", "denied by operator"
+		}
+		return human, ""
 	}
 }
 
@@ -515,10 +586,19 @@ func summarizeToolInput(tool string, input map[string]any) string {
 }
 
 // handleResolve delivers an allow/deny decision to a waiting permission request.
+//
+// When body.Behavior is "allow" and body.Duration is non-empty, the resolve
+// also registers a time-box on the evaluator: the operator's approval extends
+// to the same (persona, exact-command) tuple for the given duration, so
+// repeated iterations don't require re-approval. Duration is parsed with
+// Go's time.ParseDuration ("5m", "30m", "1h", etc.). A malformed duration is
+// treated as a one-time approve (log the error, honor the allow) — dropping
+// the request entirely would leave the crew wedged for no operator benefit.
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
 		Behavior string `json:"behavior"`
+		Duration string `json:"duration,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
@@ -535,6 +615,26 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such pending request", http.StatusNotFound)
 		return
 	}
+
+	// Register the time-box BEFORE unblocking the pending channel: the next
+	// tool call from this persona can race in as soon as awaitDecision
+	// returns, and we want it to see the grant.
+	if body.Behavior == "allow" && strings.TrimSpace(body.Duration) != "" && s.perms != nil {
+		if d, err := time.ParseDuration(body.Duration); err == nil && d > 0 {
+			tb := s.perms.RegisterTimeBox(p.persona, p.tool, p.input, d)
+			s.addEvent(Event{
+				Persona: p.persona,
+				Type:    "permission:time-box",
+				Text:    fmt.Sprintf("time-box %s until %s", p.tool, tb.ExpiresAt.Format(time.RFC3339)),
+				Tool:    p.tool,
+				Input:   p.input,
+				ID:      id,
+			})
+		} else {
+			slog.Warn("bad time-box duration on resolve", "id", id, "duration", body.Duration, "err", err)
+		}
+	}
+
 	p.ch <- body.Behavior
 	w.WriteHeader(http.StatusAccepted)
 }
