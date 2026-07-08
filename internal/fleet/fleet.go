@@ -50,8 +50,9 @@ type Server struct {
 	// already on the graph, so the work isn't lost, just un-nudged).
 	dispatchQ []queuedDispatch
 
-	store *store      // nil when --store wasn't passed
-	conv  *convConfig // nil unless voice/conversation flags are set
+	store  *store       // nil when --store wasn't passed
+	conv   *convConfig  // nil unless voice/conversation flags are set
+	policy *policyState // fleet-wide deny list source; served via /api/fleet-policy
 }
 
 // convConfig holds the runtime config for the voice surface: /api/conversation
@@ -97,6 +98,9 @@ type Options struct {
 	TTSModel    string // model field for OAI-style TTS servers
 	STTURL      string // optional transcription endpoint (whisper.cpp /inference or OAI /v1/audio/transcriptions); empty disables /api/stt
 	STTModel    string // model name forwarded to OAI-style STT servers; whisper.cpp ignores it
+	// PolicyPath overrides the on-disk fleet-policy YAML location. Empty =
+	// use the SHIPMATES_FLEET_POLICY env var or ~/.shipmates/fleet-policy.yaml.
+	PolicyPath string
 }
 
 // New constructs the fleet. The returned Server is ready to Run.
@@ -131,6 +135,12 @@ func New(opts Options) (*Server, error) {
 			b.conv.brain = newClaudeBrain(opts.LLMModel, opts.Addr, b.token)
 		}
 	}
+	b.policy = newPolicyState(opts.PolicyPath)
+	// Prime once so a malformed file surfaces in the fleet's own logs at
+	// startup rather than only on the first ship poll.
+	if _, err := b.policy.load(); err != nil {
+		slog.Warn("initial fleet-policy load failed (endpoint will retry per request)", "err", err)
+	}
 	b.dialer = remotedialer.New(b.authorize, remotedialer.DefaultErrorWriter)
 	return b, nil
 }
@@ -143,6 +153,7 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("POST /login", b.handleLogin)
 	mux.HandleFunc("POST /logout", b.handleLogout)
 	mux.HandleFunc("GET /api/captains", b.handleCaptains)
+	mux.HandleFunc("GET /api/fleet-policy", b.handleFleetPolicy)
 	mux.HandleFunc("GET /api/pending", b.handleAggregatePending)
 	mux.HandleFunc("GET /api/captain/{key}/feed", b.proxyGet("/feed"))
 	mux.HandleFunc("GET /api/captain/{key}/events", b.proxyGet("/events"))

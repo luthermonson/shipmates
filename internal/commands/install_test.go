@@ -2,11 +2,13 @@ package commands
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
+	"github.com/luthermonson/shipmates/internal/project"
 )
 
 func TestComposeAgent(t *testing.T) {
@@ -60,4 +62,48 @@ func TestComposeAgent(t *testing.T) {
 			t.Error("unknown routing name should leave base unchanged")
 		}
 	})
+}
+
+func TestAddPersona_VendorsPolicyYAML(t *testing.T) {
+	cat := catalog.New(fstest.MapFS{
+		"catalog/geordi/.claude/agents/geordi.md": {Data: []byte("---\nname: geordi\n---\n\n# Geordi\n")},
+		"catalog/geordi/policy.yaml": {Data: []byte("allow:\n  - Bash(git status)\ndeny:\n  - Bash(rm -rf /)\n")},
+	})
+	t.Chdir(t.TempDir())
+	// Prep the layout addPersona expects.
+	if err := os.MkdirAll(project.AgentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := addPersona(cat, "geordi"); err != nil {
+		t.Fatalf("addPersona: %v", err)
+	}
+	// Policy should have landed under .shipmates/policies/.
+	polPath := filepath.Join(".shipmates", "policies", "geordi.yaml")
+	b, err := os.ReadFile(polPath)
+	if err != nil {
+		t.Fatalf("expected vendored policy at %s: %v", polPath, err)
+	}
+	if !strings.Contains(string(b), "Bash(rm -rf /)") {
+		t.Errorf("vendored policy missing content: %s", string(b))
+	}
+}
+
+func TestAddPersona_NoPolicyYAMLIsFine(t *testing.T) {
+	// Personas without a policy.yaml must install cleanly and NOT create an
+	// empty policy file — that would be a footgun for operators wondering
+	// what's in the empty file.
+	cat := catalog.New(fstest.MapFS{
+		"catalog/geordi/.claude/agents/geordi.md": {Data: []byte("---\nname: geordi\n---\n\n# Geordi\n")},
+	})
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(project.AgentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := addPersona(cat, "geordi"); err != nil {
+		t.Fatalf("addPersona: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(".shipmates", "policies", "geordi.yaml")); !os.IsNotExist(err) {
+		t.Errorf("no-policy persona should not create a policy file (err=%v)", err)
+	}
 }
