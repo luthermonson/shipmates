@@ -12,59 +12,59 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luthermonson/shipmates/internal/bridge"
+	"github.com/luthermonson/shipmates/internal/fleet"
 	"github.com/urfave/cli/v3"
 )
 
-// Bridge is the central-rendezvous subcommand tree:
+// Fleet is the central-rendezvous subcommand tree:
 //
-//	shipmates bridge serve     — run the rendezvous server
-//	shipmates bridge ls        — list connected leads
-//	shipmates bridge tail      — tail a lead's event feed (one-shot)
-//	shipmates bridge tell      — inject a message to a crew persona via a lead
-//	shipmates bridge pending   — list pending permission prompts on a lead
-//	shipmates bridge resolve   — allow/deny a pending permission prompt
+//	shipmates fleet serve     — run the rendezvous server
+//	shipmates fleet ls        — list connected captains
+//	shipmates fleet tail      — tail a captain's event feed (one-shot)
+//	shipmates fleet tell      — inject a message to a crew persona via a captain
+//	shipmates fleet pending   — list pending permission prompts on a captain
+//	shipmates fleet resolve   — allow/deny a pending permission prompt
 //
-// The operator commands talk to the *bridge*'s local HTTP API (env
-// SHIPMATES_BRIDGE_URL, default http://127.0.0.1:8443). The bridge then proxies
-// through its remotedialer tunnel back to the named lead's localhost server.
+// The operator commands talk to the *fleet*'s local HTTP API (env
+// SHIPMATES_FLEET_URL, default http://127.0.0.1:8443). The fleet then proxies
+// through its remotedialer tunnel back to the named captain's localhost server.
 //
-// Auth: the shared secret is read from $SHIPMATES_BRIDGE_TOKEN, or via
+// Auth: the shared secret is read from $SHIPMATES_FLEET_TOKEN, or via
 // --token-file <path>, and sent as Authorization: Bearer on every request. No
-// --token flag (cmdline visibility). Empty token = no auth (matches a bridge
+// --token flag (cmdline visibility). Empty token = no auth (matches a fleet
 // started without a token, dev only).
-func Bridge() *cli.Command {
+func Fleet() *cli.Command {
 	return &cli.Command{
-		Name:  "bridge",
+		Name:  "fleet",
 		Usage: "central rendezvous for many shipmates leads",
 		Commands: []*cli.Command{
-			bridgeServe(),
-			bridgeLs(),
-			bridgeTail(),
-			bridgeTell(),
-			bridgePending(),
-			bridgeResolve(),
-			bridgeStatus(),
-			bridgeBeads(),
-			bridgeDispatch(),
+			fleetServe(),
+			fleetLs(),
+			fleetTail(),
+			fleetTell(),
+			fleetPending(),
+			fleetResolve(),
+			fleetStatus(),
+			fleetBeads(),
+			fleetDispatch(),
 		},
 	}
 }
 
-// operatorFlags are the shared --bridge URL + --token-file flags every
+// operatorFlags are the shared --fleet URL + --token-file flags every
 // operator command needs. Defined once so we don't drift across subcommands.
 func operatorFlags() []cli.Flag {
 	return []cli.Flag{
-		&cli.StringFlag{Name: "bridge", Sources: cli.EnvVars("SHIPMATES_BRIDGE_URL"), Value: "http://127.0.0.1:8443", Usage: "bridge URL"},
-		&cli.StringFlag{Name: "token-file", Usage: "read the bridge token from this file (overrides $SHIPMATES_BRIDGE_TOKEN)"},
+		&cli.StringFlag{Name: "fleet", Sources: cli.EnvVars("SHIPMATES_FLEET_URL"), Value: "http://127.0.0.1:8443", Usage: "fleet URL"},
+		&cli.StringFlag{Name: "token-file", Usage: "read the fleet token from this file (overrides $SHIPMATES_FLEET_TOKEN)"},
 	}
 }
 
-func bridgeServe() *cli.Command {
+func fleetServe() *cli.Command {
 	return &cli.Command{
 		Name:  "serve",
-		Usage: "run the bridge HTTP/websocket server",
-		Description: "Shared secret is read from $SHIPMATES_BRIDGE_TOKEN, or from the\n" +
+		Usage: "run the fleet HTTP/websocket server",
+		Description: "Shared secret is read from $SHIPMATES_FLEET_TOKEN, or from the\n" +
 			"file named by --token-file. The secret is never accepted as a CLI flag —\n" +
 			"that would put it in ps/cmdline. Empty token disables auth (dev only).",
 		Flags: []cli.Flag{
@@ -82,11 +82,11 @@ func bridgeServe() *cli.Command {
 			&cli.StringFlag{Name: "stt-model", Sources: cli.EnvVars("STT_MODEL"), Usage: "model field for OAI-style STT servers (whisper.cpp ignores it)"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
-			token, err := loadBridgeToken(c.String("token-file"))
+			token, err := loadFleetToken(c.String("token-file"))
 			if err != nil {
 				return err
 			}
-			b, err := bridge.New(bridge.Options{
+			b, err := fleet.New(fleet.Options{
 				Addr:        c.String("addr"),
 				Token:       token,
 				Store:       c.String("store"),
@@ -109,11 +109,11 @@ func bridgeServe() *cli.Command {
 	}
 }
 
-// loadBridgeToken resolves the bridge's shared secret with this precedence:
-// --token-file (if set) > $SHIPMATES_BRIDGE_TOKEN > empty (no auth). Reading
+// loadFleetToken resolves the fleet's shared secret with this precedence:
+// --token-file (if set) > $SHIPMATES_FLEET_TOKEN > empty (no auth). Reading
 // from a file is preferred on shared hosts where same-uid processes can read
 // /proc/<pid>/environ.
-func loadBridgeToken(file string) (string, error) {
+func loadFleetToken(file string) (string, error) {
 	if file = strings.TrimSpace(file); file != "" {
 		b, err := os.ReadFile(file)
 		if err != nil {
@@ -121,20 +121,20 @@ func loadBridgeToken(file string) (string, error) {
 		}
 		return strings.TrimSpace(string(b)), nil
 	}
-	return strings.TrimSpace(os.Getenv("SHIPMATES_BRIDGE_TOKEN")), nil
+	return strings.TrimSpace(os.Getenv("SHIPMATES_FLEET_TOKEN")), nil
 }
 
-func bridgeLs() *cli.Command {
+func fleetLs() *cli.Command {
 	return &cli.Command{
 		Name:  "ls",
-		Usage: "list leads known to the bridge",
+		Usage: "list captains known to the fleet",
 		Flags: operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
-			body, err := bridgeGet(ctx, c,"/api/leads")
+			body, err := fleetGet(ctx, c,"/api/captains")
 			if err != nil {
 				return err
 			}
-			var leads []struct {
+			var captains []struct {
 				ClientKey string    `json:"client_key"`
 				Repo      string    `json:"repo"`
 				Persona   string    `json:"persona"`
@@ -143,14 +143,14 @@ func bridgeLs() *cli.Command {
 				LastSeen  time.Time `json:"last_seen"`
 				Connected bool      `json:"connected"`
 			}
-			if err := json.Unmarshal(body, &leads); err != nil {
-				return fmt.Errorf("decode leads: %w", err)
+			if err := json.Unmarshal(body, &captains); err != nil {
+				return fmt.Errorf("decode captains: %w", err)
 			}
-			if len(leads) == 0 {
-				fmt.Println("(no leads connected)")
+			if len(captains) == 0 {
+				fmt.Println("(no captains connected)")
 				return nil
 			}
-			for _, l := range leads {
+			for _, l := range captains {
 				state := "offline"
 				if l.Connected {
 					state = "online"
@@ -162,18 +162,18 @@ func bridgeLs() *cli.Command {
 	}
 }
 
-func bridgeTail() *cli.Command {
+func fleetTail() *cli.Command {
 	return &cli.Command{
 		Name:      "tail",
-		Usage:     "tail a lead's event feed (one-shot snapshot of the live feed)",
-		ArgsUsage: "<lead-key>",
+		Usage:     "tail a captain's event feed (one-shot snapshot of the live feed)",
+		ArgsUsage: "<captain-key>",
 		Flags: operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			key := c.Args().First()
 			if key == "" {
-				return errors.New("usage: shipmates bridge tail <lead-key>")
+				return errors.New("usage: shipmates fleet tail <captain-key>")
 			}
-			body, err := bridgeGet(ctx, c,"/api/lead/"+key+"/feed")
+			body, err := fleetGet(ctx, c,"/api/captain/"+key+"/feed")
 			if err != nil {
 				return err
 			}
@@ -183,38 +183,38 @@ func bridgeTail() *cli.Command {
 	}
 }
 
-func bridgeTell() *cli.Command {
+func fleetTell() *cli.Command {
 	return &cli.Command{
 		Name:      "tell",
-		Usage:     "inject a message to a persona on a connected lead",
-		ArgsUsage: "<lead-key> <persona> <message>",
+		Usage:     "inject a message to a persona on a connected captain",
+		ArgsUsage: "<captain-key> <persona> <message>",
 		Flags: operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			args := c.Args().Slice()
 			if len(args) < 3 {
-				return errors.New("usage: shipmates bridge tell <lead-key> <persona> <message>")
+				return errors.New("usage: shipmates fleet tell <captain-key> <persona> <message>")
 			}
 			key, persona := args[0], args[1]
 			msg := strings.Join(args[2:], " ")
 			payload, _ := json.Marshal(map[string]string{"message": msg})
-			_, err := bridgePost(ctx, c,"/api/lead/"+key+"/tell/"+persona, payload)
+			_, err := fleetPost(ctx, c,"/api/captain/"+key+"/tell/"+persona, payload)
 			return err
 		},
 	}
 }
 
-func bridgePending() *cli.Command {
+func fleetPending() *cli.Command {
 	return &cli.Command{
 		Name:      "pending",
-		Usage:     "list pending permission prompts on a lead",
-		ArgsUsage: "<lead-key>",
+		Usage:     "list pending permission prompts on a captain",
+		ArgsUsage: "<captain-key>",
 		Flags: operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			key := c.Args().First()
 			if key == "" {
-				return errors.New("usage: shipmates bridge pending <lead-key>")
+				return errors.New("usage: shipmates fleet pending <captain-key>")
 			}
-			body, err := bridgeGet(ctx, c,"/api/lead/"+key+"/pending")
+			body, err := fleetGet(ctx, c,"/api/captain/"+key+"/pending")
 			if err != nil {
 				return err
 			}
@@ -224,35 +224,35 @@ func bridgePending() *cli.Command {
 	}
 }
 
-func bridgeResolve() *cli.Command {
+func fleetResolve() *cli.Command {
 	return &cli.Command{
 		Name:      "resolve",
-		Usage:     "allow|deny a pending permission prompt on a lead",
-		ArgsUsage: "<lead-key> <id> allow|deny",
+		Usage:     "allow|deny a pending permission prompt on a captain",
+		ArgsUsage: "<captain-key> <id> allow|deny",
 		Flags: operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			args := c.Args().Slice()
 			if len(args) < 3 {
-				return errors.New("usage: shipmates bridge resolve <lead-key> <id> allow|deny")
+				return errors.New("usage: shipmates fleet resolve <captain-key> <id> allow|deny")
 			}
 			key, id, behavior := args[0], args[1], args[2]
 			if behavior != "allow" && behavior != "deny" {
 				return fmt.Errorf("behavior must be allow|deny, got %q", behavior)
 			}
 			payload, _ := json.Marshal(map[string]string{"behavior": behavior})
-			_, err := bridgePost(ctx, c,"/api/lead/"+key+"/resolve/"+id, payload)
+			_, err := fleetPost(ctx, c,"/api/captain/"+key+"/resolve/"+id, payload)
 			return err
 		},
 	}
 }
 
-func bridgeStatus() *cli.Command {
+func fleetStatus() *cli.Command {
 	return &cli.Command{
 		Name:  "status",
 		Usage: "per-mate status dots across every connected ship",
 		Flags: operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
-			body, err := bridgeGet(ctx, c, "/api/status")
+			body, err := fleetGet(ctx, c, "/api/status")
 			if err != nil {
 				return err
 			}
@@ -272,18 +272,18 @@ func bridgeStatus() *cli.Command {
 	}
 }
 
-func bridgeBeads() *cli.Command {
+func fleetBeads() *cli.Command {
 	return &cli.Command{
 		Name:      "beads",
 		Usage:     "list open beads (fleet-wide, or one ship's graph)",
-		ArgsUsage: "[lead-key]",
+		ArgsUsage: "[captain-key]",
 		Flags:     operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			path := "/api/beads"
 			if key := c.Args().First(); key != "" {
-				path = "/api/lead/" + key + "/beads"
+				path = "/api/captain/" + key + "/beads"
 			}
-			body, err := bridgeGet(ctx, c, path)
+			body, err := fleetGet(ctx, c, path)
 			if err != nil {
 				return err
 			}
@@ -317,19 +317,19 @@ func bridgeBeads() *cli.Command {
 	}
 }
 
-func bridgeDispatch() *cli.Command {
+func fleetDispatch() *cli.Command {
 	return &cli.Command{
 		Name:      "dispatch",
 		Usage:     "assign a bead to persona@ship and wake the mate to work it",
-		ArgsUsage: "<carrying-lead-key> <bead-id> <target-lead-key> <persona>",
+		ArgsUsage: "<carrying-captain-key> <bead-id> <target-captain-key> <persona>",
 		Flags:     operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			args := c.Args().Slice()
 			if len(args) < 4 {
-				return errors.New("usage: shipmates bridge dispatch <carrying-lead-key> <bead-id> <target-lead-key> <persona>")
+				return errors.New("usage: shipmates fleet dispatch <carrying-captain-key> <bead-id> <target-captain-key> <persona>")
 			}
 			payload, _ := json.Marshal(map[string]string{"ship": args[2], "persona": args[3]})
-			out, err := bridgePost(ctx, c, "/api/lead/"+args[0]+"/bead/"+args[1]+"/assign", payload)
+			out, err := fleetPost(ctx, c, "/api/captain/"+args[0]+"/bead/"+args[1]+"/assign", payload)
 			if err != nil {
 				return err
 			}
@@ -340,20 +340,20 @@ func bridgeDispatch() *cli.Command {
 	}
 }
 
-// bridgeGet/bridgePost issue requests to the bridge's local HTTP API,
+// fleetGet/fleetPost issue requests to the fleet's local HTTP API,
 // authenticated via Authorization: Bearer (token resolved from --token-file
-// or $SHIPMATES_BRIDGE_TOKEN). 401 surfaces as a clean "unauthorized" error
+// or $SHIPMATES_FLEET_TOKEN). 401 surfaces as a clean "unauthorized" error
 // so the operator knows it's an auth problem, not a network issue.
-func bridgeGet(ctx context.Context, c *cli.Command, path string) ([]byte, error) {
-	return bridgeDo(ctx, c, "GET", path, nil)
+func fleetGet(ctx context.Context, c *cli.Command, path string) ([]byte, error) {
+	return fleetDo(ctx, c, "GET", path, nil)
 }
 
-func bridgePost(ctx context.Context, c *cli.Command, path string, body []byte) ([]byte, error) {
-	return bridgeDo(ctx, c, "POST", path, body)
+func fleetPost(ctx context.Context, c *cli.Command, path string, body []byte) ([]byte, error) {
+	return fleetDo(ctx, c, "POST", path, body)
 }
 
-func bridgeDo(ctx context.Context, c *cli.Command, method, path string, body []byte) ([]byte, error) {
-	base := strings.TrimRight(c.String("bridge"), "/")
+func fleetDo(ctx context.Context, c *cli.Command, method, path string, body []byte) ([]byte, error) {
+	base := strings.TrimRight(c.String("fleet"), "/")
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -365,7 +365,7 @@ func bridgeDo(ctx context.Context, c *cli.Command, method, path string, body []b
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	token, err := loadBridgeToken(c.String("token-file"))
+	token, err := loadFleetToken(c.String("token-file"))
 	if err != nil {
 		return nil, err
 	}
@@ -379,10 +379,10 @@ func bridgeDo(ctx context.Context, c *cli.Command, method, path string, body []b
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusUnauthorized {
-		return out, fmt.Errorf("unauthorized — set $SHIPMATES_BRIDGE_TOKEN or pass --token-file")
+		return out, fmt.Errorf("unauthorized — set $SHIPMATES_FLEET_TOKEN or pass --token-file")
 	}
 	if resp.StatusCode >= 300 {
-		return out, fmt.Errorf("bridge %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
+		return out, fmt.Errorf("fleet %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
 	}
 	return out, nil
 }

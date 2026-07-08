@@ -1,4 +1,4 @@
-package bridge
+package fleet
 
 import (
 	"bytes"
@@ -21,7 +21,7 @@ import (
 // at speech.platform.bing.com. The auth model is a hard-coded Trusted Client
 // Token plus a time-derived SHA256 token (Sec-MS-GEC) that Microsoft added in
 // 2024 to deter unofficial use. Both are well-documented in the open-source
-// edge-tts community. We use the same approach here so the bridge can speak
+// edge-tts community. We use the same approach here so the fleet can speak
 // with Microsoft's neural voices on mobile, where browser SpeechSynthesis is
 // unreliable. If Microsoft ever rotates the token or hardens auth, swap to
 // Piper (offline) or the official Azure Speech Service.
@@ -169,7 +169,7 @@ func escapeSSML(s string) string {
 }
 
 // genUUID is a thin wrapper so this file is self-contained. We can't import
-// project.NewUUID here (cyclic via server→project→...→bridge); reproduce the
+// project.NewUUID here (cyclic via server→project→...→fleet); reproduce the
 // same v4 logic.
 func genUUID() string {
 	var b [16]byte
@@ -192,13 +192,13 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// handleTTS is the bridge's /api/tts endpoint. The conversation UI POSTs the
+// handleTTS is the fleet's /api/tts endpoint. The conversation UI POSTs the
 // reply text after every turn and gets back MP3 bytes to play via <audio>.
 // We use POST not GET because long replies can exceed URL length limits, and
 // because TTS is conceptually a synthesis operation, not a fetch.
 func (b *Server) handleTTS(w http.ResponseWriter, r *http.Request) {
 	if b.conv == nil || (b.conv.voice == "" && b.conv.ttsURL == "") {
-		http.Error(w, "tts disabled — bridge serve --tts-voice or --tts-url required", http.StatusServiceUnavailable)
+		http.Error(w, "tts disabled — fleet serve --tts-voice or --tts-url required", http.StatusServiceUnavailable)
 		return
 	}
 	var req struct {

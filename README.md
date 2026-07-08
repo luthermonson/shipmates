@@ -2,7 +2,7 @@
 
 **Subagents that remember.**
 
-A toolkit for assembling a small crew of role-specialized AI personas — architect, security, frontend, backend, tester, lead — that accumulate per-project memory across sessions. Two weeks in, the architect reviewing your PR doesn't just see the diff. It sees the diff against a remembered project: *"This re-introduces the pattern we rejected in #45 because X — has anything changed?"*
+A toolkit for assembling a small crew of role-specialized AI personas — architect, security, frontend, backend, tester, captain — that accumulate per-project memory across sessions. Two weeks in, the architect reviewing your PR doesn't just see the diff. It sees the diff against a remembered project: *"This re-introduces the pattern we rejected in #45 because X — has anything changed?"*
 
 That's not a 10% better review. That's review on a different cognitive axis (architectural consistency over time) that headless persona catalogs can't reach.
 
@@ -35,7 +35,7 @@ Shipmates drives the `claude` CLI, so make sure [Claude Code](https://claude.com
 
 ```bash
 # scaffold the project and install the full crew
-shipmates init --crew lead,architect,security,frontend,backend,tester
+shipmates init --crew captain,architect,security,frontend,backend,tester
 shipmates list
 ```
 
@@ -52,14 +52,14 @@ shipmates tell security "double-check PR 10"
 shipmates feed                 # watch its activity + replies
 
 # 3. an interactive session as the persona (honors its config)
-shipmates open lead
+shipmates open captain
 ```
 
 Or, inside any Claude Code session, invoke a persona via the Agent tool (e.g. "have security review the diff") or launch directly with `claude --agent security`.
 
-## The live lead-and-crew channel
+## The live captain-and-crew channel
 
-The standout feature, working end-to-end: a **lead** session spawns a small local coordination server, and you dispatch **crew** that run as live Claude Code processes you can steer and supervise.
+The standout feature, working end-to-end: a **captain** session spawns a small local coordination server, and you dispatch **crew** (individual **mates**) that run as live Claude Code processes you can steer and supervise.
 
 ```bash
 shipmates tell security "audit the auth middleware"   # auto-spawns server + crew
@@ -89,7 +89,7 @@ Crew tool activity streams to `feed` via Claude Code HTTP hooks, and the human-i
 | `fanout <a,b> <prompt>` | run the same prompt across personas in parallel |
 | `drain <p>` | dispatch a persona to drain its work queue, then exit (`--cap N`) |
 | `drain-many <p...> \| --all` | drain several personas in parallel (`--max-concurrent N`) |
-| `autonomous --print-charter` | print a lead scheduler charter to feed into cron / CronCreate / Actions |
+| `autonomous --print-charter` | print a captain scheduler charter to feed into cron / CronCreate / Actions |
 | `routing apply <file>... \| --all` | compose the routing block into custom (non-catalog) persona files |
 | `routing show` | print the active routing block (what `/sync-routing` loads) |
 | `server stop` | shut down the transient coordination server |
@@ -98,11 +98,11 @@ Opt-in **GitHub routing** (`routing: github` in `shipmates.yaml`) composes claim
 
 ## The starter crew
 
-Six personas, opinionated, engineering-department flavored. Rename any of them to fit your team — "lead" can become "captain," "skipper," "PM," whatever.
+Six personas, opinionated, engineering-department flavored. Rename any of them to fit your team — "captain" can become "skipper," "PM," "lead," whatever.
 
 | Persona | Owns |
 |---|---|
-| **lead** | Strategy, direction, push-back. The human + AI partnership in the chair. Doesn't ship code. |
+| **captain** | Strategy, direction, push-back. The human + AI partnership in the chair. Doesn't ship code. |
 | **architect** | Cross-cutting design, docs, consistency over time |
 | **security** | OWASP, dep hygiene, secret detection, auth patterns |
 | **frontend** | UI, accessibility, perf, browser concerns |
@@ -123,12 +123,13 @@ Shipmates fills exactly one gap: **persona + persistent project memory + opinion
 
 ## Deeper reading
 
-- [`docs/architecture.md`](docs/architecture.md) — the working architecture doc (persona format, memory model, lifecycle, lead-and-crew shape, open questions)
+- [`docs/architecture.md`](docs/architecture.md) — the working architecture doc (persona format, memory model, lifecycle, captain-and-crew shape, open questions)
+- [`docs/fleet-architecture.md`](docs/fleet-architecture.md) — Fleet Command + multi-ship architecture (tunnels, PTY panes, shared beads memory, the Admiral/Commodore voice loop)
 - [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) — why persistent memory changes review quality, with a worked case study
 
 ## Status
 
-Early but working. The Go CLI is implemented — `init`, `add`, `list`, `update`, `remove`, `render`, `ask`, `tell`, `feed`, `pending`/`allow`/`deny`, `open`, `fanout`, and the coordination `server`. The lead↔crew loop (dispatch → live steer → observe tool use → human-in-the-loop approval) is verified end-to-end against Claude Code. Six starter personas ship in the embedded catalog.
+Early but working. The Go CLI is implemented — `init`, `add`, `list`, `update`, `remove`, `render`, `ask`, `tell`, `feed`, `pending`/`allow`/`deny`, `open`, `fanout`, and the coordination `server`. The captain↔crew loop (dispatch → live steer → observe tool use → human-in-the-loop approval) is verified end-to-end against Claude Code. Six starter personas ship in the embedded catalog.
 
 Per-project config lives in `shipmates.yaml`: a `crew:` map overrides each persona's permission mode, `dangerouslySkipPermissions`, and `remoteControl` (overrides win over the persona file's frontmatter). `render --write` exports thin targets to their canonical files (`.cursor/rules/<p>.mdc`, marked sections in `AGENTS.md` / `.windsurf/rules.md`). Dependencies are intentionally tiny — `urfave/cli` and `yaml.v3`, everything else standard library.
 

@@ -10,7 +10,7 @@ import (
 
 // RepoWebURL returns the project's browsable repository URL, derived from the
 // git origin remote. Empty when the project isn't a git repo or has no origin.
-// The bridge UI uses it to make bead external_refs (gh-<n>) clickable.
+// The fleet UI uses it to make bead external_refs (gh-<n>) clickable.
 //
 // It reads .git/config directly rather than exec'ing git: supervised leads
 // run in service-ish environments (Scheduled Task at logon) where the git

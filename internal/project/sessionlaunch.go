@@ -4,7 +4,7 @@ import "log/slog"
 
 // SessionLaunch resolves a persona's session-identity args for a claude
 // spawn — the single source of truth shared by ask/drain/open/fanout (via
-// the commands package) AND the lead server's live/PTY mates, so every
+// the commands package) AND the captain server's live/PTY mates, so every
 // surface continues ONE long-term conversation per shipmate instead of
 // forking per-surface histories.
 //

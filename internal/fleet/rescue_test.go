@@ -1,11 +1,11 @@
-package bridge
+package fleet
 
 import "testing"
 
 func TestRescueTextToolCalls(t *testing.T) {
-	content := "Tell_lead will wake up the leads. Starting with \"homelab:lead\".\n\n" +
-		"Tell_lead {\"lead_key\": \"homelab:lead\", \"persona\": \"lead\", \"message\": \"/standup\"}.\n" +
-		"tell_lead {\"lead_key\": \"laptop:lead\", \"persona\": \"lead\", \"message\": \"/standup\"}\n" +
+	content := "Tell_captain will wake up the captains. Starting with \"homelab:captain\".\n\n" +
+		"Tell_captain {\"captain_key\": \"homelab:captain\", \"persona\": \"captain\", \"message\": \"/standup\"}.\n" +
+		"tell_captain {\"captain_key\": \"laptop:captain\", \"persona\": \"captain\", \"message\": \"/standup\"}\n" +
 		"not_a_tool {\"x\": 1}\n" +
 		"fleet_status {broken json}\n"
 	got := rescueTextToolCalls(content)
@@ -13,10 +13,10 @@ func TestRescueTextToolCalls(t *testing.T) {
 		t.Fatalf("want 2 rescued calls, got %d: %+v", len(got), got)
 	}
 	for i, tc := range got {
-		if tc.Function.Name != "tell_lead" {
+		if tc.Function.Name != "tell_captain" {
 			t.Errorf("call %d name = %q", i, tc.Function.Name)
 		}
-		if tc.Args()["lead_key"] == "" {
+		if tc.Args()["captain_key"] == "" {
 			t.Errorf("call %d lost its arguments", i)
 		}
 	}

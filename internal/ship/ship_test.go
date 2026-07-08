@@ -41,11 +41,11 @@ func TestLoadConfigNoUsableProjects(t *testing.T) {
 func TestEnvIndirection(t *testing.T) {
 	t.Setenv("SHIP_TEST_SECRET", "s3cret")
 	c := &Config{
-		Env: map[string]string{"HOST_LEVEL": "on", "SHIPMATES_BRIDGE_TOKEN": "${SHIP_TEST_SECRET}"},
+		Env: map[string]string{"HOST_LEVEL": "on", "SHIPMATES_FLEET_TOKEN": "${SHIP_TEST_SECRET}"},
 	}
 	p := Project{Dir: ".", Env: map[string]string{"HOST_LEVEL": "overridden"}}
 	env := c.env(p)
-	for _, want := range []string{"SHIPMATES_BRIDGE_TOKEN=s3cret", "HOST_LEVEL=overridden"} {
+	for _, want := range []string{"SHIPMATES_FLEET_TOKEN=s3cret", "HOST_LEVEL=overridden"} {
 		if !slices.Contains(env, want) {
 			t.Errorf("env missing %q", want)
 		}

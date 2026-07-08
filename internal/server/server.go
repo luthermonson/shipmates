@@ -1,6 +1,6 @@
-// Package server implements the transient, lead-spawned coordination server.
+// Package server implements the transient, captain-spawned coordination server.
 // It brokers messages in both directions: crew -> server (hooks post activity
-// and permission requests) and lead -> crew (`shipmates tell` injects messages
+// and permission requests) and captain -> crew (`shipmates tell` injects messages
 // into a live crew process's stdin over the stream-json channel).
 package server
 
@@ -71,8 +71,8 @@ type Server struct {
 
 	refs         int           // active /register count
 	lastActivity time.Time     // last register/deregister/event (guarded by s.mu)
-	idleBound    time.Duration // chosen in Run, based on whether a bridge is configured
-	bridged      bool          // wired to a central bridge (changes idle behavior)
+	idleBound    time.Duration // chosen in Run, based on whether a fleet is configured
+	fleeted      bool          // wired to a central fleet (changes idle behavior)
 
 	// beads real-time sync state (see beads.go). beadsTrigger wakes the sync
 	// loop ahead of its heartbeat; beadsDirty marks "local writes to
@@ -82,10 +82,10 @@ type Server struct {
 	beadsSig     string
 	beadsTrigger chan struct{}
 
-	// bridge identity for lead→bridge callbacks (set by startBridge)
-	bridgeURL   string
-	bridgeToken string
-	bridgeKey   string
+	// fleet identity for captain→fleet callbacks (set by startFleet)
+	fleetURL   string
+	fleetToken string
+	fleetKey   string
 }
 
 // idleTimeoutEphemeral is the lifecycle bound for a server spawned by a
@@ -93,14 +93,14 @@ type Server struct {
 // self-terminates. Kept short so abandoned scratch processes don't linger.
 const idleTimeoutEphemeral = 5 * time.Minute
 
-// idleTimeoutBridged is the longer bound used when the lead is wired to a
-// central bridge. A bridged lead does NOT exit on idle — exiting severs the
-// tunnel and leaves nothing on the ship for the bridge to wake. Instead the
+// idleTimeoutFleeted is the longer bound used when the captain is wired to a
+// central fleet. A fleeted captain does NOT exit on idle — exiting severs the
+// tunnel and leaves nothing on the ship for the fleet to wake. Instead the
 // idle bound reaps the crew processes (the actual resource cost: idle claude
-// processes) while the lead itself — a tiny HTTP server plus a websocket —
-// stays connected. Any tell or PTY start through the bridge spawns fresh
+// processes) while the captain itself — a tiny HTTP server plus a websocket —
+// stays connected. Any tell or PTY start through the fleet spawns fresh
 // crew: the ship never sleeps, only the mates do.
-const idleTimeoutBridged = 1 * time.Hour
+const idleTimeoutFleeted = 1 * time.Hour
 
 // New constructs an empty server.
 func New() *Server {
@@ -219,12 +219,12 @@ func (s *Server) Run(ctx context.Context) error {
 				s.mu.Lock()
 				idle := time.Since(s.lastActivity)
 				bound := s.idleBound
-				bridged := s.bridged
+				fleeted := s.fleeted
 				s.mu.Unlock()
 				if idle > bound {
-					if bridged {
+					if fleeted {
 						// reap idle crew but keep the ship reachable — the
-						// bridge can wake it with a tell/pty-start any time
+						// fleet can wake it with a tell/pty-start any time
 						slog.Info("idle timeout: reaping crew, staying connected", "idle", idle)
 						s.closeLive()
 						s.closePTYs()
@@ -241,16 +241,16 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Open the outbound bridge connection if one is configured. No-op when not.
-	// The bridge can then dial back through the tunnel to reach this server's
-	// localhost endpoints (which the bridge proxies under its /api/* surface).
+	// Open the outbound fleet connection if one is configured. No-op when not.
+	// The fleet can then dial back through the tunnel to reach this server's
+	// localhost endpoints (which the fleet proxies under its /api/* surface).
 	idleBound := idleTimeoutEphemeral
 	if conf, err := project.LoadConfig(); err == nil {
-		s.startBridge(ctx, conf)
-		if conf != nil && strings.TrimSpace(conf.Bridge.URL) != "" {
-			idleBound = idleTimeoutBridged
+		s.startFleet(ctx, conf)
+		if conf != nil && strings.TrimSpace(conf.Fleet.URL) != "" {
+			idleBound = idleTimeoutFleeted
 			s.mu.Lock()
-			s.bridged = true
+			s.fleeted = true
 			s.mu.Unlock()
 		}
 	}
@@ -283,7 +283,7 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleEventsJSON returns the full event slice as JSON. Used by the bridge to
+// handleEventsJSON returns the full event slice as JSON. Used by the fleet to
 // poll for new events to mirror into its SQLite store; also handy for any
 // programmatic consumer that wants structured data instead of pre-formatted
 // text lines (which is what handleFeed gives you).
@@ -386,7 +386,7 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 		if decision == "deny" {
-			out["hookSpecificOutput"].(map[string]any)["permissionDecisionReason"] = "denied via shipmates lead/captain"
+			out["hookSpecificOutput"].(map[string]any)["permissionDecisionReason"] = "denied via shipmates captain"
 		}
 		_ = json.NewEncoder(w).Encode(out)
 		return
@@ -469,8 +469,8 @@ func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePendingJSON is the structured form of /pending: an array the bridge
-// can ingest without parsing text. Used by the bridge's /api/pending aggregator
+// handlePendingJSON is the structured form of /pending: an array the fleet
+// can ingest without parsing text. Used by the fleet's /api/pending aggregator
 // to populate the UI's permission pane.
 func (s *Server) handlePendingJSON(w http.ResponseWriter, r *http.Request) {
 	type wire struct {
@@ -543,7 +543,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 // tool-use hooks back to this server, tagged with the persona.
 //
 // gate=true installs the blocking PreToolUse permission hook — right for
-// headless mates, where nobody sees a prompt and the bridge's pending pane is
+// headless mates, where nobody sees a prompt and the fleet's pending pane is
 // the only approval surface. gate=false is observe-only (PostToolUse): right
 // for PTY mates, where interactive claude renders its own y/n permission
 // prompt in the terminal the operator is already looking at.

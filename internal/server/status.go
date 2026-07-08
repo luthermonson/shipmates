@@ -72,7 +72,7 @@ func (s *Server) computeStatus(now time.Time) []MateStatus {
 		personas[p] = true
 	}
 	// Installed-but-never-run crew show as "off" so the whole roster is
-	// visible (and addressable) from the bridge, not just personas with
+	// visible (and addressable) from the fleet, not just personas with
 	// process history.
 	for _, p := range crewPersonas() {
 		personas[p] = true

@@ -1,7 +1,7 @@
-// Voice + text conversation with the bridge's captain's mate.
+// Voice + text conversation with the fleet's captain's mate.
 //
 // Mic path v2: Web Audio capture → 16kHz mono WAV → POST /api/stt → whisper
-// on the bridge side. The Web Speech API this replaced was the reason voice
+// on the fleet side. The Web Speech API this replaced was the reason voice
 // mode got parked — SpeechRecognition is unreliable-to-absent on iOS, while
 // getUserMedia + AudioContext work everywhere. WAV (not MediaRecorder's
 // aac/opus containers) so whisper.cpp decodes it without ffmpeg.
@@ -13,17 +13,17 @@ const hint = document.getElementById("hint");
 
 let history = []; // chat history kept in memory for this session only
 
-// capability probe: grey out what the bridge wasn't started with
+// capability probe: grey out what the fleet wasn't started with
 let caps = { conversation: true, tts: true, stt: true };
 fetch("/api/voice/config").then((r) => r.ok ? r.json() : caps).then((c) => {
   caps = c;
   if (!caps.stt) {
     mic.disabled = true;
-    mic.title = "bridge started without --stt-url";
-    hint.textContent = "voice input not configured on the bridge (--stt-url).";
+    mic.title = "fleet started without --stt-url";
+    hint.textContent = "voice input not configured on the fleet (--stt-url).";
   }
   if (!caps.conversation) {
-    hint.textContent = "conversation loop not configured on the bridge (--llm-url).";
+    hint.textContent = "conversation loop not configured on the fleet (--llm-url).";
     mic.disabled = true;
   }
 }).catch(() => {});
@@ -353,6 +353,6 @@ document.addEventListener("visibilitychange", () => {
 // gesture, which keeps iOS Safari happy on first use).
 ttsTest.onclick = async () => {
   ttsInfo.textContent = "fetching…";
-  await speak("Testing the bridge. If you hear this, voice output works.");
+  await speak("Testing the fleet. If you hear this, voice output works.");
   ttsInfo.textContent = "test fired";
 };

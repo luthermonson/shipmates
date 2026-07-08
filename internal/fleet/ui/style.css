@@ -63,7 +63,7 @@ main {
 }
 
 /* Sticky pending pane between the event feed and the tell form. One row per
-   pending permission request for the selected lead; the bottom-most row is
+   pending permission request for the selected captain; the bottom-most row is
    the keyboard 1/2 target. */
 #pending-pane {
   background: rgba(248, 81, 73, 0.08);
@@ -136,7 +136,7 @@ main {
   font-weight: 400;
 }
 
-aside#leads {
+aside#captains {
   width: 280px;
   background: var(--panel);
   border-right: 1px solid var(--border);
@@ -145,7 +145,7 @@ aside#leads {
 }
 
 /* hamburger — hidden on desktop, shown on narrow screens */
-#leads-toggle {
+#captains-toggle {
   display: none;
   background: none;
   border: 0;
@@ -156,11 +156,11 @@ aside#leads {
   line-height: 1;
 }
 
-/* narrow screens: the leads rail becomes an off-canvas drawer */
+/* narrow screens: the captains rail becomes an off-canvas drawer */
 @media (max-width: 640px) {
-  #leads-toggle { display: block; font-size: 1.4rem; padding: 0.3rem 0.9rem 0.3rem 0.1rem; }
+  #captains-toggle { display: block; font-size: 1.4rem; padding: 0.3rem 0.9rem 0.3rem 0.1rem; }
   main { position: relative; }
-  aside#leads {
+  aside#captains {
     position: fixed;
     top: 0;
     left: 0;
@@ -171,7 +171,7 @@ aside#leads {
     transition: transform 0.18s ease-out;
     box-shadow: 2px 0 12px rgba(0,0,0,0.5);
   }
-  body.drawer-open aside#leads { transform: translateX(0); }
+  body.drawer-open aside#captains { transform: translateX(0); }
   /* tap-to-dismiss backdrop */
   #drawer-backdrop {
     display: none;
@@ -186,9 +186,9 @@ aside#leads {
   header { padding: 0.75rem 1rem; }
   header .right { gap: 0.75rem; }
   button.link { font-size: 0.9rem; padding: 0.5rem 0.4rem; }
-  #leads-list li { padding: 0.8rem 1rem; }
-  #leads-list .mates { gap: 0.45rem; margin-top: 0.4rem; }
-  #leads-list .mate { font-size: 0.85rem; padding: 0.3rem 0.75rem; }
+  #captains-list li { padding: 0.8rem 1rem; }
+  #captains-list .mates { gap: 0.45rem; margin-top: 0.4rem; }
+  #captains-list .mate { font-size: 0.85rem; padding: 0.3rem 0.75rem; }
 
   /* feed: timestamps eat half the line on a phone — drop them, keep who/kind */
   #feed-body { padding: 0.7rem; font-size: 0.78rem; }
@@ -234,7 +234,7 @@ aside#leads {
   #term-host { flex: 1; height: auto; min-height: 0; }
 }
 
-aside#leads h2 {
+aside#captains h2 {
   margin: 0;
   padding: 0.5rem 1rem;
   font-size: 0.7rem;
@@ -243,13 +243,13 @@ aside#leads h2 {
   color: var(--muted);
 }
 
-#leads-list {
+#captains-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-#leads-list li {
+#captains-list li {
   padding: 0.55rem 1rem;
   cursor: pointer;
   font-family: var(--mono);
@@ -258,11 +258,11 @@ aside#leads h2 {
   word-break: break-all;
 }
 
-#leads-list li:hover { background: rgba(255,255,255,0.03); }
-#leads-list li.selected { background: rgba(88,166,255,0.08); border-left-color: var(--accent); }
-#leads-list li.empty { color: var(--muted); cursor: default; font-style: italic; }
+#captains-list li:hover { background: rgba(255,255,255,0.03); }
+#captains-list li.selected { background: rgba(88,166,255,0.08); border-left-color: var(--accent); }
+#captains-list li.empty { color: var(--muted); cursor: default; font-style: italic; }
 
-#leads-list .dot {
+#captains-list .dot {
   display: inline-block;
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -270,28 +270,28 @@ aside#leads h2 {
   vertical-align: middle;
   background: var(--bad);
 }
-#leads-list .dot.online { background: var(--good); }
+#captains-list .dot.online { background: var(--good); }
 
 /* mate status chips: red=blocked yellow=working green=idle blue=done */
-#leads-list .mates {
+#captains-list .mates {
   margin: 0.25rem 0 0 1.1rem;
   display: flex;
   flex-wrap: wrap;
   gap: 0.3rem;
 }
-#leads-list .mate {
+#captains-list .mate {
   font-size: 0.72rem;
   padding: 0.05rem 0.45rem;
   border-radius: 999px;
   color: #fff;
   opacity: 0.92;
 }
-#leads-list .mate { cursor: pointer; }
-#leads-list .mate.blocked { background: #b3261e; animation: mate-pulse 1.2s ease-in-out infinite; }
-#leads-list .mate.working { background: #7a6400; }
-#leads-list .mate.idle    { background: #1e6f42; }
-#leads-list .mate.done    { background: #1a4f8a; }
-#leads-list .mate.off     { background: #3a3f45; color: var(--muted); }
+#captains-list .mate { cursor: pointer; }
+#captains-list .mate.blocked { background: #b3261e; animation: mate-pulse 1.2s ease-in-out infinite; }
+#captains-list .mate.working { background: #7a6400; }
+#captains-list .mate.idle    { background: #1e6f42; }
+#captains-list .mate.done    { background: #1a4f8a; }
+#captains-list .mate.off     { background: #3a3f45; color: var(--muted); }
 @keyframes mate-pulse {
   50% { opacity: 0.55; }
 }
@@ -340,7 +340,7 @@ aside#leads h2 {
 }
 
 /* live terminal pane — a full-screen takeover on every device: you're either
-   on the bridge or in a terminal, never squinting at both */
+   on the fleet dashboard or in a terminal, never squinting at both */
 #term-pane {
   position: fixed;
   inset: 0;
@@ -745,8 +745,8 @@ section#feed {
 }
 .feed-tab.active { color: var(--text); border-color: var(--accent); background: var(--bg); }
 
-/* first-load ship picker: tappable card per lead with live status */
-#lead-picker {
+/* first-load ship picker: tappable card per captain with live status */
+#captain-picker {
   padding: 1rem;
   display: flex;
   flex-direction: column;

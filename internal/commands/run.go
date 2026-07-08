@@ -65,7 +65,7 @@ func dispatchTo(ctx context.Context, persona, prompt string, fresh bool, stdout,
 }
 
 // Tell sends a plain-string message to a live crew process via the server. The
-// CLI translates the string to a stream-json user message server-side; the lead
+// CLI translates the string to a stream-json user message server-side; the captain
 // never touches JSON.
 func Tell() *cli.Command {
 	return &cli.Command{
