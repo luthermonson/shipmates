@@ -1,9 +1,16 @@
 # Persona berths — per-persona working-tree isolation
 
-> Working doc / proposal. Companion to `architecture.md` (persona/session fundamentals) and
-> `memory-on-session-start.md` (which evaluated berths as a *memory-load* mechanism and rejected them for
-> that job). This doc treats berths as what they actually are: a **filesystem-isolation** feature,
-> orthogonal to memory. It stands alone; read the memory doc only for the orthogonality proof (§4).
+> **Analysis + decision.** The analysis below (written first) weighed berths as a standalone
+> **filesystem-isolation** feature and recommended *deferring* them. A subsequent captain↔lead design
+> session **decided to build a scoped version** — not for isolation (the weak leg; see §"The honest value
+> proposition") but for **launch ergonomics and formalizing the manual lead berth**. The analysis is kept
+> in full: its risk enumeration (lifecycle, nesting, memory-orthogonality, session-resume, costs) is now
+> the set of **constraints the decision must honor**. The binding outcome is in **§Decision** at the end;
+> the session-resume risk remains **open (needs-CC-verification)**.
+>
+> Companion to `architecture.md` (persona/session fundamentals) and `memory-on-session-start.md` (which
+> evaluated berths as a *memory-load* mechanism and rejected them for that job — berths are orthogonal to
+> memory; see §"The load-bearing interaction with memory").
 
 ## What a berth is
 
@@ -169,44 +176,74 @@ persona's cwd from root to berth on the *next* spawn, i.e. mid-session for every
 - **New interaction rules** — nested per-issue worktrees, prune-safety while nested trees are live, the
   session-resume migration above, and a cleanup step wired into `remove` (`remove.go`).
 
-## Recommendation (architect)
+## Decision
 
-**Berths are not worth their own lifecycle code right now.** The verdict turns on the marginal-benefit
-accounting: for a `github`-routed fleet — the shape the crew conventions target — per-issue worktrees
-(`catalog/routing/github.md:33`) already isolate the mutation-heavy work, leaving berths to cover only a
-read-heavy staging window. Paying shipmates' first worktree lifecycle (with its dirty-tree, prune, nesting,
-and session-resume-migration hazards) to isolate that window is a poor trade. And berths cannot be
-justified by identity or memory: identity is solvable far more cheaply (env / `--append-system-prompt`
-already carries the persona), and berths actively *break* a cwd-based memory hook under the default posture
-(§4).
+A captain↔lead design session **decided to build a scoped berth feature.** The marginal-isolation finding
+above stands — so the decision does **not** rest on isolation. It rests on two things the analysis
+undervalued: **launch ergonomics** (a persona should be launchable from the repo root and land in its own
+working tree, rather than a human `cd`-ing into a berth first) and **formalizing the lead berth** already
+maintained by hand (Claim 2). Frame it as "persistent home + launch ergonomics," not parallel isolation.
 
-**Where they would earn their keep:** a **routing-agnostic** fleet that runs `drain-many` with no per-issue
-worktrees, where crew genuinely share one tree and can stomp each other (`charters.go:52-53`). That is the
-population to build for, if any.
+### What gets built
 
-**Phasing, if pursued:**
+- **A berth is a persona's persistent home:** a git worktree at `.shipmates/berths/<persona>` on branch
+  `berth/<persona>`, which every one of that persona's sessions runs in (`open`, `ask`, dispatched
+  `fanout`/`drain`). 1 berth : 1 persona; persistent; removed only on `remove --purge`.
+- **cwd becomes a resolved persona property.** A new `cwd` field in agent-frontmatter, default
+  `.shipmates/berths/<persona>`, overridable — resolved into `PersonaConfig` exactly like
+  `model`/`effort`/`backend` (`project.go:366-370`) and threaded to every spawn site as `cmd.Dir` (the
+  sites that set none today: `open.go:50`, `run.go:57` (dispatchTo), `fanout.go:100`, and the server/PTY
+  paths). This is the ergonomic win — launch from anywhere, land in the berth.
+- **Work model (actor-based).** Interactive/one-shot sessions commit directly to `berth/<persona>`;
+  **dispatched** sub-agents get their own nested worktree at `.claude/worktrees/<id>/` *relative to the
+  berth* — the `github` routing catalog already emits exactly this (`catalog/routing/github.md:33`), so
+  zero new convention — on their own branch → PR. No runtime concurrency detection. Parallel use is rare;
+  the interactive/dispatch split is an edge case, not the common path.
+- **Establish policy** (per-persona, manifest default): `auto` for the lead/coordinator (create the
+  worktree from `origin/main` if missing), `off` (run at repo root, today's behavior) as the fleet
+  default, `require` (error if absent) as an explicit opt-in. Matches the "start with the lead berth only"
+  phasing and avoids a mass cwd migration.
 
-1. **Confirm demand.** Only build if routing-agnostic parallel `drain-many` is a real usage pattern that is
-   hitting real collisions. If every serious fleet runs `github` routing, berths are largely redundant —
-   don't build speculatively.
-2. **Resolve the session-resume cwd-scoping question** (needs-CC-verification) *first* — it gates whether
-   berths can be introduced without forking every existing mate's history.
-3. **Start with the lead berth only** — it is already a manual, single, low-churn convention. Formalize
-   that one (opt-in `shipmates berth lead`, pinned to `origin/main`), learn the lifecycle edge cases on one
-   worktree, then generalize to per-persona berths *behind a config flag*, off by default.
-4. **Keep memory-load on `--append-system-prompt`** regardless — it is worktree-independent and must stay
-   that way, so berths remain a pure isolation feature that composes cleanly.
+### Guardrails — the analysis's risks converted to rules, not a prohibition
 
-Net: berths are a legitimate Phase-2+ isolation nicety for a specific (routing-agnostic) audience, gated on
-a Claude Code verification and on demonstrated need. They are not a near-term priority, and they must never
-be coupled to the memory-load path.
+- **Commit-into-berth is allowed** (the original "never commit to a berth" is retired), *provided:*
+  - **R1a — manifest-mutating commands (`add`/`remove`/`update`) run in one canonical tree** (root/main),
+    never independently per berth. Running `update` in divergent berths is the one action that genuinely
+    fractures the tracked `.shipmates/manifest.json` (`update.go:101,128`; `project.go:48-50`).
+  - **R1b — berth branches stay short-divergence:** create-from-`origin/main`, commit, fast-forward back
+    (the observed `berth/lead` pattern), not long-lived forks.
+  - Sharp edge: a `sharedMemory: true` fleet makes memory tracked and re-introduces the fracture — flag it;
+    the safe default (`sharedMemory: false`) keeps memory out of the tracked tree entirely.
+- **`cwd`/berth MUST NOT enter `Fingerprint()`** (`project.go:286-288`, which hashes only `model`+`effort`
+  by design). If it did, gaining a berth would auto-`--fresh` the very session it means to preserve.
+- **Berth only at session *creation*, never mid-session** (the session-resume mitigation below). Auto-berth
+  applies only to sessions created after berthing is enabled; existing sessions stay at their creation-cwd
+  until `--fresh`ed.
+- **Berth prune/remove must refuse while a nested per-issue worktree is live** (§"Composition with per-issue
+  routing worktrees"); `remove.go` gains a `git worktree remove` step (`remove.go:41-61` has none today),
+  non-destructive by default.
+- **Memory-load stays worktree-independent** — canonical-root reads / `--append-system-prompt`, unchanged
+  by berths (§"The load-bearing interaction with memory").
+
+### The one blocker carried unresolved
+
+The **session-resume cwd-scoping** question (§"Resume / session semantics", Open Questions #1) is **not**
+answered by this decision. shipmates resumes by UUID (`sessionlaunch.go:31-37`), which *may* sidestep any
+Claude-Code creation-cwd binding — but that is a claim about Claude Code internals, unverifiable from
+shipmates source. It ships **needs-CC-verification** and gates only the *mid-session migration* of existing
+sessions, not the feature itself (kept safe by the create-time-only rule). Do not mistake the UUID-resume
+path's shipmates-side cwd-independence for a full answer.
 
 ## Open questions
 
-1. **Session-resume cwd-scoping (needs-CC-verification).** Does Claude Code bind a resumable session to the
-   directory it was created in? If yes, moving a persona's cwd into a berth forks its history. Blocks any
-   berth work on existing sessions. *Not answerable from shipmates source — test against Claude Code.*
-2. **Dirty-berth policy.** Reset, refuse, or warn-and-reuse when a berth has uncommitted changes from a
-   prior run? Resolvable in code once the feature is scoped.
-3. **Is routing-agnostic parallel `drain-many` a real, collision-hitting pattern?** The demand signal that
-   decides whether berths are worth building at all. Needs field evidence, not code.
+1. **Session-resume cwd-scoping (needs-CC-verification) — STILL OPEN, the one blocker.** Does Claude Code
+   bind a resumable session to the directory it was created in? If yes, moving an existing session's cwd
+   into a berth forks its history. The Decision's create-time-only-berthing rule keeps the *feature* safe,
+   but mid-session migration of existing sessions stays blocked until this is tested against Claude Code.
+   *Not answerable from shipmates source.*
+2. ~~**Dirty-berth policy.**~~ **Resolved:** warn-and-reuse — never auto-reset (consistent with the
+   destructive-autonomy tier). Berth removal additionally refuses while a nested per-issue worktree is live.
+3. ~~**Is routing-agnostic parallel `drain-many` a real, collision-hitting pattern?**~~ **No longer gates
+   the decision.** The build rests on ergonomics and formalizing the lead berth, not isolation, so the
+   demand signal that would have justified an *isolation* feature is moot. (It still informs the
+   establish-policy default: `off` for the fleet until such demand appears.)
