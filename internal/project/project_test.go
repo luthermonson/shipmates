@@ -290,6 +290,35 @@ func TestSessionMetaRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionMeta(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	// Deleting when nothing exists is not an error — auto-repair should be
+	// idempotent so retries after a partial state don't fail.
+	if err := DeleteSessionMeta("ghost"); err != nil {
+		t.Fatalf("DeleteSessionMeta(missing): %v", err)
+	}
+
+	// Write a marker, delete it, confirm it's gone.
+	if err := WriteSessionMeta("picard", "card-cannon-picard", "uuid-stale", "hash"); err != nil {
+		t.Fatalf("WriteSessionMeta: %v", err)
+	}
+	if _, ok := ReadSessionMeta("picard"); !ok {
+		t.Fatal("marker not written")
+	}
+	if err := DeleteSessionMeta("picard"); err != nil {
+		t.Fatalf("DeleteSessionMeta: %v", err)
+	}
+	if _, ok := ReadSessionMeta("picard"); ok {
+		t.Fatal("marker still readable after delete")
+	}
+
+	// Second delete of the same persona is a no-op, not an error.
+	if err := DeleteSessionMeta("picard"); err != nil {
+		t.Fatalf("DeleteSessionMeta(second): %v", err)
+	}
+}
+
 func TestNewUUID(t *testing.T) {
 	re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	seen := map[string]bool{}
