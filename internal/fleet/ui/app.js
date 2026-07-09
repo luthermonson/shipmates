@@ -401,7 +401,9 @@ tellForm.onsubmit = async (e) => {
   if (!selected) return;
   const persona = tellPersona.value.trim();
   const message = tellMessage.value.trim();
-  if (!persona || !message) return;
+  const hasAttachments = stagedAttachments.some((a) => a.status !== "done");
+  if (!persona) return;
+  if (!message && !hasAttachments) return;
 
   // "all" broadcasts: one tell per crew member, fanned out client-side.
   let targets = [persona];
@@ -413,26 +415,89 @@ tellForm.onsubmit = async (e) => {
     }
   }
 
-  const results = await Promise.allSettled(targets.map(async (p) => {
-    const r = await fetch(
-      `/api/captain/${encodeURIComponent(selected)}/tell/${encodeURIComponent(p)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+  const sendBtn = tellForm.querySelector('button[type="submit"]');
+  sendBtn.disabled = true;
+  const origLabel = sendBtn.textContent;
+
+  // Phase 1: upload each staged attachment (fan out; each attach auto-tells the
+  // mate server-side, one tell per file). Broadcast to "all" isn't supported by
+  // the attach endpoint (it targets one captain, not one persona) — the server
+  // auto-tells whichever mate it configures per attach; here we just POST once
+  // per file to the selected captain.
+  let attachOK = true;
+  if (hasAttachments) {
+    const pending = stagedAttachments.filter((a) => a.status !== "done");
+    let completed = 0;
+    sendBtn.textContent = `uploading 0/${pending.length}…`;
+    await Promise.all(pending.map(async (a) => {
+      a.status = "uploading";
+      a.error = null;
+      renderStagedAttachments();
+      try {
+        const fd = new FormData();
+        fd.append("file", a.file, a.file.name);
+        if (message) fd.append("caption", message);
+        const r = await fetch(
+          `/api/captain/${encodeURIComponent(selected)}/attach`,
+          { method: "POST", body: fd },
+        );
+        if (r.status === 401) { window.location.href = "/login"; throw new Error("unauthorized"); }
+        if (!r.ok) {
+          let msg = `HTTP ${r.status}`;
+          try {
+            const j = await r.json();
+            if (j && j.error) msg = j.error;
+          } catch {}
+          throw new Error(msg);
+        }
+        a.status = "done";
+      } catch (err) {
+        a.status = "error";
+        a.error = String(err.message || err);
+        attachOK = false;
+      } finally {
+        completed++;
+        sendBtn.textContent = `uploading ${completed}/${pending.length}…`;
+        renderStagedAttachments();
       }
-    );
-    if (r.status === 401) { window.location.href = "/login"; throw new Error("unauthorized"); }
-    if (!r.ok) throw new Error(`${p}: HTTP ${r.status}`);
-  }));
-  const failures = results.filter((r) => r.status === "rejected");
-  if (failures.length === 0) {
-    tellMessage.value = "";
-    // no local echo: the server-side tell events arrive through the stream
-  } else {
-    for (const f of failures) {
-      appendEvent({ time: nowISO(), persona: "(fleet)", type: "tell-error", text: String(f.reason) });
+    }));
+  }
+
+  // Phase 2: send the plain text tell IF there's a caption AND no attachments
+  // rode with it. When there ARE attachments, each one carried the caption and
+  // triggered its own auto-tell — sending a duplicate text tell would be noisy.
+  let tellOK = true;
+  if (message && !hasAttachments) {
+    const results = await Promise.allSettled(targets.map(async (p) => {
+      const r = await fetch(
+        `/api/captain/${encodeURIComponent(selected)}/tell/${encodeURIComponent(p)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message }),
+        }
+      );
+      if (r.status === 401) { window.location.href = "/login"; throw new Error("unauthorized"); }
+      if (!r.ok) throw new Error(`${p}: HTTP ${r.status}`);
+    }));
+    const failures = results.filter((r) => r.status === "rejected");
+    if (failures.length > 0) {
+      tellOK = false;
+      for (const f of failures) {
+        appendEvent({ time: nowISO(), persona: "(fleet)", type: "tell-error", text: String(f.reason) });
+      }
     }
+  }
+
+  sendBtn.disabled = false;
+  sendBtn.textContent = origLabel;
+
+  if (attachOK && tellOK) {
+    tellMessage.value = "";
+    // drop the done rows; error rows stay so the operator can retry / remove
+    stagedAttachments = stagedAttachments.filter((a) => a.status !== "done");
+    renderStagedAttachments();
+    // no local echo: the server-side tell events arrive through the stream
   }
 };
 
@@ -1525,3 +1590,195 @@ const drawerBackdrop = $("drawer-backdrop");
 
 captainsToggle.onclick = () => document.body.classList.toggle("drawer-open");
 drawerBackdrop.onclick = () => document.body.classList.remove("drawer-open");
+
+// --- attach bar: file / camera / photos + drag-drop + paste ---------------------
+//
+// Files stage locally (thumbnail + filename + size) and only upload on Send.
+// Each staged file POSTs to /api/captain/<key>/attach as multipart/form-data
+// with `file` (required) and `caption` (optional). The backend relays the
+// binary to the ship's .shipmates/inbox/ and auto-tells the target mate — so
+// the UI here is deliberately fire-and-collect, not full workflow.
+
+const MAX_ATTACH_BYTES = 10 * 1024 * 1024; // 10 MB — matches backend cap
+let stagedAttachments = []; // [{ id, file, previewURL|null, status: "staged"|"uploading"|"done"|"error", error }]
+let stagedSeq = 0;
+const stagedPane = $("attach-staged");
+const attachBar = $("attach-bar");
+const tellCompose = $("tell-compose");
+if (stagedPane) stagedPane.hidden = true; // no chips at boot
+
+function stageAttachFromEvent(ev) {
+  const input = ev.target;
+  const files = Array.from(input.files || []);
+  for (const f of files) stageAttach(f);
+  // reset the input so picking the same file twice still fires onchange
+  input.value = "";
+}
+// exposed for inline onchange handlers in index.html
+window.stageAttachFromEvent = stageAttachFromEvent;
+
+function stageAttach(file) {
+  if (!file) return;
+  if (file.size > MAX_ATTACH_BYTES) {
+    const mb = (file.size / (1024 * 1024)).toFixed(1);
+    appendEvent({
+      time: nowISO(),
+      persona: "(fleet)",
+      type: "tell-error",
+      text: `attachment ${file.name} is ${mb} MB — max 10 MB`,
+    });
+    return;
+  }
+  const id = ++stagedSeq;
+  let previewURL = null;
+  if (file.type && file.type.startsWith("image/")) {
+    try { previewURL = URL.createObjectURL(file); } catch {}
+  }
+  stagedAttachments.push({ id, file, previewURL, status: "staged", error: null });
+  renderStagedAttachments();
+}
+
+function removeStaged(id) {
+  const idx = stagedAttachments.findIndex((a) => a.id === id);
+  if (idx === -1) return;
+  const a = stagedAttachments[idx];
+  if (a.previewURL) { try { URL.revokeObjectURL(a.previewURL); } catch {} }
+  stagedAttachments.splice(idx, 1);
+  renderStagedAttachments();
+}
+
+function humanSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function truncateName(name, max = 12) {
+  if (name.length <= max) return name;
+  const dot = name.lastIndexOf(".");
+  if (dot > 0 && name.length - dot <= 6) {
+    const ext = name.slice(dot);
+    return name.slice(0, Math.max(1, max - ext.length - 1)) + "…" + ext;
+  }
+  return name.slice(0, max - 1) + "…";
+}
+
+function renderStagedAttachments() {
+  if (!stagedPane) return;
+  stagedPane.innerHTML = "";
+  if (stagedAttachments.length === 0) {
+    stagedPane.hidden = true;
+    return;
+  }
+  stagedPane.hidden = false;
+  for (const a of stagedAttachments) {
+    const chip = document.createElement("div");
+    chip.className = "attach-thumb " + a.status;
+    chip.title = `${a.file.name} · ${humanSize(a.file.size)}`;
+
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    if (a.previewURL) {
+      const img = document.createElement("img");
+      img.src = a.previewURL;
+      img.alt = a.file.name;
+      thumb.appendChild(img);
+    } else {
+      thumb.textContent = "📄";
+      thumb.classList.add("generic");
+    }
+    chip.appendChild(thumb);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const nm = document.createElement("div");
+    nm.className = "name";
+    nm.textContent = truncateName(a.file.name);
+    const sz = document.createElement("div");
+    sz.className = "size";
+    sz.textContent = humanSize(a.file.size);
+    meta.appendChild(nm);
+    meta.appendChild(sz);
+    if (a.status === "error") {
+      const err = document.createElement("div");
+      err.className = "err";
+      err.textContent = a.error || "failed";
+      meta.appendChild(err);
+    } else if (a.status === "uploading") {
+      const up = document.createElement("div");
+      up.className = "up";
+      up.textContent = "uploading…";
+      meta.appendChild(up);
+    } else if (a.status === "done") {
+      const ok = document.createElement("div");
+      ok.className = "ok";
+      ok.textContent = "sent";
+      meta.appendChild(ok);
+    }
+    chip.appendChild(meta);
+
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "remove";
+    close.setAttribute("aria-label", `remove ${a.file.name}`);
+    close.textContent = "✕";
+    close.onclick = () => removeStaged(a.id);
+    chip.appendChild(close);
+
+    stagedPane.appendChild(chip);
+  }
+}
+
+// Drag-and-drop over the compose area. Keep the highlight class on the outer
+// container so the border-flash covers both attach bar and tell form.
+if (tellCompose) {
+  let dragDepth = 0;
+  const showDrag = () => tellCompose.classList.add("dragover");
+  const hideDrag = () => tellCompose.classList.remove("dragover");
+  tellCompose.addEventListener("dragenter", (e) => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes("Files")) return;
+    e.preventDefault();
+    dragDepth++;
+    showDrag();
+  });
+  tellCompose.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  });
+  tellCompose.addEventListener("dragleave", (e) => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) hideDrag();
+  });
+  tellCompose.addEventListener("drop", (e) => {
+    if (!e.dataTransfer) return;
+    e.preventDefault();
+    dragDepth = 0;
+    hideDrag();
+    const files = Array.from(e.dataTransfer.files || []);
+    for (const f of files) stageAttach(f);
+  });
+}
+
+// Paste from clipboard anywhere on the page — but only image blobs. Text pastes
+// into the tell input stay text. If the user pastes into the persona <select>
+// or a beads input, we still capture image data (that's the useful case).
+document.addEventListener("paste", (e) => {
+  if (!selected) return;
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  let staged = 0;
+  for (const item of items) {
+    if (item.kind !== "file") continue;
+    const f = item.getAsFile();
+    if (!f) continue;
+    if (!f.type.startsWith("image/")) continue;
+    // native clipboard files often come in as "image.png" with no name; give
+    // them a timestamped one so the operator can tell them apart in the tray.
+    const ext = (f.type.split("/")[1] || "png").split("+")[0];
+    const named = new File([f], `clipboard-${Date.now()}.${ext}`, { type: f.type });
+    stageAttach(named);
+    staged++;
+  }
+  if (staged > 0) e.preventDefault();
+});

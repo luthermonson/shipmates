@@ -881,3 +881,146 @@ section#feed {
 }
 
 #tell-form button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* --- attach bar ---------------------------------------------------------- */
+/* Sits above the tell form as a subtle strip: three inline label-buttons on
+   the left, a "or drop / paste" hint on the right. Whole compose column is
+   the drop target — the outer .dragover class flashes a dashed border. */
+
+#tell-compose {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+#tell-compose.dragover {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  background: rgba(88, 166, 255, 0.06);
+}
+/* the border-top on tell-form is now on tell-compose; drop the double line */
+#tell-compose #tell-form { border-top: 0; }
+
+#attach-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem 0;
+  flex-wrap: wrap;
+}
+.attach-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  user-select: none;
+}
+.attach-btn:hover, .attach-btn:focus-within {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* iOS Safari sometimes misses clicks on `hidden` file inputs — position it
+   off-screen instead so the tap on the <label> definitely opens the picker. */
+.attach-btn input[type="file"] {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.attach-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-left: auto;
+}
+
+/* staged thumbnails tray — hidden when empty. Row of chips, each with a small
+   image (or 📄 for non-images), name, size, and an ✕ remove button. */
+#attach-staged {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem 0;
+}
+#attach-staged[hidden] { display: none; }
+
+.attach-thumb {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 1.6rem 0.35rem 0.4rem;
+  max-width: 220px;
+}
+.attach-thumb.error { border-color: var(--bad); }
+.attach-thumb.uploading { opacity: 0.75; }
+.attach-thumb.done { border-color: var(--good); opacity: 0.6; }
+
+.attach-thumb .thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--panel);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  flex: 0 0 auto;
+}
+.attach-thumb .thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attach-thumb .meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: 0.72rem;
+}
+.attach-thumb .meta .name { color: var(--text); font-family: var(--mono); }
+.attach-thumb .meta .size { color: var(--muted); }
+.attach-thumb .meta .err { color: var(--bad); }
+.attach-thumb .meta .up { color: var(--muted); font-style: italic; }
+.attach-thumb .meta .ok { color: var(--good); }
+
+.attach-thumb .remove {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0.15rem 0.3rem;
+  line-height: 1;
+}
+.attach-thumb .remove:hover { color: var(--bad); }
+
+/* mobile: finger-sized buttons, hide the "or drop / paste" hint (irrelevant
+   on touch), and let the staged tray scroll horizontally if it overflows */
+@media (max-width: 640px) {
+  #attach-bar { padding: 0.55rem 0.7rem 0; gap: 0.4rem; }
+  .attach-btn {
+    font-size: 0.95rem;
+    padding: 0.55rem 0.85rem;
+    border-radius: 6px;
+  }
+  .attach-hint { display: none; }
+  #attach-staged {
+    padding: 0.5rem 0.7rem 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .attach-thumb { flex: 0 0 auto; }
+}
