@@ -112,6 +112,18 @@ func WriteSessionMeta(persona, name, id, configHash string) error {
 	return os.WriteFile(SessionMarker(persona), b, 0o644)
 }
 
+// DeleteSessionMeta removes a persona's session marker. Called by auto-repair
+// when the tracked session UUID has vanished from Claude's local store
+// (rotated jsonl, cache clean, upgrade wipe). A missing marker is not an
+// error — the next SessionLaunch will start fresh regardless.
+func DeleteSessionMeta(persona string) error {
+	err := os.Remove(SessionMarker(persona))
+	if err != nil && os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 // RepoName is the current project's directory name — the default session prefix.
 func RepoName() string {
 	wd, err := os.Getwd()
