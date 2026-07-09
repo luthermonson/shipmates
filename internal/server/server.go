@@ -27,11 +27,10 @@ import (
 	"github.com/luthermonson/shipmates/internal/streamjson"
 )
 
-// stalePattern is the exact stderr line Claude emits when it's asked to
-// --resume a session UUID it no longer has in its local store. Detecting
-// this on startup lets the server auto-repair by deleting the stale marker
-// and respawning with a fresh session id.
-var stalePattern = []byte("No conversation found with session ID")
+// stalePattern is a substring of the stderr line Claude emits when it's
+// asked to --resume a session UUID it no longer has in its local store.
+// Kept minimal so any ANSI/formatting variance doesn't break detection.
+var stalePattern = []byte("No conversation found")
 
 // errStaleSession is returned by spawnCrewLive when the stale-session marker
 // was seen on Claude's stderr during startup. ensureLive catches it, deletes
@@ -710,13 +709,17 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 	lp, err := s.spawnCrewLive(persona, false)
 	if errors.Is(err, errStaleSession) {
 		slog.Info("stale claude session detected, auto-repairing", "persona", persona)
-		s.addEvent(Event{
+		// Emit the event async because addEvent acquires s.mu — which we
+		// hold here. Doing it inline would deadlock the retry spawn.
+		go s.addEvent(Event{
 			Persona: persona,
 			Type:    "session:auto-repair",
 			Text:    "stale claude session record deleted, spawning fresh",
 		})
-		_ = project.DeleteSessionMeta(persona)
+		delErr := project.DeleteSessionMeta(persona)
+		slog.Info("auto-repair: deleted session marker", "persona", persona, "err", delErr)
 		lp, err = s.spawnCrewLive(persona, true)
+		slog.Info("auto-repair: retry spawn returned", "persona", persona, "err", err, "lp_nil", lp == nil)
 	}
 	return lp, err
 }
@@ -752,7 +755,7 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdoutRaw, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
 	}
@@ -768,23 +771,45 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	// and flag the stale-session pattern on --resume attempts.
 	staleFlag := make(chan struct{}, 1)
 	go func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			line := sc.Bytes()
-			os.Stderr.Write(line)
-			os.Stderr.Write([]byte("\n"))
-			if !fresh && bytes.Contains(line, stalePattern) {
-				select {
-				case staleFlag <- struct{}{}:
-				default:
+		buf := make([]byte, 4096)
+		var carry []byte
+		for {
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				chunk := buf[:n]
+				os.Stderr.Write(chunk)
+				if !fresh {
+					carry = append(carry, chunk...)
+					if bytes.Contains(carry, stalePattern) {
+						select {
+						case staleFlag <- struct{}{}:
+						default:
+						}
+					}
+					// keep only the last 512 bytes so the buffer doesn't grow
+					if len(carry) > 512 {
+						carry = carry[len(carry)-512:]
+					}
 				}
+			}
+			if err != nil {
+				return
 			}
 		}
 	}()
 
-	// Give claude a brief window to either produce the stale-session error
-	// or start streaming normally. The window is only relevant when resuming
-	// — fresh spawns skip the wait since staleFlag can never fire.
+	// pump receives the bufio.Reader (via wrapping) so it can decode
+	// stream-json normally; nothing peeks stdout during startup because
+	// claude sometimes writes a partial byte to stdout BEFORE printing the
+	// "No conversation found" error, which would falsely signal a healthy
+	// spawn. Stale detection is stderr-only.
+	stdout := bufio.NewReader(stdoutRaw)
+
+	// Give claude a window to either produce the stale-session error or
+	// begin streaming. Empirically the error appears ~2-3s into startup, so
+	// 3.5s is enough to catch it. This latency is only paid on the FIRST
+	// tell to a mate — subsequent tells reuse the live proc via ensureLive's
+	// short-circuit.
 	if !fresh {
 		procDone := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(procDone) }()
@@ -795,8 +820,11 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 			return nil, errStaleSession
 		case <-procDone:
 			return nil, fmt.Errorf("claude exited during startup for %s", persona)
-		case <-time.After(1500 * time.Millisecond):
-			// Healthy: still running, no stale flag. Continue with registration.
+		case <-time.After(6 * time.Second):
+			// Healthy: no error surfaced within the detection window.
+			// 6s is generous enough for claude's variable startup — the
+			// stale error appears anywhere from 1 to 5 seconds after spawn
+			// depending on system load. This latency is one-time-per-mate.
 		}
 	}
 
@@ -811,6 +839,8 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	delete(s.exited, persona) // resurrect: a re-spawned mate is no longer "done"
 	s.lastSeen[persona] = time.Now()
 	_ = project.WriteSessionMeta(persona, sessName, sessID, fp)
+	// pump receives the bufio.Reader (not the raw pipe) so the byte we peeked
+	// in the healthy-flag goroutine is still available to be decoded.
 	go s.pump(persona, stdout)
 	slog.Info("spawned live crew process", "persona", persona, "pid", cmd.Process.Pid, "session", sessID)
 	return lp, nil
