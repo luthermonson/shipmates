@@ -5,8 +5,11 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,6 +26,17 @@ import (
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/streamjson"
 )
+
+// stalePattern is the exact stderr line Claude emits when it's asked to
+// --resume a session UUID it no longer has in its local store. Detecting
+// this on startup lets the server auto-repair by deleting the stale marker
+// and respawning with a fresh session id.
+var stalePattern = []byte("No conversation found with session ID")
+
+// errStaleSession is returned by spawnCrewLive when the stale-session marker
+// was seen on Claude's stderr during startup. ensureLive catches it, deletes
+// the marker, and retries once with fresh=true.
+var errStaleSession = errors.New("claude has no record of the tracked session")
 
 // Event is one line in the activity feed. Tool, Input, and ID are populated
 // only for permission events so the UI can render allow/deny actions without
@@ -676,6 +690,10 @@ func (s *Server) hookSettings(persona string, gate bool) string {
 }
 
 // ensureLive returns the persona's live process, spawning one if needed.
+// If Claude reports the tracked session UUID doesn't exist (jsonl rotated,
+// Claude Code upgrade cleaned the store, etc.), auto-repair by deleting the
+// stale marker and respawning fresh. This turns what used to be a silent
+// "(turn complete)" with no output into a self-healing recovery.
 func (s *Server) ensureLive(persona string) (*liveProc, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -689,10 +707,29 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		return nil, fmt.Errorf("persona %s is PTY-only (backend: command) — open a terminal to talk to it", persona)
 	}
 
+	lp, err := s.spawnCrewLive(persona, false)
+	if errors.Is(err, errStaleSession) {
+		slog.Info("stale claude session detected, auto-repairing", "persona", persona)
+		s.addEvent(Event{
+			Persona: persona,
+			Type:    "session:auto-repair",
+			Text:    "stale claude session record deleted, spawning fresh",
+		})
+		_ = project.DeleteSessionMeta(persona)
+		lp, err = s.spawnCrewLive(persona, true)
+	}
+	return lp, err
+}
+
+// spawnCrewLive spawns a `claude -p` process for the persona and wires it
+// into s.live. Caller must hold s.mu. When fresh=false, watches Claude's
+// stderr on startup for the "No conversation found" marker; on detection
+// kills the process and returns errStaleSession so ensureLive can auto-repair.
+func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	// One long-term session per shipmate: resume the same tracked session
 	// that ask/open/fanout use, so tell/term/ask are one continuous
 	// conversation instead of per-surface forks.
-	cfg, idArgs, sessID, sessName, fp := project.SessionLaunch(persona, false)
+	cfg, idArgs, sessID, sessName, fp := project.SessionLaunch(persona, fresh)
 	args := []string{
 		"-p",
 		"--input-format", "stream-json",
@@ -719,9 +756,48 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd.Stderr = os.Stderr
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("spawn claude: %w", err)
+	}
+
+	// Tee stderr to our own so the operator still sees any claude errors,
+	// and flag the stale-session pattern on --resume attempts.
+	staleFlag := make(chan struct{}, 1)
+	go func() {
+		sc := bufio.NewScanner(stderr)
+		for sc.Scan() {
+			line := sc.Bytes()
+			os.Stderr.Write(line)
+			os.Stderr.Write([]byte("\n"))
+			if !fresh && bytes.Contains(line, stalePattern) {
+				select {
+				case staleFlag <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+
+	// Give claude a brief window to either produce the stale-session error
+	// or start streaming normally. The window is only relevant when resuming
+	// — fresh spawns skip the wait since staleFlag can never fire.
+	if !fresh {
+		procDone := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(procDone) }()
+		select {
+		case <-staleFlag:
+			_ = cmd.Process.Kill()
+			<-procDone
+			return nil, errStaleSession
+		case <-procDone:
+			return nil, fmt.Errorf("claude exited during startup for %s", persona)
+		case <-time.After(1500 * time.Millisecond):
+			// Healthy: still running, no stale flag. Continue with registration.
+		}
 	}
 
 	// Server-driven ref-count: crew run in `claude -p` mode never fire the
