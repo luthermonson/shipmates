@@ -53,6 +53,13 @@ type Server struct {
 	store  *store       // nil when --store wasn't passed
 	conv   *convConfig  // nil unless voice/conversation flags are set
 	policy *policyState // fleet-wide deny list source; served via /api/fleet-policy
+
+	// attachRelay and attachTell are test hooks: production leaves them nil
+	// and the attach handler falls through to b.proxyRaw / b.proxy over the
+	// real tunnel. Setting them lets tests stub the ship without spinning
+	// up remotedialer.
+	attachRelay func(ctx context.Context, clientKey, method, path, contentType string, body []byte) ([]byte, int, error)
+	attachTell  func(ctx context.Context, clientKey, method, path string, body []byte) ([]byte, int, error)
 }
 
 // convConfig holds the runtime config for the voice surface: /api/conversation
@@ -178,6 +185,7 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /api/captain/{key}/pty/{persona}/stream", b.handlePTYStreamProxy)
 	mux.HandleFunc("GET /api/captain/{key}/stream", b.handleStream)
 	mux.HandleFunc("POST /api/captain/{key}/tell/{persona}", b.handleTell)
+	mux.HandleFunc("POST /api/captain/{key}/attach", b.handleCaptainAttach)
 	mux.HandleFunc("POST /api/captain/{key}/resolve/{id}", b.handleResolve)
 	mux.HandleFunc("POST /api/conversation", b.handleConversation)
 	mux.HandleFunc("POST /api/tts", b.handleTTS)

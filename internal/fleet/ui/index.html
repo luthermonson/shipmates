@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>shipmates fleet</title>
-<link rel="stylesheet" href="/style.css?v=48">
-<link rel="stylesheet" href="/vendor/xterm.min.css?v=48">
+<link rel="stylesheet" href="/style.css?v=49">
+<link rel="stylesheet" href="/vendor/xterm.min.css?v=49">
 </head>
 <body>
 <header>
@@ -60,15 +60,33 @@
       </div>
     </div>
     <div id="pending-pane" hidden></div>
-    <form id="tell-form" autocomplete="off">
-      <select id="tell-persona" required></select>
-      <input id="tell-message" placeholder="message…" required>
-      <button type="submit">tell</button>
-    </form>
+    <div id="tell-compose">
+      <div id="attach-bar" aria-label="attach files to the next tell">
+        <label class="attach-btn" for="attach-input-file" title="attach any file (max 10 MB)">
+          <span aria-hidden="true">📁</span> File
+          <input id="attach-input-file" type="file" onchange="stageAttachFromEvent(event)" />
+        </label>
+        <label class="attach-btn" for="attach-input-camera" title="take a photo with the rear camera">
+          <span aria-hidden="true">📷</span> Camera
+          <input id="attach-input-camera" type="file" accept="image/*" capture="environment" onchange="stageAttachFromEvent(event)" />
+        </label>
+        <label class="attach-btn" for="attach-input-photos" title="pick from your photo library">
+          <span aria-hidden="true">🖼️</span> Photos
+          <input id="attach-input-photos" type="file" accept="image/*" onchange="stageAttachFromEvent(event)" />
+        </label>
+        <span id="attach-hint" class="attach-hint">or drop / paste an image</span>
+      </div>
+      <div id="attach-staged" aria-live="polite"></div>
+      <form id="tell-form" autocomplete="off">
+        <select id="tell-persona" required></select>
+        <input id="tell-message" placeholder="message…">
+        <button type="submit">tell</button>
+      </form>
+    </div>
   </section>
 </main>
-<script src="/vendor/xterm.min.js?v=48"></script>
-<script src="/vendor/addon-fit.min.js?v=48"></script>
-<script src="/app.js?v=48"></script>
+<script src="/vendor/xterm.min.js?v=49"></script>
+<script src="/vendor/addon-fit.min.js?v=49"></script>
+<script src="/app.js?v=49"></script>
 </body>
 </html>
