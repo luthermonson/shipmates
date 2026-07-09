@@ -923,6 +923,13 @@ section#feed {
   border-color: var(--accent);
   color: var(--accent);
 }
+/* Camera button is a mobile-only affordance: <input capture="environment">
+   is ignored by desktop browsers, so hiding it on non-touch devices keeps
+   the desktop UX to one honest "Attach" button. Touch devices still see
+   both (📎 Attach for gallery/files, 📷 Camera for direct capture). */
+@media (pointer: fine) {
+  .attach-btn.mobile-only { display: none; }
+}
 /* iOS Safari sometimes misses clicks on `hidden` file inputs — position it
    off-screen instead so the tap on the <label> definitely opens the picker. */
 .attach-btn input[type="file"] {
