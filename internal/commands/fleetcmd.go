@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,6 +44,7 @@ func Fleet() *cli.Command {
 			fleetLs(),
 			fleetTail(),
 			fleetTell(),
+			fleetShow(),
 			fleetPending(),
 			fleetResolve(),
 			fleetStatus(),
@@ -203,6 +206,62 @@ func fleetTell() *cli.Command {
 	}
 }
 
+// fleetShow uploads a local file to a captain via Fleet Command's attach
+// endpoint. The bytes land in the target ship's .shipmates/inbox/ and the ship
+// auto-tells the mate to look at the file — the mate reads it via Claude
+// Code's own multi-modal Read tool. Shipmates does not talk to Anthropic
+// directly; the file is just transport.
+func fleetShow() *cli.Command {
+	return &cli.Command{
+		Name:      "show",
+		Usage:     "attach a file (photo, PDF, screenshot, text) to a captain — the mate reads it via Claude Code's Read tool",
+		ArgsUsage: "<captain-key> <file-path>",
+		Flags: append(operatorFlags(),
+			&cli.StringFlag{Name: "caption", Usage: "optional caption sent alongside the file"},
+		),
+		Action: func(ctx context.Context, c *cli.Command) error {
+			args := c.Args().Slice()
+			if len(args) < 2 {
+				return errors.New("usage: shipmates fleet show <captain-key> <file-path>")
+			}
+			key, filePath := args[0], args[1]
+			caption := c.String("caption")
+
+			f, err := os.Open(filePath)
+			if err != nil {
+				return fmt.Errorf("open %s: %w", filePath, err)
+			}
+			defer f.Close()
+
+			var body bytes.Buffer
+			w := multipart.NewWriter(&body)
+			fw, err := w.CreateFormFile("file", filepath.Base(filePath))
+			if err != nil {
+				return fmt.Errorf("create form file: %w", err)
+			}
+			if _, err := io.Copy(fw, f); err != nil {
+				return fmt.Errorf("copy file: %w", err)
+			}
+			if caption != "" {
+				if err := w.WriteField("caption", caption); err != nil {
+					return fmt.Errorf("write caption: %w", err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				return fmt.Errorf("close multipart: %w", err)
+			}
+
+			out, err := fleetDoRaw(ctx, c, "POST", "/api/captain/"+key+"/attach", w.FormDataContentType(), body.Bytes())
+			if err != nil {
+				return err
+			}
+			_, _ = os.Stdout.Write(out)
+			fmt.Println()
+			return nil
+		},
+	}
+}
+
 func fleetPending() *cli.Command {
 	return &cli.Command{
 		Name:      "pending",
@@ -350,6 +409,38 @@ func fleetGet(ctx context.Context, c *cli.Command, path string) ([]byte, error) 
 
 func fleetPost(ctx context.Context, c *cli.Command, path string, body []byte) ([]byte, error) {
 	return fleetDo(ctx, c, "POST", path, body)
+}
+
+// fleetDoRaw is the multipart / arbitrary-Content-Type sibling of fleetDo.
+// Used by `fleet show` to POST multipart/form-data uploads. The bearer
+// token, base URL resolution, and error handling all match fleetDo.
+func fleetDoRaw(ctx context.Context, c *cli.Command, method, path, contentType string, body []byte) ([]byte, error) {
+	base := strings.TrimRight(c.String("fleet"), "/")
+	req, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	token, err := loadFleetToken(c.String("token-file"))
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		return out, fmt.Errorf("unauthorized — set $SHIPMATES_FLEET_TOKEN or pass --token-file")
+	}
+	if resp.StatusCode >= 300 {
+		return out, fmt.Errorf("fleet %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
+	}
+	return out, nil
 }
 
 func fleetDo(ctx context.Context, c *cli.Command, method, path string, body []byte) ([]byte, error) {

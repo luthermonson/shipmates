@@ -93,6 +93,11 @@ type Server struct {
 	// once at server start against the project root (os.Getwd()); the
 	// evaluator lazy-loads settings on first use and caches per-server.
 	perms *permissions.Evaluator
+
+	// projectRoot is the ship's checkout root (os.Getwd() at server start).
+	// Attach uploads and the inbox sweeper both anchor against it so a chdir
+	// during a request can't redirect writes.
+	projectRoot string
 }
 
 // idleTimeoutEphemeral is the lifecycle bound for a server spawned by a
@@ -123,6 +128,7 @@ func New() *Server {
 		stopCh:       make(chan struct{}),
 		beadsTrigger: make(chan struct{}, 1),
 		perms:        permissions.NewEvaluator(root),
+		projectRoot:  root,
 	}
 }
 
@@ -169,6 +175,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /events", s.handleEventsJSON)
 	mux.HandleFunc("POST /events", s.handleEvents)
 	mux.HandleFunc("POST /tell/{persona}", s.handleTell)
+	mux.HandleFunc("POST /attach", s.handleAttach)
 	mux.HandleFunc("POST /hook/{persona}/{event}", s.handleHook)
 	mux.HandleFunc("GET /pending", s.handlePending)
 	mux.HandleFunc("GET /pending.json", s.handlePendingJSON)
@@ -271,6 +278,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.idleBound = idleBound
 
 	go s.beadsSyncLoop(ctx)
+	go s.attachSweeperLoop(ctx)
 
 	slog.Info("shipmates server listening", "port", port, "pid", os.Getpid())
 	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {

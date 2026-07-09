@@ -97,6 +97,12 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			if err := installCommands(cat, m); err != nil {
 				return err
 			}
+			if err := ensureAttachGitignore(); err != nil {
+				// Non-fatal: the inbox is regenerable and a missing
+				// gitignore only means the operator has to add it by
+				// hand. Warn and keep going.
+				slog.Warn("could not update .gitignore for attach inbox", "err", err)
+			}
 			if err := m.Save(); err != nil {
 				return err
 			}
@@ -224,6 +230,60 @@ func renderRoutingBlock(cat *catalog.Catalog) ([]byte, error) {
 		return nil, fmt.Errorf("render routing template %s: %w", conf.Routing, err)
 	}
 	return collapseBlankLines(rendered.Bytes()), nil
+}
+
+// attachInboxIgnorePattern is the path shipmates adds to .gitignore so a
+// binary attach doesn't accidentally get committed. Kept as a package-level
+// constant so both the installer and the eventual `shipmates update` share
+// the exact string.
+const attachInboxIgnorePattern = ".shipmates/inbox/"
+
+// ensureAttachGitignore makes sure the project's root .gitignore ignores the
+// attach inbox. If .gitignore doesn't exist yet we create one containing just
+// the inbox pattern; if it exists we append the pattern only when it isn't
+// already present, preserving whatever the user has above.
+func ensureAttachGitignore() error {
+	const path = ".gitignore"
+	existing, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		// Fresh file — write a minimal shipmates-managed header plus the
+		// pattern. Leaving the file otherwise empty is polite: the user's
+		// own ignores will land underneath without conflict.
+		content := "# shipmates: keep inbound binary attachments out of git\n" +
+			attachInboxIgnorePattern + "\n"
+		return os.WriteFile(path, []byte(content), 0o644)
+	}
+	if err != nil {
+		return err
+	}
+	if gitignoreContainsPattern(existing, attachInboxIgnorePattern) {
+		return nil
+	}
+	// Append with a leading newline only when the existing file doesn't
+	// already end with one — avoids gluing the pattern onto the last user
+	// entry.
+	buf := bytes.TrimRight(existing, "\r\n")
+	buf = append(buf, '\n', '\n')
+	buf = append(buf, "# shipmates: keep inbound binary attachments out of git\n"...)
+	buf = append(buf, attachInboxIgnorePattern...)
+	buf = append(buf, '\n')
+	return os.WriteFile(path, buf, 0o644)
+}
+
+// gitignoreContainsPattern reports whether a .gitignore body already includes
+// the given pattern on a line of its own (ignoring surrounding whitespace and
+// comment lines). Cheap linear scan — the file is always tiny.
+func gitignoreContainsPattern(body []byte, pattern string) bool {
+	for _, raw := range strings.Split(string(body), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == pattern {
+			return true
+		}
+	}
+	return false
 }
 
 // beadsWorkspace reports whether the project is beads-enabled (.beads/ in the

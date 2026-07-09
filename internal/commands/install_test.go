@@ -11,6 +11,65 @@ import (
 	"github.com/luthermonson/shipmates/internal/project"
 )
 
+func TestEnsureAttachGitignore(t *testing.T) {
+	t.Run("creates .gitignore when missing", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		if err := ensureAttachGitignore(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(".gitignore")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(got), attachInboxIgnorePattern) {
+			t.Errorf("pattern not written: %q", got)
+		}
+	})
+
+	t.Run("appends to existing .gitignore without duplicating", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		orig := "node_modules/\n*.log\n"
+		if err := os.WriteFile(".gitignore", []byte(orig), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := ensureAttachGitignore(); err != nil {
+			t.Fatal(err)
+		}
+		// Second call must not add a second entry.
+		if err := ensureAttachGitignore(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(".gitignore")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(got), "node_modules/") || !strings.Contains(string(got), "*.log") {
+			t.Errorf("existing entries dropped: %q", got)
+		}
+		if n := strings.Count(string(got), attachInboxIgnorePattern); n != 1 {
+			t.Errorf("expected exactly one inbox pattern, got %d: %q", n, got)
+		}
+	})
+
+	t.Run("no-op when pattern already present", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		orig := "# user comment\n.shipmates/inbox/\nother\n"
+		if err := os.WriteFile(".gitignore", []byte(orig), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := ensureAttachGitignore(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(".gitignore")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != orig {
+			t.Errorf("file changed when pattern already present:\nwant %q\ngot  %q", orig, got)
+		}
+	})
+}
+
 func TestComposeAgent(t *testing.T) {
 	cat := catalog.New(fstest.MapFS{
 		"catalog/routing/github.md": {Data: []byte("## GitHub routing conventions\nROUTING BLOCK\n")},
