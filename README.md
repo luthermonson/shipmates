@@ -15,6 +15,7 @@ flowchart TB
     Admiral["👤 Admiral<br/>(you)"]
 
     subgraph FleetCommand["🏛️ Fleet Command"]
+        direction TB
         Commodore["🤖 Commodore<br/>AI officer · voice + tools"]
         WebUI["🌐 Web UI<br/>PTY terminals · attach bar<br/>permission queue · events"]
         BeadsGraph[("📊 Shared task graph<br/>beads / Dolt on git refs")]
@@ -25,37 +26,25 @@ flowchart TB
     Commodore -->|dispatches| WebUI
     WebUI --- BeadsGraph
 
-    subgraph Ship1["🚢 Ship — workstation"]
-        Cap1["⚓ Captain<br/>(lead persona)"]
-        Mates1["👷 mates<br/>architect · security<br/>frontend · backend · tester"]
-        Cap1 --> Mates1
+    subgraph AllShips["🚢 Ships (one per machine)"]
+        direction TB
+        subgraph Ship1["Ship — workstation"]
+            direction LR
+            Cap1["⚓ Captain<br/>(lead persona)"] --> Mates1["👷 mates<br/>architect · security · frontend<br/>backend · tester"]
+        end
+        subgraph Ship2["Ship — laptop / VM / homelab"]
+            direction LR
+            Cap2["⚓ Captain"] --> Mates2["👷 mates"]
+        end
     end
 
-    subgraph Ship2["🚢 Ship — laptop"]
-        Cap2["⚓ Captain"]
-        Mates2["👷 mates"]
-        Cap2 --> Mates2
-    end
-
-    subgraph Ship3["🚢 Ship — Proxmox VM"]
-        Cap3["⚓ Captain"]
-        Mates3["👷 mates"]
-        Cap3 --> Mates3
-    end
-
-    Ship1 -.->|outbound WebSocket tunnel| WebUI
-    Ship2 -.->|outbound WebSocket tunnel| WebUI
-    Ship3 -.->|outbound WebSocket tunnel| WebUI
-
-    Ship1 -.->|"bd sync<br/>(git refs)"| BeadsGraph
-    Ship2 -.->|"bd sync"| BeadsGraph
-    Ship3 -.->|"bd sync"| BeadsGraph
+    AllShips -.->|"outbound WebSocket tunnels<br/>(NAT-safe)"| WebUI
+    AllShips -.->|"bd sync via git refs"| BeadsGraph
 
     style Admiral fill:#2d5f3f,color:#fff
     style Commodore fill:#3a4d8b,color:#fff
     style Cap1 fill:#6b3a3a,color:#fff
     style Cap2 fill:#6b3a3a,color:#fff
-    style Cap3 fill:#6b3a3a,color:#fff
     style BeadsGraph fill:#5a4a3a,color:#fff
 ```
 
