@@ -7,15 +7,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/luthermonson/shipmates/internal/project"
 )
+
+// AttachResp mirrors the JSON returned by the ship's POST /attach — kept in
+// the client package to avoid pulling internal/server into every CLI caller.
+type AttachResp struct {
+	AttachID string `json:"attachId"`
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+}
 
 func port() (int, error) {
 	b, err := os.ReadFile(project.PortFile())
@@ -116,4 +126,52 @@ func Get(path string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
+}
+
+// PostAttach uploads a file to the server's /attach endpoint as multipart
+// form-data with an optional caption, returning the parsed AttachResp. Used
+// by `shipmates show` — the CLI file-attach counterpart to Tell.
+func PostAttach(filePath, caption string) (*AttachResp, error) {
+	b, err := base()
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, err := w.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(fw, f); err != nil {
+		return nil, err
+	}
+	if caption != "" {
+		if err := w.WriteField("caption", caption); err != nil {
+			return nil, err
+		}
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+
+	resp, err := http.Post(b+"/attach", w.FormDataContentType(), &buf)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("server %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out AttachResp
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	return &out, nil
 }
