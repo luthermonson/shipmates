@@ -214,20 +214,40 @@ Restart of the ship wipes time-boxes (fresh trust boundary).
 | Command | What it does |
 |---|---|
 | `init [--crew a,b,c]` | scaffold `.shipmates/` + `shipmates.yaml`; optionally install personas |
-| `add` / `remove` | install / uninstall a persona (memory preserved unless `--purge`) |
+| `add <persona>` / `remove <persona>` | install / uninstall a persona (memory preserved unless `--purge`) |
 | `list` | catalog personas + which are installed |
-| `update [persona]` | refresh installed personas from the embedded catalog |
+| `update [persona]` | refresh installed personas from the embedded catalog (`--accept ours\|theirs` for non-interactive conflict resolution) |
 | `render <p> --target` | export a persona to a thin target (`agents-md` / `cursor` / `windsurf`) |
-| `ask <p> <prompt>` | one-shot delegation; resumes the persona's session |
-| `tell <p> <msg>` | message a live crew process while it works |
-| `feed` | print the ship server's activity feed |
 | `open <p>` | launch an interactive session as a persona |
-| `fanout <a,b> <prompt>` | run the same prompt across personas in parallel |
-| `drain <p>` | dispatch a persona to drain its work queue, then exit |
-| `drain-many <p...>` | drain several personas in parallel |
-| `pending` | list pending permission requests |
-| `allow <id> [--for 30m]` | approve a pending request, optionally time-boxed |
+
+### Talk to crew
+
+| Command | What it does |
+|---|---|
+| `ask <p> <prompt>` | one-shot delegation; resumes the persona's session (`--fresh` starts new) |
+| `tell <p> <msg>` | message a live crew process while it works |
+| `feed` | print the coordination server's activity feed |
+| `fanout <a,b,c> <prompt>` | run the same prompt across personas in parallel |
+| `drain <p>` | dispatch a persona to drain its work queue, then exit (`--cap N`) |
+| `drain-many <p...>` | drain several personas in parallel (`--all` / `--max-concurrent N`) |
+| `autonomous --print-charter` | print a captain scheduler charter to feed into cron / CronCreate / Actions |
+
+> **Attaching files to a persona** — `show` is fleet-scoped only. Use `shipmates fleet show <captain-key> <file>` (below) to attach a photo, screenshot, PDF, or log. The mate reads it via Claude Code's multi-modal Read tool.
+
+### Permission gate
+
+| Command | What it does |
+|---|---|
+| `pending` | list crew tool calls awaiting a decision |
+| `allow <id> [--for 30m]` | approve a pending request, optionally time-boxed (any `time.ParseDuration` string) |
 | `deny <id>` | reject a pending request |
+
+### Routing (GitHub-issues-and-PRs conventions)
+
+| Command | What it does |
+|---|---|
+| `routing apply <file>... \| --all` | compose the routing block (claim-by-label / worktree-per-issue / verdict-merge-gate) into custom persona files |
+| `routing show` | print the active routing block (what `/sync-routing` loads) |
 
 ### Ship (per-machine daemon)
 
