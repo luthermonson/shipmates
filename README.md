@@ -15,7 +15,7 @@ Shipmates uses a naval hierarchy that maps 1:1 to real roles:
                                │
                     voice ─────┼───── clicks / CLI
                                ▼
-          ┌──────────────────────────────────────┐
+          ┌───────────────────────────────────────┐
           │            Fleet Command              │
           │                                       │
           │    Commodore ── dispatches ──► Web UI │
@@ -23,7 +23,7 @@ Shipmates uses a naval hierarchy that maps 1:1 to real roles:
           │                                  ▼    │
           │           Shared task graph           │
           │        (beads / Dolt on git refs)     │
-          └──────────────────────────────────────┘
+          └───────────────────────────────────────┘
                   ▲                       ▲
                   │                       │
            outbound WebSocket        bd sync via
@@ -36,28 +36,28 @@ Shipmates uses a naval hierarchy that maps 1:1 to real roles:
     Ships — one per project. Any number of ships can
     run on the same machine (this workstation runs 4-5).
 
-          ┌──────────────────────────────────────┐
+          ┌───────────────────────────────────────┐
           │  card-cannon                          │
           │    Captain (picard) ── ► mates        │
           │      architect, security, frontend,   │
           │      backend, tester                  │
-          └──────────────────────────────────────┘
+          └───────────────────────────────────────┘
 
-          ┌──────────────────────────────────────┐
+          ┌───────────────────────────────────────┐
           │  better                               │
           │    Captain (coach) ── ► mates         │
           │      (hockey lineup)                  │
-          └──────────────────────────────────────┘
+          └───────────────────────────────────────┘
 
-          ┌──────────────────────────────────────┐
+          ┌───────────────────────────────────────┐
           │  ephpm                                │
           │    Captain ── ► mates                 │
-          └──────────────────────────────────────┘
+          └───────────────────────────────────────┘
 
-          ┌──────────────────────────────────────┐
+          ┌───────────────────────────────────────┐
           │  ... one ship per project you run     │
           │      on any number of machines        │
-          └──────────────────────────────────────┘
+          └───────────────────────────────────────┘
 ```
 
 - **Admiral** — you, the human operator, giving strategic direction
