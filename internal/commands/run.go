@@ -90,6 +90,53 @@ func Tell() *cli.Command {
 	}
 }
 
+// Show attaches a file (photo, screenshot, PDF, text) to a live crew process.
+// Uploads the file to the ship's /attach endpoint, then delivers a tell to
+// the persona pointing at the resulting path. The persona's Claude Code
+// session picks up the tell on its next turn and reads the file via its own
+// multi-modal Read tool — shipmates never touches the model API.
+//
+// Local counterpart to `shipmates fleet show`: same auto-tell format, but
+// hits the current project's coordination server directly instead of relaying
+// through Fleet Command.
+func Show() *cli.Command {
+	return &cli.Command{
+		Name:      "show",
+		Usage:     "attach a file (photo, screenshot, PDF, text) to a live crew process",
+		ArgsUsage: "<persona> <file-path>",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "caption", Usage: "optional caption sent alongside the file"},
+		},
+		Action: func(ctx context.Context, c *cli.Command) error {
+			persona := c.Args().First()
+			filePath := c.Args().Get(1)
+			if persona == "" || filePath == "" {
+				return errors.New("usage: shipmates show <persona> <file-path>")
+			}
+			if err := client.EnsureRunning(); err != nil {
+				return err
+			}
+			caption := c.String("caption")
+
+			attach, err := client.PostAttach(filePath, caption)
+			if err != nil {
+				return fmt.Errorf("upload: %w", err)
+			}
+
+			msg := fmt.Sprintf("[attachment] Admiral sent a file at `%s`", attach.Path)
+			if caption != "" {
+				msg += " — " + caption
+			}
+			if _, err := client.Post("/tell/"+persona, map[string]string{"message": msg}); err != nil {
+				return fmt.Errorf("tell: %w", err)
+			}
+
+			fmt.Printf("sent %s (%d bytes) to %s — watch with: shipmates feed\n", attach.Path, attach.Size, persona)
+			return nil
+		},
+	}
+}
+
 // Feed prints the server's activity feed (crew output, tells, events).
 func Feed() *cli.Command {
 	return &cli.Command{
