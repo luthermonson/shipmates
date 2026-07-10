@@ -11,54 +11,53 @@ That memory layer alone was Shipmates' original pitch. Fleet Command adds a seco
 Shipmates uses a naval hierarchy that maps 1:1 to real roles:
 
 ```
-                             Admiral  (you)
-                                  │
-                     voice  ──────┼──────  clicks / CLI
-                                  ▼
-             ┌─────────────────────────────────────────┐
-             │             Fleet Command                │
-             │                                          │
-             │   Commodore  ──dispatches──►   Web UI    │
-             │   AI officer                   PTY panes │
-             │   voice + tools                attach bar│
-             │                                perm queue│
-             │                                    │     │
-             │                                    ▼     │
-             │           Shared task graph              │
-             │      (beads / Dolt on git refs)          │
-             └─────────────────────────────────────────┘
-                    ▲                          ▲
-                    │                          │
-             outbound WebSocket           bd sync via
-             tunnels (NAT-safe)           git refs
-                    │                          │
-             ┌──────┴──────────────────────────┴───────┐
-             │       Ships (one per machine)           │
-             │                                         │
-             │  ┌───────────────────────────────────┐  │
-             │  │ workstation                        │  │
-             │  │   Captain ──► mates                │  │
-             │  │              architect, security,  │  │
-             │  │              frontend, backend,    │  │
-             │  │              tester                │  │
-             │  └───────────────────────────────────┘  │
-             │                                         │
-             │  ┌───────────────────────────────────┐  │
-             │  │ laptop                             │  │
-             │  │   Captain ──► mates                │  │
-             │  └───────────────────────────────────┘  │
-             │                                         │
-             │  ┌───────────────────────────────────┐  │
-             │  │ Proxmox VM                         │  │
-             │  │   Captain ──► mates                │  │
-             │  └───────────────────────────────────┘  │
-             │                                         │
-             │  ┌───────────────────────────────────┐  │
-             │  │ homelab box                        │  │
-             │  │   Captain ──► mates                │  │
-             │  └───────────────────────────────────┘  │
-             │                                         │
-             └─────────────────────────────────────────┘
+                          Admiral (you)
+                               │
+                    voice ─────┼───── clicks / CLI
+                               ▼
+          ┌──────────────────────────────────────┐
+          │            Fleet Command              │
+          │                                       │
+          │    Commodore ── dispatches ──► Web UI │
+          │    AI officer                    │    │
+          │                                  ▼    │
+          │           Shared task graph           │
+          │        (beads / Dolt on git refs)     │
+          └──────────────────────────────────────┘
+                  ▲                       ▲
+                  │                       │
+           outbound WebSocket        bd sync via
+           tunnels (NAT-safe)         git refs
+                  │                       │
+                  └───────────┬───────────┘
+                              │
+                              ▼
+
+    Ships — one per project. Any number of ships can
+    run on the same machine (this workstation runs 4-5).
+
+          ┌──────────────────────────────────────┐
+          │  card-cannon                          │
+          │    Captain (picard) ── ► mates        │
+          │      architect, security, frontend,   │
+          │      backend, tester                  │
+          └──────────────────────────────────────┘
+
+          ┌──────────────────────────────────────┐
+          │  better                               │
+          │    Captain (coach) ── ► mates         │
+          │      (hockey lineup)                  │
+          └──────────────────────────────────────┘
+
+          ┌──────────────────────────────────────┐
+          │  ephpm                                │
+          │    Captain ── ► mates                 │
+          └──────────────────────────────────────┘
+
+          ┌──────────────────────────────────────┐
+          │  ... one ship per project you run     │
+          │      on any number of machines        │
+          └──────────────────────────────────────┘
 ```
 
 - **Admiral** — you, the human operator, giving strategic direction
