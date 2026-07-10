@@ -234,8 +234,7 @@ Restart of the ship wipes time-boxes (fresh trust boundary).
 | `drain <p>` | dispatch a persona to drain its work queue, then exit (`--cap N`) |
 | `drain-many <p...>` | drain several personas in parallel (`--all` / `--max-concurrent N`) |
 | `autonomous --print-charter` | print a captain scheduler charter to feed into cron / CronCreate / Actions |
-
-> **Attaching files to a persona** — `show` is fleet-scoped only. Use `shipmates fleet show <captain-key> <file>` (below) to attach a photo, screenshot, PDF, or log. The mate reads it via Claude Code's multi-modal Read tool.
+| `show <p> <file> [--caption <text>]` | attach a file (photo, screenshot, PDF, text) to a live crew process — mate reads it via Claude Code's multi-modal Read tool |
 
 ### Permission gate
 
