@@ -10,51 +10,55 @@ That memory layer alone was Shipmates' original pitch. Fleet Command adds a seco
 
 Shipmates uses a naval hierarchy that maps 1:1 to real roles:
 
-```mermaid
-flowchart LR
-    Admiral["👤 Admiral<br/>(you)"]
-
-    subgraph FleetCommand["🏛️ Fleet Command"]
-        direction TB
-        Commodore["🤖 Commodore<br/>AI officer<br/>voice + tools"]
-        WebUI["🌐 Web UI<br/>PTY terminals<br/>attach bar<br/>permission queue<br/>events"]
-        BeadsGraph[("📊 Shared task graph<br/>beads / Dolt<br/>on git refs")]
-        Commodore -->|dispatches| WebUI
-        WebUI --- BeadsGraph
-    end
-
-    subgraph Fleet["🚢 Ships (one per machine)"]
-        direction TB
-        subgraph Ship1["workstation"]
-            direction LR
-            Cap1["⚓ Captain"] --> Mates1["👷 mates<br/>architect · security<br/>frontend · backend<br/>tester"]
-        end
-        subgraph Ship2["laptop"]
-            direction LR
-            Cap2["⚓ Captain"] --> Mates2["👷 mates"]
-        end
-        subgraph Ship3["Proxmox VM"]
-            direction LR
-            Cap3["⚓ Captain"] --> Mates3["👷 mates"]
-        end
-        subgraph Ship4["homelab box"]
-            direction LR
-            Cap4["⚓ Captain"] --> Mates4["👷 mates"]
-        end
-    end
-
-    Admiral -->|clicks / CLI| WebUI
-    Admiral <-->|voice| Commodore
-    Fleet -.->|"outbound WebSocket tunnels<br/>(NAT-safe)"| WebUI
-    Fleet -.->|"bd sync via git refs"| BeadsGraph
-
-    style Admiral fill:#2d5f3f,color:#fff
-    style Commodore fill:#3a4d8b,color:#fff
-    style Cap1 fill:#6b3a3a,color:#fff
-    style Cap2 fill:#6b3a3a,color:#fff
-    style Cap3 fill:#6b3a3a,color:#fff
-    style Cap4 fill:#6b3a3a,color:#fff
-    style BeadsGraph fill:#5a4a3a,color:#fff
+```
+                             Admiral  (you)
+                                  │
+                     voice  ──────┼──────  clicks / CLI
+                                  ▼
+             ┌─────────────────────────────────────────┐
+             │             Fleet Command                │
+             │                                          │
+             │   Commodore  ──dispatches──►   Web UI    │
+             │   AI officer                   PTY panes │
+             │   voice + tools                attach bar│
+             │                                perm queue│
+             │                                    │     │
+             │                                    ▼     │
+             │           Shared task graph              │
+             │      (beads / Dolt on git refs)          │
+             └─────────────────────────────────────────┘
+                    ▲                          ▲
+                    │                          │
+             outbound WebSocket           bd sync via
+             tunnels (NAT-safe)           git refs
+                    │                          │
+             ┌──────┴──────────────────────────┴───────┐
+             │       Ships (one per machine)           │
+             │                                         │
+             │  ┌───────────────────────────────────┐  │
+             │  │ workstation                        │  │
+             │  │   Captain ──► mates                │  │
+             │  │              architect, security,  │  │
+             │  │              frontend, backend,    │  │
+             │  │              tester                │  │
+             │  └───────────────────────────────────┘  │
+             │                                         │
+             │  ┌───────────────────────────────────┐  │
+             │  │ laptop                             │  │
+             │  │   Captain ──► mates                │  │
+             │  └───────────────────────────────────┘  │
+             │                                         │
+             │  ┌───────────────────────────────────┐  │
+             │  │ Proxmox VM                         │  │
+             │  │   Captain ──► mates                │  │
+             │  └───────────────────────────────────┘  │
+             │                                         │
+             │  ┌───────────────────────────────────┐  │
+             │  │ homelab box                        │  │
+             │  │   Captain ──► mates                │  │
+             │  └───────────────────────────────────┘  │
+             │                                         │
+             └─────────────────────────────────────────┘
 ```
 
 - **Admiral** — you, the human operator, giving strategic direction
