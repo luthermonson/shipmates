@@ -42,6 +42,7 @@ func main() {
 			commands.Open(),
 			commands.Ask(),
 			commands.Tell(),
+			commands.Show(),
 			commands.Feed(),
 			commands.Pending(),
 			commands.Allow(),
