@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/luthermonson/shipmates/internal/berth"
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
@@ -73,6 +74,11 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			&cli.StringFlag{Name: "crew", Usage: "comma-separated personas to add immediately"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
+			// R1a: init writes the canonical manifest — refuse from a berth
+			// so a shipmates init inside a berth can't fracture .shipmates/.
+			if err := berth.RefuseIfInBerth("init"); err != nil {
+				return err
+			}
 			for _, d := range []string{
 				project.Dir,
 				filepath.Join(project.Dir, project.MemoryDirName),
@@ -138,6 +144,10 @@ func Add(cat *catalog.Catalog) *cli.Command {
 		Usage:     "vendor a persona into .claude/agents and seed its memory",
 		ArgsUsage: "<persona>",
 		Action: func(ctx context.Context, c *cli.Command) error {
+			// R1a: `add` writes the manifest — refuse from a berth.
+			if err := berth.RefuseIfInBerth("add"); err != nil {
+				return err
+			}
 			name := c.Args().First()
 			if name == "" {
 				return errors.New("usage: shipmates add <persona>")

@@ -15,9 +15,11 @@ import "log/slog"
 // multiple sessions share a name.
 //
 // Returns the resolved config, the identity args (no -p prefix), the session
-// id and name, and the config fingerprint to record (WriteSessionMeta) after
-// a successful launch.
-func SessionLaunch(persona string, fresh bool) (cfg PersonaConfig, args []string, id, name, fp string) {
+// id and name, the config fingerprint to record (WriteSessionMeta) after a
+// successful launch, and creating — true when this launch is minting a fresh
+// session (so callers know whether to invoke berth.Ensure and store the new
+// cwd, vs a resume that must preserve the creation-cwd from stored meta).
+func SessionLaunch(persona string, fresh bool) (cfg PersonaConfig, args []string, id, name, fp string, creating bool) {
 	name = SessionName(persona)
 	cfg, _ = ResolvePersonaConfig(persona)
 	fp = cfg.Fingerprint()
@@ -31,9 +33,24 @@ func SessionLaunch(persona string, fresh bool) (cfg PersonaConfig, args []string
 	if have && !fresh && meta.ID != "" {
 		id = meta.ID
 		args = []string{"--resume", id, "--agent", persona}
+		creating = false
 	} else {
 		id = NewUUID()
 		args = []string{"--session-id", id, "--name", name, "--agent", persona}
+		creating = true
 	}
-	return cfg, args, id, name, fp
+	return cfg, args, id, name, fp, creating
+}
+
+// ResumeCWD returns the stored cwd for a persona's tracked session, or ""
+// when no session is stored (or when the stored meta pre-dates berthing).
+// This is the "berth only at session creation" guardrail's read side: an
+// existing session's spawn cwd is whatever it was created with, never
+// force-migrated to a berth on resume.
+func ResumeCWD(persona string) string {
+	meta, ok := ReadSessionMeta(persona)
+	if !ok {
+		return ""
+	}
+	return meta.CWD
 }

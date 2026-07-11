@@ -200,6 +200,43 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 	}
 }
 
+func TestResolvePersonaConfigBerthFrontmatter(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeAgent(t, "captain",
+		"berth: auto\ncwd: custom/dir\n")
+
+	cfg, err := ResolvePersonaConfig("captain")
+	if err != nil {
+		t.Fatalf("ResolvePersonaConfig: %v", err)
+	}
+	if cfg.Berth != "auto" {
+		t.Errorf("Berth = %q, want auto", cfg.Berth)
+	}
+	if cfg.CWD != "custom/dir" {
+		t.Errorf("CWD = %q, want custom/dir", cfg.CWD)
+	}
+}
+
+func TestResolvePersonaConfigBerthCrewOverride(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeAgent(t, "backend", "berth: off\n")
+	cfgYAML := "crew:\n  backend:\n    berth: require\n    cwd: /tmp/custom\n"
+	if err := os.WriteFile(ConfigName, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ResolvePersonaConfig("backend")
+	if err != nil {
+		t.Fatalf("ResolvePersonaConfig: %v", err)
+	}
+	if got.Berth != "require" {
+		t.Errorf("Berth = %q, want require (override should win)", got.Berth)
+	}
+	if got.CWD != "/tmp/custom" {
+		t.Errorf("CWD = %q, want /tmp/custom (override should win)", got.CWD)
+	}
+}
+
 func TestPersonaConfigFingerprint(t *testing.T) {
 	base := PersonaConfig{Mode: "ask", Model: "opus", Effort: "high"}
 	if base.Fingerprint() != base.Fingerprint() {
@@ -219,10 +256,15 @@ func TestPersonaConfigFingerprint(t *testing.T) {
 
 	// Per-invocation settings (mode, dangerouslySkipPermissions, remoteControl)
 	// are passed every call, so they must NOT change the fingerprint (no fresh).
+	// CWD/Berth are also excluded — the persona-berths guardrail. If they
+	// entered the hash, gaining a berth would auto-fresh the very session it
+	// means to preserve.
 	mustMatch := []PersonaConfig{
 		{Mode: "plan", Model: "opus", Effort: "high"},
 		{Mode: "ask", Model: "opus", Effort: "high", DangerouslySkipPermissions: true},
 		{Mode: "ask", Model: "opus", Effort: "high", RemoteControl: "x"},
+		{Mode: "ask", Model: "opus", Effort: "high", Berth: "auto"},
+		{Mode: "ask", Model: "opus", Effort: "high", CWD: ".shipmates/berths/captain"},
 	}
 	for i, c := range mustMatch {
 		if c.Fingerprint() != base.Fingerprint() {
@@ -266,7 +308,7 @@ func TestSessionMetaRoundTrip(t *testing.T) {
 		t.Fatal("ReadSessionMeta ok=true before any session exists")
 	}
 
-	if err := WriteSessionMeta("captain", "repo-captain", "uuid-1", "abc123"); err != nil {
+	if err := WriteSessionMeta("captain", "repo-captain", "uuid-1", "abc123", ""); err != nil {
 		t.Fatalf("WriteSessionMeta: %v", err)
 	}
 	meta, ok := ReadSessionMeta("captain")
@@ -288,6 +330,31 @@ func TestSessionMetaRoundTrip(t *testing.T) {
 	if lm.Name != "repo-legacy" || lm.ConfigHash != "" {
 		t.Fatalf("legacy meta = %+v, want name=repo-legacy, empty hash", lm)
 	}
+	// A pre-berth meta (no cwd field) reads back with empty CWD — the
+	// resume path preserves "no cwd override" for existing sessions.
+	if lm.CWD != "" {
+		t.Errorf("legacy CWD = %q, want empty", lm.CWD)
+	}
+
+	// A berth-era meta round-trips CWD.
+	if err := WriteSessionMeta("berthed", "repo-berthed", "uuid-2", "hash-2", ".shipmates/berths/berthed"); err != nil {
+		t.Fatalf("WriteSessionMeta: %v", err)
+	}
+	bm, ok := ReadSessionMeta("berthed")
+	if !ok {
+		t.Fatal("berthed meta not read")
+	}
+	if bm.CWD != ".shipmates/berths/berthed" {
+		t.Errorf("berthed CWD = %q, want .shipmates/berths/berthed", bm.CWD)
+	}
+
+	// ResumeCWD reads it directly.
+	if got := ResumeCWD("berthed"); got != ".shipmates/berths/berthed" {
+		t.Errorf("ResumeCWD(berthed) = %q, want .shipmates/berths/berthed", got)
+	}
+	if got := ResumeCWD("legacy"); got != "" {
+		t.Errorf("ResumeCWD(legacy) = %q, want empty (pre-berth)", got)
+	}
 }
 
 func TestDeleteSessionMeta(t *testing.T) {
@@ -300,7 +367,7 @@ func TestDeleteSessionMeta(t *testing.T) {
 	}
 
 	// Write a marker, delete it, confirm it's gone.
-	if err := WriteSessionMeta("picard", "card-cannon-picard", "uuid-stale", "hash"); err != nil {
+	if err := WriteSessionMeta("picard", "card-cannon-picard", "uuid-stale", "hash", ""); err != nil {
 		t.Fatalf("WriteSessionMeta: %v", err)
 	}
 	if _, ok := ReadSessionMeta("picard"); !ok {

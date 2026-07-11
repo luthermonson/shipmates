@@ -46,7 +46,7 @@ func dispatch(ctx context.Context, persona, prompt string, fresh bool) error {
 // dispatchTo is dispatch with caller-supplied output writers, so parallel
 // callers (drain-many) can capture each persona's output into its own buffer.
 func dispatchTo(ctx context.Context, persona, prompt string, fresh bool, stdout, stderr io.Writer) error {
-	cfg, idArgs, id, name, fp := sessionLaunch(persona, fresh)
+	cfg, idArgs, id, name, fp, cwd := sessionLaunch(persona, fresh)
 	if cfg.CommandBacked() {
 		return fmt.Errorf("persona %s is PTY-only (backend: command) — it can't take headless dispatch", persona)
 	}
@@ -55,13 +55,14 @@ func dispatchTo(ctx context.Context, persona, prompt string, fresh bool, stdout,
 	args = append(args, prompt)
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = cwd // berth or frontmatter override; empty = today's behavior (repo root)
 	cmd.Stdin = strings.NewReader("") // immediate EOF — skip claude's ~3s stdin wait
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	return project.WriteSessionMeta(persona, name, id, fp)
+	return project.WriteSessionMeta(persona, name, id, fp, cwd)
 }
 
 // Tell sends a plain-string message to a live crew process via the server. The

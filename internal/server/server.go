@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/berth"
 	"github.com/luthermonson/shipmates/internal/permissions"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/streamjson"
@@ -732,7 +733,8 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	// One long-term session per shipmate: resume the same tracked session
 	// that ask/open/fanout use, so tell/term/ask are one continuous
 	// conversation instead of per-surface forks.
-	cfg, idArgs, sessID, sessName, fp := project.SessionLaunch(persona, fresh)
+	cfg, idArgs, sessID, sessName, fp, creating := project.SessionLaunch(persona, fresh)
+	cwd, _ := berth.ResolveSpawnCWD(persona, cfg, creating)
 	args := []string{
 		"-p",
 		"--input-format", "stream-json",
@@ -751,6 +753,7 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 		args = append(args, "--append-system-prompt", prime)
 	}
 	cmd := exec.Command("claude", args...)
+	cmd.Dir = cwd // berth or frontmatter override; empty = today's behavior (shipmates process cwd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -838,7 +841,7 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	s.live[persona] = lp
 	delete(s.exited, persona) // resurrect: a re-spawned mate is no longer "done"
 	s.lastSeen[persona] = time.Now()
-	_ = project.WriteSessionMeta(persona, sessName, sessID, fp)
+	_ = project.WriteSessionMeta(persona, sessName, sessID, fp, cwd)
 	// pump receives the bufio.Reader (not the raw pipe) so the byte we peeked
 	// in the healthy-flag goroutine is still available to be decoded.
 	go s.pump(persona, stdout)
