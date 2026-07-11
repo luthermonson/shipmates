@@ -1,9 +1,9 @@
 # Persona berths — per-persona working-tree isolation
 
 > **Analysis + decision.** The analysis below (written first) weighed berths as a standalone
-> **filesystem-isolation** feature and recommended *deferring* them. A subsequent captain↔lead design
+> **filesystem-isolation** feature and recommended *deferring* them. A subsequent Admiral↔captain design
 > session **decided to build a scoped version** — not for isolation (the weak leg; see §"The honest value
-> proposition") but for **launch ergonomics and formalizing the manual lead berth**. The analysis is kept
+> proposition") but for **launch ergonomics and formalizing the manual captain berth**. The analysis is kept
 > in full: its risk enumeration (lifecycle, nesting, memory-orthogonality, session-resume, costs) is now
 > the set of **constraints the decision must honor**. The binding outcome is in **§Decision** at the end;
 > the session-resume risk remains **open (needs-CC-verification)**.
@@ -17,7 +17,7 @@
 A **berth** is a per-persona git worktree — `.shipmates/berths/<persona>` — that a persona's Claude Code
 session runs *inside* (`cmd.Dir = berthPath`), instead of sharing the repo root with every other session.
 
-**Today, berths are a manual captain convention, not a feature.** Only the lead's berth exists, and it is
+**Today, berths are a manual convention, not a feature.** Only the captain's berth exists, and it is
 set up by hand. **shipmates ships zero berth code** — a grep for `berth`/`worktree` across
 `internal/**/*.go` turns up only prose (a routing-flow description at `charters.go:51`, a config comment at
 `install.go:47`) and unrelated git-pointer parsing for repo-URL detection (`repourl.go:22,39`). No spawn
@@ -60,9 +60,9 @@ layer:
 them to routing-agnostic fleets; do not oversell them to a `github`-routed fleet, where per-issue worktrees
 have already done the heavy lifting.
 
-### Claim 2: formalizing the manual lead setup
+### Claim 2: formalizing the manual captain setup
 
-Real but small. The lead berth is a single, long-lived, low-churn worktree a human maintains by hand.
+Real but small. The captain berth is a single, long-lived, low-churn worktree a human maintains by hand.
 Turning that one convention into a command (`shipmates berth <persona>` / automatic on spawn) is a genuine
 convenience, but it does not by itself justify a general per-persona lifecycle.
 
@@ -178,10 +178,10 @@ persona's cwd from root to berth on the *next* spawn, i.e. mid-session for every
 
 ## Decision
 
-A captain↔lead design session **decided to build a scoped berth feature.** The marginal-isolation finding
+An Admiral↔captain design session **decided to build a scoped berth feature.** The marginal-isolation finding
 above stands — so the decision does **not** rest on isolation. It rests on two things the analysis
 undervalued: **launch ergonomics** (a persona should be launchable from the repo root and land in its own
-working tree, rather than a human `cd`-ing into a berth first) and **formalizing the lead berth** already
+working tree, rather than a human `cd`-ing into a berth first) and **formalizing the captain berth** already
 maintained by hand (Claim 2). Frame it as "persistent home + launch ergonomics," not parallel isolation.
 
 ### What gets built
@@ -199,9 +199,9 @@ maintained by hand (Claim 2). Frame it as "persistent home + launch ergonomics,"
   berth* — the `github` routing catalog already emits exactly this (`catalog/routing/github.md:33`), so
   zero new convention — on their own branch → PR. No runtime concurrency detection. Parallel use is rare;
   the interactive/dispatch split is an edge case, not the common path.
-- **Establish policy** (per-persona, manifest default): `auto` for the lead/coordinator (create the
+- **Establish policy** (per-persona, manifest default): `auto` for the captain/coordinator (create the
   worktree from `origin/main` if missing), `off` (run at repo root, today's behavior) as the fleet
-  default, `require` (error if absent) as an explicit opt-in. Matches the "start with the lead berth only"
+  default, `require` (error if absent) as an explicit opt-in. Matches the "start with the captain berth only"
   phasing and avoids a mass cwd migration.
 
 ### Guardrails — the analysis's risks converted to rules, not a prohibition
@@ -211,7 +211,7 @@ maintained by hand (Claim 2). Frame it as "persistent home + launch ergonomics,"
     never independently per berth. Running `update` in divergent berths is the one action that genuinely
     fractures the tracked `.shipmates/manifest.json` (`update.go:101,128`; `project.go:48-50`).
   - **R1b — berth branches stay short-divergence:** create-from-`origin/main`, commit, fast-forward back
-    (the observed `berth/lead` pattern), not long-lived forks.
+    (the observed `berth/captain` pattern), not long-lived forks.
   - Sharp edge: a `sharedMemory: true` fleet makes memory tracked and re-introduces the fracture — flag it;
     the safe default (`sharedMemory: false`) keeps memory out of the tracked tree entirely.
 - **`cwd`/berth MUST NOT enter `Fingerprint()`** (`project.go:286-288`, which hashes only `model`+`effort`
@@ -244,6 +244,6 @@ path's shipmates-side cwd-independence for a full answer.
 2. ~~**Dirty-berth policy.**~~ **Resolved:** warn-and-reuse — never auto-reset (consistent with the
    destructive-autonomy tier). Berth removal additionally refuses while a nested per-issue worktree is live.
 3. ~~**Is routing-agnostic parallel `drain-many` a real, collision-hitting pattern?**~~ **No longer gates
-   the decision.** The build rests on ergonomics and formalizing the lead berth, not isolation, so the
+   the decision.** The build rests on ergonomics and formalizing the captain berth, not isolation, so the
    demand signal that would have justified an *isolation* feature is moot. (It still informs the
    establish-policy default: `off` for the fleet until such demand appears.)
