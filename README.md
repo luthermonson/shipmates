@@ -369,10 +369,15 @@ What Shipmates contributes to the shared territory:
 
 Shipmates fills exactly one gap that no other tool handles cleanly: **persona + persistent project memory + opinionated crew assembly + fleet coordination + human-in-the-loop permission**. Bring your own routing layer.
 
+## Persona berths
+
+A **berth** is a persona's persistent home — a git worktree at `.shipmates/berths/<persona>` that its Claude Code session runs *inside*, instead of sharing the repo root with every other session. Berths are opt-in per persona via frontmatter: `berth: auto` creates and uses the worktree (the captain default), `berth: off` runs at the repo root (today's behavior — the fleet default for crew), `berth: require` errors if the berth is absent. Sessions created before berthing was enabled keep their creation-cwd on resume; only new sessions land in the berth. Manifest-mutating commands (`add`/`remove`/`update`/`init`) refuse to run from a berth — they belong at the canonical root. See [`docs/persona-berths.md`](docs/persona-berths.md) for the full design.
+
 ## Deeper reading
 
 - [`docs/architecture.md`](docs/architecture.md) — persona format, memory model, lifecycle, captain-and-crew shape
 - [`docs/fleet-architecture.md`](docs/fleet-architecture.md) — Fleet Command + multi-ship architecture (tunnels, PTY panes, shared beads memory, Admiral/Commodore voice loop)
+- [`docs/persona-berths.md`](docs/persona-berths.md) — per-persona worktrees, launch ergonomics, guardrails
 - [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) — why persistent memory changes review quality, with a worked case study
 - [`docs/diagrams.md`](docs/diagrams.md) — sequence diagrams for tell/dispatch/attach flows
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aymanbagabas/go-pty"
+	"github.com/luthermonson/shipmates/internal/berth"
 	"github.com/luthermonson/shipmates/internal/project"
 )
 
@@ -116,7 +117,7 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 	// (opencode, aider, ...) just get their argv under a PTY — their status
 	// derives from screen activity, which pumpPTY already records.
 	var cmd *pty.Cmd
-	var sessID, sessName, fp string
+	var sessID, sessName, fp, cwd string
 	pcfg, _ := project.ResolvePersonaConfig(persona)
 	if pcfg.CommandBacked() {
 		if len(pcfg.Command) == 0 {
@@ -138,7 +139,9 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 		}
 		var cfg project.PersonaConfig
 		var idArgs []string
-		cfg, idArgs, sessID, sessName, fp = project.SessionLaunch(persona, false)
+		var creating bool
+		cfg, idArgs, sessID, sessName, fp, creating = project.SessionLaunch(persona, false)
+		cwd, _ = berth.ResolveSpawnCWD(persona, cfg, creating)
 		args := []string{
 			// observe-only hooks: interactive claude prompts for permissions
 			// natively in the terminal — the operator approves right where they
@@ -153,6 +156,9 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 			args = append(args, "--append-system-prompt", prime)
 		}
 		cmd = pt.Command(claudePath, args...)
+	}
+	if cwd != "" {
+		cmd.Dir = cwd
 	}
 	if err := cmd.Start(); err != nil {
 		_ = pt.Close()
@@ -173,7 +179,7 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 	s.refs++
 	s.lastActivity = time.Now()
 	if sessID != "" {
-		_ = project.WriteSessionMeta(persona, sessName, sessID, fp)
+		_ = project.WriteSessionMeta(persona, sessName, sessID, fp, cwd)
 	}
 	go s.pumpPTY(p)
 	return p, nil
