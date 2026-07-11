@@ -23,19 +23,19 @@ file:
 
 > **Read your memory first.** Every session start, read everything in `.shipmates/memory/<persona>/`.
 
-(`catalog/lead/.claude/agents/lead.md`, `backend.md`, `architect.md`, `security.md`, `frontend.md`,
-`tester.md`.) The lead's copy is the sharpest: *"If you skip the read, you become a generic advisor and
+(`catalog/captain/.claude/agents/captain.md`, `backend.md`, `architect.md`, `security.md`, `frontend.md`,
+`tester.md`.) The captain's copy is the sharpest: *"If you skip the read, you become a generic advisor and
 the partnership degrades."*
 
 **That instruction is discretionary.** It relies on the model choosing to obey — nothing enforces it. And
-it fails in practice. The lead session that prompted this doc read **3 of its 20** memory files before
-acting, became precisely the "generic advisor" `lead.md` warns about, and only recovered when the human
+it fails in practice. The captain session that prompted this doc read **3 of its 20** memory files before
+acting, became precisely the "generic advisor" `captain.md` warns about, and only recovered when the human
 forced the read. "Auto-loaded" is aspirational; the mechanism is a hope. The fix is to make the harness
 load the memory, not the model.
 
 ## The verified mechanism (empirical, current Claude Code)
 
-The lead ran a `type: command` hook harness that logs each event's stdin payload while driving real
+The captain ran a `type: command` hook harness that logs each event's stdin payload while driving real
 `claude -p` invocations. Results on the **currently installed** Claude Code:
 
 - **`SessionStart` fires in `-p`.** Confirmed across every launch shape shipmates uses: plain
@@ -69,7 +69,7 @@ path from the plain-`-p` command hooks the primary mechanism uses. Both results 
 | `http` (`--settings`, `server.go:550-568`) | persistent stream-json input — the **live/PTY server mate** | **does not fire** | **fire** (carry `agent_type`) |
 
 So the note is **correct-but-narrow: http/stream-json specific.** It does not threaten the primary
-recommendation, because the dispatch crew, `open`, and the interactive lead all use **command** hooks on the
+recommendation, because the dispatch crew, `open`, and the interactive captain all use **command** hooks on the
 plain-`-p`/interactive path — where `SessionStart` fires. The http miss constrains only the live-server/PTY
 stream-json path (next section).
 
@@ -107,12 +107,12 @@ The hook fires in whatever project the session's cwd resolves to, so wiring foll
   - This **resolves the earlier ancestor-merge worry.** CC settings precedence has no ancestor-directory
     merge, but none is needed here: the crew's project dir *is* the repo root, so root-level wiring is
     already at their project root.
-- **The interactive lead runs inside its berth** (`.shipmates/berths/lead`, a hand-maintained worktree —
+- **The interactive captain runs inside its berth** (`.shipmates/berths/captain`, a hand-maintained worktree —
   see `persona-berths.md`), so its project dir is the berth. Its hook belongs in the **berth's own**
-  `.claude/settings.json`, loading the lead memory that lives in the berth. (This is coherent because the
-  lead's memory-location tracks its session cwd — the general berth-vs-gitignored-memory trap in
+  `.claude/settings.json`, loading the captain memory that lives in the berth. (This is coherent because the
+  captain's memory-location tracks its session cwd — the general berth-vs-gitignored-memory trap in
   `persona-berths.md` §4 bites only if you run a persona in a berth while its memory lives *only* in the
-  root checkout; it does not bite the crew, who run at the root, nor the lead, whose memory lives in its
+  root checkout; it does not bite the crew, who run at the root, nor the captain, whose memory lives in its
   berth.)
 - **`shipmates open <persona>`** is interactive `claude` from the repo root (`open.go:50`, no `cmd.Dir`), so
   it uses the same repo-root `.claude/settings.json` as the dispatch crew. Covered by the same wiring.
@@ -149,7 +149,7 @@ previously-open questions:
 So this path can't use a `SessionStart` hook, but it has two viable memory-load options:
 
 **Option (default) — `--append-system-prompt`.** The server already uses it here for beads prime
-(`server.go:602-603`, `ptyproc.go:152-153`) and the bridge brain uses it for the captain prompt
+(`server.go:602-603`, `ptyproc.go:152-153`) and the Commodore (Fleet Command's AI officer) uses it for the captain prompt
 (`claudebrain.go:97`). It is per-invocation, rides the system prompt rather than the transcript
 (`claudebrain.go:93-95`), shipmates has the persona in hand, and it reads canonical (root) memory — a
 proven, worktree-independent, one-shot injection. Simplest; recommended default.
@@ -189,7 +189,7 @@ fresh worktree carries only tracked files and memory is gitignored by default (`
 `architecture.md:125`) — the berth's `.shipmates/memory/<persona>/` would be empty. Berths are now purely a
 filesystem-isolation feature, evaluated on their own merits in **`persona-berths.md`** (verdict there: not
 worth their own worktree-lifecycle code near-term). They must not be coupled to memory-load, and the hook
-must stay cwd-canonical (crew at repo root; lead in its berth where its memory lives).
+must stay cwd-canonical (crew at repo root; captain in its berth where its memory lives).
 
 ## Mechanism comparison
 
@@ -197,7 +197,7 @@ must stay cwd-canonical (crew at repo root; lead in its berth where its memory l
 |---|---|---|
 | Fires/works in plain `-p` | **verified** (current CC, startup + resume) | proven (beadsPrime, captain prompt) |
 | Reaches dispatch crew (`ask`/`drain`/`drain-many`/`fanout`) | **yes** (repo-root settings discovery) | yes (flag at spawn) |
-| Reaches interactive `open` / lead | yes (settings discovery) | yes (flag) |
+| Reaches interactive `open` / captain | yes (settings discovery) | yes (flag) |
 | Reaches live-server / PTY stream-json | **no** (http `SessionStart` doesn't fire — resolved) | yes (already the beadsPrime path; or a `UserPromptSubmit` http hook) |
 | Persona identity | free (`agent_type` in stdin) | free (`persona` is the spawn-fn arg) |
 | shipmates Go changes | **none** (config-only; managed wiring optional) | append at server/PTY sites (already present for beads) |
@@ -209,13 +209,13 @@ must stay cwd-canonical (crew at repo root; lead in its berth where its memory l
 **Primary: a `type: command` `SessionStart` hook keyed on `.agent_type`, loading
 `.shipmates/memory/<agent_type>/`.** It is verified on the current Claude Code, needs **zero shipmates Go
 changes** (shipmates already passes `--agent`; CC already exposes `agent_type`; the memory path is a fixed
-convention), and it covers the interactive lead, `shipmates open`, **and** the plain-`-p` dispatch crew
+convention), and it covers the interactive captain, `shipmates open`, **and** the plain-`-p` dispatch crew
 (`ask`/`drain`/`drain-many`/`fanout`) on **both first-run and resume**. This is the deterministic
 enforcement the doc set out to find, and it is dramatically cheaper than every option the prior drafts
 weighed.
 
 **Wiring:** repo-root `.claude/settings.json` for the dispatch crew and `open` (they launch from the repo
-root); the interactive lead's berth carries the hook in its own `.claude/settings.json`. Ship it hand-added
+root); the interactive captain's berth carries the hook in its own `.claude/settings.json`. Ship it hand-added
 first (zero change, immediate), then optionally as a shipmates-managed catalog artifact (the durable,
 single-source-of-truth form) once the human-review-of-executed-artifacts story is settled.
 
