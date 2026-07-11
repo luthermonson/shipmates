@@ -102,6 +102,8 @@ shipmates list
 
 This vendors persona files into `.claude/agents/<name>.md` (Claude Code reads them natively — no new runtime), seeds each persona's memory at `.shipmates/memory/<name>/`, drops per-persona `policy.yaml` files into `.shipmates/policies/`, and writes `shipmates.yaml`. Personas write to their memory dir as they learn your project.
 
+Memory is auto-loaded into every session via a Claude Code `SessionStart` hook wired into `.claude/settings.json` on `init` — the hook shells out to `shipmates hook load-memory`, which reads the persona's memory dir and injects the contents as session context. Deterministic: no dependence on the model choosing to read memory first. Reaches `ask`, `drain`, `drain-many`, `fanout`, and `open` on every startup and resume. (The live-server / PTY stream-json path loads memory separately via `--append-system-prompt`, unchanged.)
+
 Use a persona three ways:
 
 ```bash
