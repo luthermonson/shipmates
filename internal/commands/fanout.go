@@ -91,20 +91,21 @@ func oneShotDelegate(ctx context.Context, persona, prompt string) ([]byte, error
 		return nil, fmt.Errorf("persona %q is not installed", persona)
 	}
 
-	cfg, idArgs, id, name, fp := sessionLaunch(persona, false)
+	cfg, idArgs, id, name, fp, cwd := sessionLaunch(persona, false)
 	args := append([]string{"-p"}, idArgs...)
 	args = append(args, cfg.LaunchFlags(true)...)
 	args = append(args, prompt)
 
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = cwd // berth or frontmatter override; empty = today's behavior (repo root)
 	cmd.Stdin = strings.NewReader("") // immediate EOF — skip claude's ~3s stdin wait
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	if err := cmd.Run(); err != nil {
 		return buf.Bytes(), err
 	}
-	if err := project.WriteSessionMeta(persona, name, id, fp); err != nil {
+	if err := project.WriteSessionMeta(persona, name, id, fp, cwd); err != nil {
 		return buf.Bytes(), err
 	}
 	return buf.Bytes(), nil

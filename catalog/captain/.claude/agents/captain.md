@@ -9,6 +9,11 @@ mode: captain
 permissions:
   mode: ask
 remoteControl: false
+# Berth: the captain runs inside a persistent worktree at
+# .shipmates/berths/captain (created from origin/main on first spawn). Every
+# other persona defaults to `off` (repo root) — the captain is the only one
+# with `berth: auto` out of the box. See docs/persona-berths.md.
+berth: auto
 ---
 
 # Role

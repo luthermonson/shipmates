@@ -37,7 +37,7 @@ func Open() *cli.Command {
 				return err
 			}
 
-			cfg, idArgs, id, name, fp := sessionLaunch(persona, c.Bool("fresh"))
+			cfg, idArgs, id, name, fp, cwd := sessionLaunch(persona, c.Bool("fresh"))
 			args := append([]string{}, idArgs...) // interactive: no -p
 			args = append(args, cfg.LaunchFlags(true)...)
 			if cfg.RemoteControl != "" {
@@ -48,13 +48,14 @@ func Open() *cli.Command {
 			}
 
 			cmd := exec.CommandContext(ctx, "claude", args...)
+			cmd.Dir = cwd // berth or frontmatter override; empty = today's behavior (repo root)
 			cmd.Stdin = os.Stdin
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
 				return err
 			}
-			return project.WriteSessionMeta(persona, name, id, fp)
+			return project.WriteSessionMeta(persona, name, id, fp, cwd)
 		},
 	}
 }

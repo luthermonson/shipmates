@@ -80,10 +80,17 @@ func SessionMarker(persona string) string {
 // SessionMeta is the per-persona session record stored at SessionMarker. It
 // tracks the session name and the config fingerprint at creation time, so
 // callers can detect config drift and start a fresh session automatically.
+//
+// CWD is the child claude's cmd.Dir at session-creation time — the berth
+// guardrail. Empty means "no override" (spawn at the shipmates process cwd,
+// today's behavior). Sessions created before berthing existed have no CWD
+// field on disk; ReadSessionMeta preserves that as an empty string so their
+// resume path stays unchanged — the "berth only at session creation" rule.
 type SessionMeta struct {
 	Name       string `json:"name"`
 	ID         string `json:"id"` // the session UUID — resume by this to avoid --resume name ambiguity
 	ConfigHash string `json:"config"`
+	CWD        string `json:"cwd,omitempty"`
 }
 
 // ReadSessionMeta loads a persona's session record. ok is false if no session
@@ -100,12 +107,15 @@ func ReadSessionMeta(persona string) (meta SessionMeta, ok bool) {
 	return meta, true
 }
 
-// WriteSessionMeta records a persona's session name, UUID, and config fingerprint.
-func WriteSessionMeta(persona, name, id, configHash string) error {
+// WriteSessionMeta records a persona's session name, UUID, and config
+// fingerprint. cwd is stored so subsequent resumes land in the same directory
+// the session was created in — the "berth only at creation" guardrail. Pass
+// "" for cwd to preserve today's repo-root behavior.
+func WriteSessionMeta(persona, name, id, configHash, cwd string) error {
 	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(SessionMeta{Name: name, ID: id, ConfigHash: configHash}, "", "  ")
+	b, err := json.MarshalIndent(SessionMeta{Name: name, ID: id, ConfigHash: configHash, CWD: cwd}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -244,6 +254,8 @@ type CrewOverride struct {
 	Effort                     string    `yaml:"effort"`
 	Backend                    string    `yaml:"backend"`
 	Command                    []string  `yaml:"command"`
+	Berth                      string    `yaml:"berth"`
+	CWD                        string    `yaml:"cwd"`
 }
 
 // LoadConfig reads shipmates.yaml, returning a zero Config if it's absent.
@@ -298,6 +310,18 @@ type PersonaConfig struct {
 	// from screen activity instead of hook events.
 	Backend string
 	Command []string // argv for backend "command"
+
+	// Berth is the persona's berth policy: "off" (run at repo root, today's
+	// behavior — fleet default), "auto" (create the worktree from origin/main
+	// if missing, use it — captain default), or "require" (error if absent).
+	// Resolved from frontmatter or crew override; see internal/berth.
+	Berth string
+
+	// CWD is an explicit cwd override for the persona (frontmatter/crew field).
+	// Empty means "no override" — the caller falls back to the berth path (if
+	// berth is on) or the repo root. Never enters Fingerprint(): changing cwd
+	// must NOT auto-fresh the session it means to preserve.
+	CWD string
 }
 
 // CommandBacked reports whether the persona runs a foreign agent (PTY-only).
@@ -351,6 +375,8 @@ type personaFrontmatter struct {
 	Effort                     string    `yaml:"effort"`
 	Backend                    string    `yaml:"backend"`
 	Command                    []string  `yaml:"command"`
+	Berth                      string    `yaml:"berth"`
+	CWD                        string    `yaml:"cwd"`
 	ShipmatesPersona           *bool     `yaml:"shipmatesPersona"`
 }
 
@@ -394,6 +420,8 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 	cfg.Effort = strings.TrimSpace(fm.Effort)
 	cfg.Backend = strings.TrimSpace(fm.Backend)
 	cfg.Command = fm.Command
+	cfg.Berth = strings.TrimSpace(fm.Berth)
+	cfg.CWD = strings.TrimSpace(fm.CWD)
 	rcNode := fm.RemoteControl
 	if fm.DangerouslySkipPermissions != nil {
 		cfg.DangerouslySkipPermissions = *fm.DangerouslySkipPermissions
@@ -418,6 +446,12 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 		}
 		if len(ov.Command) > 0 {
 			cfg.Command = ov.Command
+		}
+		if b := strings.TrimSpace(ov.Berth); b != "" {
+			cfg.Berth = b
+		}
+		if c := strings.TrimSpace(ov.CWD); c != "" {
+			cfg.CWD = c
 		}
 		if ov.RemoteControl.Kind != 0 {
 			rcNode = ov.RemoteControl
