@@ -54,6 +54,7 @@ func main() {
 			commands.Fleet(),
 			commands.Server(),
 			commands.Ship(),
+			commands.Hook(),
 		},
 	}
 
