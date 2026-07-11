@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -102,6 +103,12 @@ func Init(cat *catalog.Catalog) *cli.Command {
 				// gitignore only means the operator has to add it by
 				// hand. Warn and keep going.
 				slog.Warn("could not update .gitignore for attach inbox", "err", err)
+			}
+			if err := ensureSessionStartHook(); err != nil {
+				// Non-fatal: the hook is a determinism upgrade, not a
+				// correctness requirement — without it we fall back to the
+				// old prompt-instruction path. Warn and keep going.
+				slog.Warn("could not wire SessionStart memory hook", "err", err)
 			}
 			if err := m.Save(); err != nil {
 				return err
@@ -268,6 +275,127 @@ func ensureAttachGitignore() error {
 	buf = append(buf, attachInboxIgnorePattern...)
 	buf = append(buf, '\n')
 	return os.WriteFile(path, buf, 0o644)
+}
+
+// sessionStartHookCommand is the shell command Claude Code invokes for the
+// SessionStart memory hook. It's a bare `shipmates hook load-memory` — the
+// binary must be on the user's PATH (the same requirement `shipmates` already
+// has). Kept as a package-level constant so the installer and the merge
+// logic share the exact string, and the "already wired?" check can find it.
+const sessionStartHookCommand = "shipmates hook load-memory"
+
+// claudeSettingsPath is the repo-root `.claude/settings.json` file where the
+// SessionStart hook is wired. Claude Code discovers this file automatically
+// on every launch from the project root, which is exactly where shipmates
+// spawns the dispatch crew (ask/drain/drain-many/fanout) and `open`.
+func claudeSettingsPath() string { return filepath.Join(".claude", "settings.json") }
+
+// ensureSessionStartHook idempotently wires the memory-loader SessionStart
+// hook into .claude/settings.json. The scheme is:
+//
+//   - If the file doesn't exist, create a minimal one containing just the
+//     hook block.
+//   - If it exists but has no `hooks` key, add one carrying our SessionStart
+//     entry and preserve every other top-level key.
+//   - If it exists and already has a `hooks.SessionStart` array whose entries
+//     already invoke `shipmates hook load-memory`, do nothing (idempotent).
+//   - Otherwise, append our matcher to the existing SessionStart array,
+//     preserving whatever the user (or another tool) has wired.
+//
+// The design goal is "never clobber user config." We only add; we never
+// remove or rewrite anything else in the file. If the file is present but
+// malformed JSON we bail with an error rather than overwrite it — the
+// operator gets a clear signal and their bad JSON isn't silently discarded.
+func ensureSessionStartHook() error {
+	path := claudeSettingsPath()
+	settings := map[string]any{}
+	existing, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if len(bytes.TrimSpace(existing)) > 0 {
+		if err := json.Unmarshal(existing, &settings); err != nil {
+			return fmt.Errorf("parse %s: %w (refusing to overwrite malformed settings)", path, err)
+		}
+	}
+
+	changed, err := mergeSessionStartHook(settings, sessionStartHookCommand)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return err
+	}
+	slog.Info("wired SessionStart memory hook", "file", path)
+	return nil
+}
+
+// mergeSessionStartHook inserts a `type: command` entry running `command`
+// into settings["hooks"]["SessionStart"], preserving every other key.
+// Returns whether the settings map changed.
+//
+// The shape we produce matches the Claude Code hooks-settings schema (also
+// used by the server's --settings JSON at server.go:hookSettings):
+//
+//	{
+//	  "hooks": {
+//	    "SessionStart": [
+//	      {"hooks": [{"type": "command", "command": "shipmates hook load-memory"}]}
+//	    ]
+//	  }
+//	}
+//
+// If a matcher already contains a hook with the same command, we treat that
+// as "already wired" and don't add a second entry — this keeps re-running
+// `shipmates init` (or `update`) idempotent.
+func mergeSessionStartHook(settings map[string]any, command string) (bool, error) {
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+
+	starts, _ := hooks["SessionStart"].([]any)
+	// Idempotency check: is our command already in any matcher?
+	for _, m := range starts {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		inner, _ := mm["hooks"].([]any)
+		for _, h := range inner {
+			hh, ok := h.(map[string]any)
+			if !ok {
+				continue
+			}
+			if hh["type"] == "command" && strings.TrimSpace(fmt.Sprint(hh["command"])) == command {
+				return false, nil
+			}
+		}
+	}
+
+	starts = append(starts, map[string]any{
+		"hooks": []any{
+			map[string]any{
+				"type":    "command",
+				"command": command,
+			},
+		},
+	})
+	hooks["SessionStart"] = starts
+	settings["hooks"] = hooks
+	return true, nil
 }
 
 // gitignoreContainsPattern reports whether a .gitignore body already includes
