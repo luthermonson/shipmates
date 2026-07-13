@@ -10,7 +10,7 @@ import (
 // agent file plus two memory seeds; "tester" ships only an agent file.
 func fakeCatalog() fstest.MapFS {
 	return fstest.MapFS{
-		"catalog/captain/.claude/agents/captain.md": {
+		"catalog/captain/agent.md": {
 			Data: []byte("---\nname: captain\n---\ncaptain body\n"),
 		},
 		"catalog/captain/memory-seeds/seed.md": {
@@ -19,7 +19,7 @@ func fakeCatalog() fstest.MapFS {
 		"catalog/captain/memory-seeds/log.md": {
 			Data: []byte("seed two\n"),
 		},
-		"catalog/tester/.claude/agents/tester.md": {
+		"catalog/tester/agent.md": {
 			Data: []byte("---\nname: tester\n---\ntester body\n"),
 		},
 	}

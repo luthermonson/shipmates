@@ -20,3 +20,8 @@ Thumbs.db
 
 # Node (for any future tooling)
 node_modules/
+
+# Local self-hosted Shipmates state for this source checkout
+/.codex/
+/.shipmates/
+/shipmates.yaml

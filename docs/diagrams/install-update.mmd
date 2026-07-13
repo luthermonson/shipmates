@@ -1,35 +1,10 @@
 flowchart TB
-    Binary["shipmates binary<br/>(catalog embedded via //go:embed)"]
-
-    subgraph Catalog["embedded catalog/"]
-        direction LR
-        Personas["personas/<br/>agent.md + memory-seeds/"]
-        Commands["commands/<br/>standup.md"]
-        Settings["settings/<br/>hooks.json.tmpl"]
-    end
-
-    Binary --- Catalog
-
-    Add{{"shipmates add persona"}}
-    Update{{"shipmates update"}}
-
-    Agents[".claude/agents/persona.md"]
-    Cmds[".claude/commands/name.md"]
-    MemDir["memory/persona/<br/>(seeded once, then sacred)"]
-    Manifest[".shipmates/manifest.json<br/>(SHA of each shipped file)"]
-
-    Personas -->|"vendor"| Agents
-    Personas -->|"copy seeds ONCE (first add)"| MemDir
-    Commands -->|"vendor"| Cmds
-    Add --> Agents
-    Add --> MemDir
-    Add --> Manifest
-
-    Update -->|"compare SHA vs manifest"| Decision{"file diverged?"}
-    Decision -->|"unchanged"| Overwrite["overwrite + bump manifest"]
-    Decision -->|"user-edited,<br/>catalog same"| Leave["leave alone"]
-    Decision -->|"user-edited AND<br/>catalog updated"| Conflict["show unified diff<br/>keep / take / sidecar"]
-    Update -. "never touches" .-> MemDir
-
-    classDef sacred fill:#eef,stroke:#446
-    class MemDir sacred
+    Catalog[Embedded catalog] --> Add[shipmates add persona]
+    Add --> Agent[.codex/agents/persona.toml]
+    Add --> Policy[.shipmates/policies/persona.yaml]
+    Add --> Memory[.shipmates/memory/persona]
+    Add --> Manifest[.shipmates/manifest.json]
+    Update[shipmates update] --> Check{managed file diverged?}
+    Check -->|no| Refresh[refresh from catalog]
+    Check -->|yes| Choice[explicit keep, take, or sidecar]
+    Update -. preserves accumulated memory .-> Memory

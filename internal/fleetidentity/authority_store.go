@@ -1,0 +1,200 @@
+package fleetidentity
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"time"
+)
+
+const authoritySchema = 1
+const authorityFile = "fleet-authority.json"
+
+type durableCredential struct {
+	ID, Verifier string
+	Revoked      bool
+}
+type durableRotation struct {
+	Pending durableCredential
+	Expires time.Time
+	Proved  bool
+}
+type durableShip struct {
+	ID         string
+	Revoked    bool
+	Current    durableCredential
+	Rotation   *durableRotation
+	Generation uint64
+}
+type durableArtifact struct {
+	ID, Verifier string
+	Expires      time.Time
+	Used         bool
+	TxnID        string
+	Result       EnrollmentResult
+}
+type durableObserver struct {
+	Credential durableCredential
+	Ships      []string
+}
+type durableOperator struct {
+	Credential                   durableCredential `json:"credential"`
+	Subject, FleetID, Capability string
+	Generation                   uint64
+	Ships                        []string
+	Issued, Expires, RevokeAt    time.Time
+	PreviousID                   string
+}
+type durableAuthority struct {
+	Schema    int               `json:"schema"`
+	FleetID   string            `json:"fleet_id"`
+	Artifacts []durableArtifact `json:"artifacts"`
+	Ships     []durableShip     `json:"ships"`
+	Observers []durableObserver `json:"observers"`
+	Operators []durableOperator `json:"operators"`
+	TxnOrder  []string          `json:"txn_order"`
+}
+
+func dc(c credential) durableCredential {
+	return durableCredential{c.id, base64.RawURLEncoding.EncodeToString(c.verifier[:]), c.revoked}
+}
+func credentialFrom(c durableCredential) (credential, error) {
+	b, e := base64.RawURLEncoding.DecodeString(c.Verifier)
+	if e != nil || len(b) != 32 || !opaqueID.MatchString(c.ID) {
+		return credential{}, errors.New("bad")
+	}
+	var v [32]byte
+	copy(v[:], b)
+	return credential{c.ID, v, c.Revoked}, nil
+}
+func (r *Registry) durableLocked() durableAuthority {
+	d := durableAuthority{Schema: authoritySchema, FleetID: r.fleetID, TxnOrder: append([]string(nil), r.txnOrder...)}
+	for id, a := range r.artifacts {
+		d.Artifacts = append(d.Artifacts, durableArtifact{id, base64.RawURLEncoding.EncodeToString(a.verifier[:]), a.expires, a.used, a.txnID, a.result})
+	}
+	for _, s := range r.ships {
+		x := durableShip{ID: s.id, Revoked: s.revoked, Current: dc(s.current), Generation: s.generation}
+		if s.rotation != nil {
+			x.Rotation = &durableRotation{dc(s.rotation.pending), s.rotation.expires, s.rotation.proved}
+		}
+		d.Ships = append(d.Ships, x)
+	}
+	for _, o := range r.observers {
+		ids := make([]string, 0, len(o.ships))
+		for id := range o.ships {
+			ids = append(ids, id)
+		}
+		d.Observers = append(d.Observers, durableObserver{dc(o.credential), ids})
+	}
+	for _, o := range r.operators {
+		x := operatorRecord(o)
+		d.Operators = append(d.Operators, durableOperator{dc(o.credential), x.SubjectID, x.FleetID, x.Capability, x.CredentialGeneration, x.ShipIDs, x.IssuedAt, x.ExpiresAt, o.revokeAt, o.previousID})
+	}
+	return d
+}
+func (r *Registry) restoreLocked(d durableAuthority) error {
+	if d.Schema != authoritySchema || d.FleetID != r.fleetID || len(d.Artifacts) > maxArtifacts || len(d.Ships) > maxShips || len(d.Observers) > maxObservers || len(d.Operators) > maxOperators || len(d.TxnOrder) > maxTxnResults {
+		return storageError()
+	}
+	r.artifacts = map[string]*artifact{}
+	r.ships = map[string]*ship{}
+	r.observers = map[string]*observer{}
+	r.operators = map[string]*operatorCredential{}
+	r.txnOrder = append([]string(nil), d.TxnOrder...)
+	for _, x := range d.Artifacts {
+		b, e := base64.RawURLEncoding.DecodeString(x.Verifier)
+		if e != nil || len(b) != 32 || !opaqueID.MatchString(x.ID) {
+			return storageError()
+		}
+		var v [32]byte
+		copy(v[:], b)
+		r.artifacts[x.ID] = &artifact{v, x.Expires, x.Used, x.TxnID, x.Result}
+	}
+	for _, x := range d.Ships {
+		c, e := credentialFrom(x.Current)
+		if e != nil || !opaqueID.MatchString(x.ID) {
+			return storageError()
+		}
+		s := &ship{id: x.ID, revoked: x.Revoked, current: c, generation: x.Generation}
+		if x.Rotation != nil {
+			p, e := credentialFrom(x.Rotation.Pending)
+			if e != nil {
+				return storageError()
+			}
+			s.rotation = &rotation{p, x.Rotation.Expires, x.Rotation.Proved}
+		}
+		r.ships[x.ID] = s
+	}
+	for _, x := range d.Observers {
+		c, e := credentialFrom(x.Credential)
+		if e != nil {
+			return storageError()
+		}
+		o := &observer{credential: c, ships: map[string]struct{}{}}
+		for _, id := range x.Ships {
+			if !opaqueID.MatchString(id) {
+				return storageError()
+			}
+			o.ships[id] = struct{}{}
+		}
+		r.observers[c.id] = o
+	}
+	for _, x := range d.Operators {
+		c, e := credentialFrom(x.Credential)
+		if e != nil || !opaqueID.MatchString(x.Subject) || x.FleetID != r.fleetID || !validOperatorCapability(x.Capability) || x.Generation == 0 || len(x.Ships) == 0 || !x.Issued.Before(x.Expires) {
+			return storageError()
+		}
+		ships := map[string]struct{}{}
+		for _, id := range x.Ships {
+			if !opaqueID.MatchString(id) {
+				return storageError()
+			}
+			ships[id] = struct{}{}
+		}
+		if r.operators[c.id] != nil {
+			return storageError()
+		}
+		if x.PreviousID != "" && !opaqueID.MatchString(x.PreviousID) {
+			return storageError()
+		}
+		r.operators[c.id] = &operatorCredential{credential: c, subject: x.Subject, fleetID: x.FleetID, capability: x.Capability, generation: x.Generation, ships: ships, issued: x.Issued, expires: x.Expires, revokeAt: x.RevokeAt, previousID: x.PreviousID}
+	}
+	return nil
+}
+func (r *Registry) loadAuthority() error {
+	b, exists, err := readAuthority(filepath.Clean(r.storeDir))
+	if err != nil {
+		return err
+	}
+	if !exists {
+		d := r.durableLocked()
+		b, _ = json.Marshal(d)
+		return writeAuthority(filepath.Clean(r.storeDir), append(b, '\n'))
+	}
+	if len(b) > 4<<20 {
+		return storageError()
+	}
+	var d durableAuthority
+	if json.Unmarshal(b, &d) != nil {
+		return storageError()
+	}
+	return r.restoreLocked(d)
+}
+func (r *Registry) commitLocked(before durableAuthority) error {
+	if r.storeDir == "" {
+		return nil
+	}
+	b, e := json.Marshal(r.durableLocked())
+	if e == nil {
+		e = writeAuthority(filepath.Clean(r.storeDir), append(b, '\n'))
+	}
+	if e != nil {
+		var uncertain *CommitUncertainError
+		if !errors.As(e, &uncertain) {
+			_ = r.restoreLocked(before)
+		}
+		return e
+	}
+	return nil
+}

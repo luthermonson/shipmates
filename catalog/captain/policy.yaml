@@ -1,7 +1,7 @@
 # Captain policy overlay
 #
 # Vendored to .shipmates/policies/captain.yaml on `shipmates add captain`.
-# Same shape as .claude/settings.json's `permissions:` block. Rules here
+# Shipmates policy rules are evaluated by the Codex-native runtime. Rules here
 # extend (allow/ask) or union (deny) with the project-level rules; deny in
 # ANY layer beats everything.
 #

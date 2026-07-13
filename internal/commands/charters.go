@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"text/template"
@@ -65,23 +63,8 @@ func routingStateRead() string {
 	}
 }
 
-// installedPersonas lists fleet persona names present in .claude/agents/,
-// excluding files that opt out via `shipmatesPersona: false` (e.g. a non-fleet
-// project-Q&A subagent).
 func installedPersonas() ([]string, error) {
-	matches, err := filepath.Glob(filepath.Join(project.AgentsDir, "*.md"))
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, m := range matches {
-		if !project.IsFleetPersonaFile(m) {
-			continue
-		}
-		names = append(names, strings.TrimSuffix(filepath.Base(m), ".md"))
-	}
-	sort.Strings(names)
-	return names, nil
+	return project.InstalledPersonas()
 }
 
 // Drain dispatches a persona to drain its work queue (one priority pick per
@@ -102,8 +85,9 @@ func Drain(cat *catalog.Catalog) *cli.Command {
 			if persona == "" {
 				return errors.New("usage: shipmates drain <persona>")
 			}
-			if _, err := os.Stat(project.AgentPath(persona)); err != nil {
-				return fmt.Errorf("persona %q is not installed", persona)
+			installed, err := project.CanonicalPersonaAt(".", persona)
+			if err != nil {
+				return err
 			}
 
 			charter, err := renderCharter(cat, "drain", map[string]any{
@@ -117,7 +101,7 @@ func Drain(cat *catalog.Catalog) *cli.Command {
 			if extra := strings.TrimSpace(c.String("prompt")); extra != "" {
 				charter += "\n\n" + extra
 			}
-			return dispatch(ctx, persona, charter, c.Bool("fresh"))
+			return dispatchToInstalled(ctx, installed, charter, c.Bool("fresh"), os.Stdout, os.Stderr)
 		},
 	}
 }
@@ -147,6 +131,14 @@ func DrainMany(cat *catalog.Catalog) *cli.Command {
 			if len(personas) == 0 {
 				return errors.New("usage: shipmates drain-many <persona>... (or --all)")
 			}
+			inventory, err := project.CanonicalPersonaInventory(".")
+			if err != nil {
+				return err
+			}
+			byName := make(map[string]*project.InstalledPersona, len(inventory))
+			for i := range inventory {
+				byName[inventory[i].Name] = &inventory[i]
+			}
 
 			max := c.Int("max-concurrent")
 			if max < 1 {
@@ -162,7 +154,8 @@ func DrainMany(cat *catalog.Catalog) *cli.Command {
 					sem <- struct{}{}
 					defer func() { <-sem }()
 
-					if _, err := os.Stat(project.AgentPath(persona)); err != nil {
+					installed := byName[persona]
+					if installed == nil {
 						results[i] = fanoutResult{persona: persona, err: fmt.Errorf("persona %q is not installed", persona)}
 						return
 					}
@@ -176,7 +169,7 @@ func DrainMany(cat *catalog.Catalog) *cli.Command {
 						return
 					}
 					var buf bytes.Buffer
-					err = dispatchTo(ctx, persona, charter, false, &buf, &buf)
+					err = dispatchToInstalled(ctx, installed, charter, false, &buf, &buf)
 					results[i] = fanoutResult{persona: persona, output: buf.Bytes(), err: err}
 				}(i, persona)
 			}
@@ -205,20 +198,17 @@ func DrainMany(cat *catalog.Catalog) *cli.Command {
 	}
 }
 
-// Autonomous renders the captain scheduler charter and prints it. Shipmates stays
-// harness-neutral and can't wire the schedule itself: Claude Code's durable cron
-// only persists when created from an interactive session (a headless `claude -p`
-// cron is session-only and evaporates), so the actual scheduling is done by
-// running the /autonomous slash command in an interactive captain session.
+// Autonomous prints a bounded Codex-native orchestration charter. Shipmates
+// does not install or manage a scheduler; callers may run the rendered cycle
+// from an external scheduler if desired.
 func Autonomous(cat *catalog.Catalog) *cli.Command {
 	return &cli.Command{
 		Name:  "autonomous",
-		Usage: "print the captain scheduler charter (wire it via the /autonomous slash command)",
+		Usage: "print a bounded Codex-native orchestration charter",
 		Flags: []cli.Flag{
-			&cli.BoolFlag{Name: "print-charter", Usage: "print the charter to stdout"},
-			&cli.StringFlag{Name: "persona", Value: "captain", Usage: "the captain/scheduler persona"},
-			&cli.StringFlag{Name: "cadence", Value: "5min,10,15,20,30", Usage: "backoff cadence ladder"},
-			&cli.IntFlag{Name: "cap", Value: 3, Usage: "max drain per persona per cycle"},
+			&cli.StringFlag{Name: "persona", Value: "captain", Usage: "coordinator persona"},
+			&cli.StringFlag{Name: "cadence", Value: "5min,10,15,20,30", Usage: "external scheduler cadence hint"},
+			&cli.IntFlag{Name: "cap", Value: 3, Usage: "maximum tasks per persona in one cycle"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			charter, err := autonomousCharter(cat, c.String("persona"), c.String("cadence"), c.Int("cap"))
@@ -231,25 +221,22 @@ func Autonomous(cat *catalog.Catalog) *cli.Command {
 	}
 }
 
-// autonomousCharter renders the scheduler charter for the given captain, with the
-// crew read from the installed fleet personas (excluding the captain).
-func autonomousCharter(cat *catalog.Catalog, captain, cadence string, cap int) (string, error) {
+func autonomousCharter(cat *catalog.Catalog, coordinator, cadence string, cap int) (string, error) {
 	all, err := installedPersonas()
 	if err != nil {
 		return "", err
 	}
 	var crew []string
-	for _, p := range all {
-		if p != captain {
-			crew = append(crew, p)
+	for _, persona := range all {
+		if persona != coordinator {
+			crew = append(crew, persona)
 		}
 	}
 	return renderCharter(cat, "autonomous", map[string]any{
-		"Captain":     captain,
+		"Coordinator": coordinator,
 		"CrewList":    strings.Join(crew, ", "),
 		"Cap":         cap,
 		"Cadence":     cadence,
 		"RoutingRead": routingStateRead(),
 	})
 }
-

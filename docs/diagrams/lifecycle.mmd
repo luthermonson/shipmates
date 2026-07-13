@@ -1,28 +1,19 @@
 sequenceDiagram
-    actor Human
-    participant Lead as Lead session
-    participant Srv as Lead server
-    participant Crew as security (claude -p, transient)
-    participant Mem as memory/security/
-
-    Human->>Lead: "tell security to double-check PR 10"
-    Note over Lead: server up? if not, spawn it,<br/>write server.port + server.pid
-    Lead->>Srv: GET /health (wait-for-ready)
-    Lead->>Crew: exec claude -p --agent security --session-id uuid "double-check PR 10"
-
-    Crew->>Srv: SessionStart hook → POST /register (ref++)
-    Crew->>Mem: load persona + accumulated memory
-    loop agentic work
-        Crew->>Srv: PreToolUse / PostToolUse → POST /events
-        opt tool needs approval (mode: ask)
-            Crew->>Srv: PermissionRequest hook (BLOCKS)
-            Srv-->>Human: forward prompt (feed / phone / Slack)
-            Human-->>Srv: allow / deny
-            Srv-->>Crew: behavior allow or deny
-        end
+    actor Operator
+    participant CLI as Shipmates CLI
+    participant Server as Local loopback server
+    participant Codex as codex app-server
+    Operator->>CLI: shipmates open frontend
+    CLI->>Server: authenticated controller attach
+    Server->>Codex: start or resume live session
+    Codex-->>Server: bounded normalized events
+    Server-->>CLI: feed and snapshot
+    opt exact approval request
+        Codex-->>Server: bounded approval request
+        Server-->>CLI: sanitized approval card
+        Operator->>CLI: /allow-once or /deny
+        CLI->>Server: controller-bound decision
+        Server->>Codex: exact request response
     end
-    Crew->>Mem: write new learnings
-    Crew->>Srv: SessionEnd hook → POST /deregister (ref--)
-    Crew-->>Lead: final response (stdout)
-    Note over Srv: ref==0 → POST /shutdown<br/>(or stays warm for next delegation)
-    Lead-->>Human: summary + what security found
+    Operator->>CLI: /detach
+    CLI->>Server: release controller lease

@@ -10,24 +10,64 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
+var personaNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+
+// ValidatePersonaName rejects names that could escape or alias persona-scoped paths.
+func ValidatePersonaName(persona string) error {
+	if !personaNameRE.MatchString(persona) {
+		return fmt.Errorf("invalid persona %q (use lowercase letters, digits, hyphens, or underscores)", persona)
+	}
+	return nil
+}
+
+// InstalledPersonaPath returns the canonical, Codex-native persona artifact.
+func InstalledPersonaPath(persona string) (string, error) {
+	return InstalledPersonaPathAt(".", persona)
+}
+
+func InstalledPersonaPathAt(root, persona string) (string, error) {
+	if _, err := CanonicalPersonaAt(root, persona); err != nil {
+		return "", err
+	}
+	return filepath.Join(root, CodexAgentPath(persona)), nil
+}
+
+// CodexPersonaInstructions validates and returns the canonical persona's
+// developer instructions. Add renders this field as a quoted TOML string.
+func CodexPersonaInstructions(persona string) (string, error) {
+	return CodexPersonaInstructionsAt(".", persona)
+}
+
+func CodexPersonaInstructionsAt(root, persona string) (string, error) {
+	item, err := CanonicalPersonaAt(root, persona)
+	if err != nil {
+		return "", err
+	}
+	return item.Doc.Instructions, nil
+}
+
 const (
-	Dir              = ".shipmates"
-	MemoryDirName    = "memory"
-	SessionsDirName  = "sessions"
-	PoliciesDirName  = "policies"
-	ManifestName     = "manifest.json"
-	ConfigName       = "shipmates.yaml"
-	InstallIDName    = "install-id"
-	AgentsDir        = ".claude/agents"
-	CommandsDir      = ".claude/commands"
+	ManifestVersion = "2"
+	Dir             = ".shipmates"
+	MemoryDirName   = "memory"
+	SessionsDirName = "sessions"
+	PoliciesDirName = "policies"
+	ManifestName    = "manifest.json"
+	ConfigName      = "shipmates.yaml"
+	InstallIDName   = "install-id"
+	CodexAgentsDir  = ".codex/agents"
 )
 
 // MemoryDir is a persona's persistent memory directory.
@@ -35,19 +75,13 @@ func MemoryDir(persona string) string {
 	return filepath.Join(Dir, MemoryDirName, persona)
 }
 
-// AgentPath is where a persona's subagent file is vendored for Claude Code.
-func AgentPath(persona string) string {
-	return filepath.Join(AgentsDir, persona+".md")
-}
-
-// CommandPath is where a slash command is vendored for Claude Code.
-func CommandPath(name string) string {
-	return filepath.Join(CommandsDir, name+".md")
+// CodexAgentPath is the project-scoped Codex custom-agent configuration.
+func CodexAgentPath(persona string) string {
+	return filepath.Join(CodexAgentsDir, persona+".toml")
 }
 
 // PoliciesDir is where per-persona policy overlays are vendored on install.
-// Kept under .shipmates/ (not .claude/) because they're shipmates-owned rules
-// consumed by the shipmates permission evaluator, not by Claude Code itself.
+// Policies are Shipmates-owned rules consumed by the Codex-native evaluator.
 func PoliciesDir() string {
 	return filepath.Join(Dir, PoliciesDirName)
 }
@@ -67,14 +101,47 @@ func ManifestPath() string {
 func SessionsDir() string { return filepath.Join(Dir, SessionsDirName) }
 
 // PortFile / PidFile / LogFile locate the running server's metadata.
-func PortFile() string { return filepath.Join(SessionsDir(), "server.port") }
-func PidFile() string  { return filepath.Join(SessionsDir(), "server.pid") }
-func LogFile() string  { return filepath.Join(SessionsDir(), "server.log") }
+func PortFile() string         { return filepath.Join(SessionsDir(), "server.port") }
+func PidFile() string          { return filepath.Join(SessionsDir(), "server.pid") }
+func LogFile() string          { return filepath.Join(SessionsDir(), "server.log") }
+func ControlTokenFile() string { return filepath.Join(SessionsDir(), "server.control-token") }
+func ServerRecordFile() string { return filepath.Join(SessionsDir(), "server.json") }
 
-// SessionMarker records that a persona's claude session has been created, so
-// `ask` knows whether to create (--session-id) or continue (--resume).
-func SessionMarker(persona string) string {
-	return filepath.Join(SessionsDir(), persona+".session")
+// CanonicalRoot returns the single filesystem identity used for project-scoped
+// coordination metadata and request authentication.
+func CanonicalRoot(root string) (string, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+// ScopeID returns a stable, non-secret identifier for a project root. It is
+// used only to prevent a loopback coordination server discovered through a
+// stale port file from accepting requests belonging to another checkout.
+func ScopeID(root string) (string, error) {
+	canonical, err := CanonicalRoot(root)
+	if err != nil {
+		return "", err
+	}
+	return SHA([]byte(canonical)), nil
+}
+
+// ProcessAlive checks the PID recorded in project-scoped server discovery.
+func ProcessAlive(pid int) (bool, error) { return dispatchProcessAlive(pid) }
+
+// BackendSessionMarker isolates Codex session records by harness.
+func BackendSessionMarker(persona, backend string) string {
+	backend = strings.TrimSpace(backend)
+	if backend == "" {
+		return filepath.Join(SessionsDir(), persona+".session")
+	}
+	return filepath.Join(SessionsDir(), persona+"."+backend+".session")
 }
 
 // SessionMeta is the per-persona session record stored at SessionMarker. It
@@ -86,11 +153,9 @@ type SessionMeta struct {
 	ConfigHash string `json:"config"`
 }
 
-// ReadSessionMeta loads a persona's session record. ok is false if no session
-// exists yet. A legacy plain-name marker is read as a name with empty hash
-// (which suppresses auto-fresh — we don't abandon a pre-upgrade session).
-func ReadSessionMeta(persona string) (meta SessionMeta, ok bool) {
-	b, err := os.ReadFile(SessionMarker(persona))
+// ReadBackendSessionMeta loads a backend-specific session record.
+func ReadBackendSessionMeta(persona, backend string) (meta SessionMeta, ok bool) {
+	b, err := os.ReadFile(BackendSessionMarker(persona, backend))
 	if err != nil {
 		return SessionMeta{}, false
 	}
@@ -100,8 +165,11 @@ func ReadSessionMeta(persona string) (meta SessionMeta, ok bool) {
 	return meta, true
 }
 
-// WriteSessionMeta records a persona's session name, UUID, and config fingerprint.
-func WriteSessionMeta(persona, name, id, configHash string) error {
+// WriteBackendSessionMeta stores a backend-specific session record.
+func WriteBackendSessionMeta(persona, backend, name, id, configHash string) error {
+	if err := ValidatePersonaName(persona); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
 		return err
 	}
@@ -109,15 +177,117 @@ func WriteSessionMeta(persona, name, id, configHash string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(SessionMarker(persona), b, 0o644)
+	path := BackendSessionMarker(persona, backend)
+	tmp, err := os.CreateTemp(SessionsDir(), ".session-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
-// DeleteSessionMeta removes a persona's session marker. Called by auto-repair
-// when the tracked session UUID has vanished from Claude's local store
-// (rotated jsonl, cache clean, upgrade wipe). A missing marker is not an
-// error — the next SessionLaunch will start fresh regardless.
-func DeleteSessionMeta(persona string) error {
-	err := os.Remove(SessionMarker(persona))
+// AcquireDispatchLock gives one process exclusive ownership of a persona turn.
+// The returned release function must be called after marker commit.
+func AcquireDispatchLock(persona string) (func(), error) {
+	return AcquireDispatchLockAt(".", persona)
+}
+
+func AcquireDispatchLockAt(root, persona string) (func(), error) {
+	if err := ValidatePersonaName(persona); err != nil {
+		return nil, err
+	}
+	sessionsDir := filepath.Join(root, SessionsDir())
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(sessionsDir, persona+".dispatch.lock")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	locked, err := tryDispatchFileLock(f)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("lock persona %q: %w", persona, err)
+	}
+	if !locked {
+		f.Close()
+		return nil, fmt.Errorf("persona %q is busy with another live dispatch; wait for it to finish", persona)
+	}
+	fail := func(err error) (func(), error) { _ = unlockDispatchFile(f); _ = f.Close(); return nil, err }
+
+	info, err := f.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		return fail(err)
+	}
+	contents := strings.TrimSpace(string(raw))
+	if contents != "" {
+		pid64, parseErr := strconv.ParseInt(contents, 10, 32)
+		if parseErr != nil || pid64 <= 0 {
+			return fail(fmt.Errorf("persona %q has a malformed dispatch lock %s; expected one positive PID", persona, path))
+		}
+		alive, err := dispatchProcessAlive(int(pid64))
+		if err != nil {
+			return fail(fmt.Errorf("verify owner of persona %q dispatch lock: %w", persona, err))
+		}
+		if alive {
+			return fail(fmt.Errorf("persona %q dispatch lock names live PID %d; refusing to reclaim it", persona, pid64))
+		}
+	} else if info.Size() != 0 {
+		return fail(fmt.Errorf("persona %q has a malformed dispatch lock %s; expected one positive PID", persona, path))
+	}
+	if err := f.Truncate(0); err != nil {
+		return fail(err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
+	if _, err := fmt.Fprintf(f, "%d\n", os.Getpid()); err != nil {
+		return fail(err)
+	}
+	if err := f.Sync(); err != nil {
+		return fail(err)
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			// Unlink while ownership is still held so another process can never
+			// acquire this inode and then have its lock path removed by us.
+			if held, err := f.Stat(); err == nil {
+				if current, err := os.Lstat(path); err == nil && os.SameFile(held, current) {
+					_ = os.Remove(path)
+				}
+			}
+			_ = unlockDispatchFile(f)
+			_ = f.Close()
+		})
+	}, nil
+}
+
+// DeleteBackendSessionMeta removes a backend-specific session record.
+func DeleteBackendSessionMeta(persona, backend string) error {
+	err := os.Remove(BackendSessionMarker(persona, backend))
 	if err != nil && os.IsNotExist(err) {
 		return nil
 	}
@@ -230,25 +400,20 @@ func (o RoutingOptions) Resolved() (bylines, labels bool) {
 	return
 }
 
-// CrewOverride is a crew-level override of a persona's frontmatter config, keyed
-// by persona name under shipmates.yaml's `crew:` map. A field only overrides
-// when it's set: a non-empty Mode, a present RemoteControl node, or a non-nil
-// DangerouslySkipPermissions wins over the persona's own frontmatter.
+// CrewOverride is a per-persona Codex launch override in shipmates.yaml.
 type CrewOverride struct {
-	Permissions struct {
-		Mode string `yaml:"mode"`
-	} `yaml:"permissions"`
-	RemoteControl              yaml.Node `yaml:"remoteControl"`
-	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
-	Model                      string    `yaml:"model"`
-	Effort                     string    `yaml:"effort"`
-	Backend                    string    `yaml:"backend"`
-	Command                    []string  `yaml:"command"`
+	Model  string `yaml:"model"`
+	Effort string `yaml:"effort"`
 }
 
 // LoadConfig reads shipmates.yaml, returning a zero Config if it's absent.
 func LoadConfig() (*Config, error) {
-	b, err := os.ReadFile(ConfigName)
+	return LoadConfigAt(".")
+}
+
+func LoadConfigAt(root string) (*Config, error) {
+	path := filepath.Join(root, ConfigName)
+	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return &Config{}, nil
 	}
@@ -256,220 +421,48 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 	var c Config
-	if err := yaml.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", ConfigName, err)
+	dec := yaml.NewDecoder(strings.NewReader(string(b)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &c, nil
 }
 
-// SessionPrefix is the configured prefix verbatim. Empty means no prefix. The
-// repo-name default is applied once, at `init` time, by writing it into the
-// config — not re-derived here.
-func SessionPrefix() string {
-	c, err := LoadConfig()
-	if err != nil {
-		return ""
-	}
-	return c.SessionPrefix
-}
-
-// SessionName is the stable --name / --resume handle for a persona's session.
-// With no configured prefix it's just the persona name.
-func SessionName(persona string) string {
-	if p := SessionPrefix(); p != "" {
-		return p + "-" + persona
-	}
-	return persona
-}
-
-// PersonaConfig is the fully-resolved launch config for a persona: its
-// frontmatter overlaid with any crew-level override from shipmates.yaml.
+// PersonaConfig is the fully resolved Codex or explicit-command launch config.
 type PersonaConfig struct {
-	Mode                       string // ask|acceptEdits|bypassPermissions|plan|""
-	RemoteControl              string // resolved --remote-control value; "" = off
-	DangerouslySkipPermissions bool
-	Model                      string // --model value; "" = claude's configured default
-	Effort                     string // --effort value (low|medium|high|xhigh|max); "" = default
-
-	// Backend selects the mate driver: "claude" (default, full integration:
-	// sessions, hooks, tells) or "command" (spawn Command under a PTY — for
-	// foreign agents like opencode/aider). Command-backed mates are PTY-only:
-	// no session resume, no hooks, no headless tells; their status dots derive
-	// from screen activity instead of hook events.
-	Backend string
-	Command []string // argv for backend "command"
+	Model  string
+	Effort string // --effort value (low|medium|high|xhigh|max); "" = default
 }
-
-// CommandBacked reports whether the persona runs a foreign agent (PTY-only).
-func (c PersonaConfig) CommandBacked() bool { return c.Backend == "command" }
 
 // Fingerprint is a stable hash of the config settings that are baked into a
-// session at creation and can't change on resume — currently model and effort.
-// Permission mode, dangerouslySkipPermissions, and remoteControl are deliberately
-// excluded: they're passed as flags on every invocation (create AND resume), so
-// changing them applies immediately without abandoning the session. Callers
-// compare this against the value stored at creation to auto-fresh on drift.
+// session at creation and cannot change on resume: model and effort. Callers
+// compare this against the stored value to auto-fresh on configuration drift.
 func (c PersonaConfig) Fingerprint() string {
 	return SHA([]byte(fmt.Sprintf("model=%s|effort=%s", c.Model, c.Effort)))
 }
 
-// LaunchFlags returns the claude CLI flags derived from this config — the single
-// source of truth so every spawn site (ask/tell/open/fanout/live server) stays
-// consistent. permission controls whether the permission knobs are included:
-// pass true for direct one-shot/interactive spawns, false for the live-server
-// path (which mediates permission via its PreToolUse gate instead). remoteControl
-// (--remote-control) is interactive-only and handled by the caller (open).
-func (c PersonaConfig) LaunchFlags(permission bool) []string {
-	var f []string
-	if permission {
-		if c.DangerouslySkipPermissions {
-			f = append(f, "--dangerously-skip-permissions")
-		}
-		if c.Mode != "" {
-			f = append(f, "--permission-mode", c.Mode)
-		}
-	}
-	if c.Model != "" {
-		f = append(f, "--model", c.Model)
-	}
-	if c.Effort != "" {
-		f = append(f, "--effort", c.Effort)
-	}
-	return f
-}
-
-// personaFrontmatter is the subset of a persona's YAML frontmatter that affects
-// how its session is launched. RemoteControl may be a bool or a string, so it's
-// captured as a yaml.Node and decoded on demand.
-type personaFrontmatter struct {
-	Permissions struct {
-		Mode string `yaml:"mode"`
-	} `yaml:"permissions"`
-	RemoteControl              yaml.Node `yaml:"remoteControl"`
-	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
-	Model                      string    `yaml:"model"`
-	Effort                     string    `yaml:"effort"`
-	Backend                    string    `yaml:"backend"`
-	Command                    []string  `yaml:"command"`
-	ShipmatesPersona           *bool     `yaml:"shipmatesPersona"`
-}
-
-// IsFleetPersonaFile reports whether a persona file is a shipmates fleet member
-// (true unless its frontmatter sets `shipmatesPersona: false`). Lets non-fleet
-// agents in .claude/agents/ (e.g. a project-Q&A subagent) opt out of membership
-// walks and `routing apply --all`.
-func IsFleetPersonaFile(path string) bool {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	fm, err := parsePersonaFrontmatter(raw)
-	if err != nil {
-		return true
-	}
-	return fm.ShipmatesPersona == nil || *fm.ShipmatesPersona
-}
-
-// ResolvePersonaConfig reads the installed persona's frontmatter, overlays any
-// crew-level override from shipmates.yaml, and resolves the result. A missing
-// persona file yields a zero PersonaConfig and nil error.
+// ResolvePersonaConfig reads only shipmates.yaml. Codex persona artifacts are
+// runtime instructions, not a second configuration source.
 func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
-	var cfg PersonaConfig
+	return ResolvePersonaConfigAt(".", persona)
+}
 
-	raw, err := os.ReadFile(AgentPath(persona))
-	if errors.Is(err, fs.ErrNotExist) {
-		return cfg, nil
-	}
-	if err != nil {
-		return cfg, err
-	}
-
-	fm, err := parsePersonaFrontmatter(raw)
-	if err != nil {
-		return cfg, fmt.Errorf("parse %s: %w", AgentPath(persona), err)
-	}
-
-	cfg.Mode = strings.TrimSpace(fm.Permissions.Mode)
-	cfg.Model = strings.TrimSpace(fm.Model)
-	cfg.Effort = strings.TrimSpace(fm.Effort)
-	cfg.Backend = strings.TrimSpace(fm.Backend)
-	cfg.Command = fm.Command
-	rcNode := fm.RemoteControl
-	if fm.DangerouslySkipPermissions != nil {
-		cfg.DangerouslySkipPermissions = *fm.DangerouslySkipPermissions
-	}
-
-	conf, err := LoadConfig()
+func ResolvePersonaConfigAt(root, persona string) (PersonaConfig, error) {
+	cfg := PersonaConfig{}
+	conf, err := LoadConfigAt(root)
 	if err != nil {
 		return cfg, err
 	}
 	if ov, ok := conf.Crew[persona]; ok {
-		if m := strings.TrimSpace(ov.Permissions.Mode); m != "" {
-			cfg.Mode = m
-		}
 		if m := strings.TrimSpace(ov.Model); m != "" {
 			cfg.Model = m
 		}
 		if e := strings.TrimSpace(ov.Effort); e != "" {
 			cfg.Effort = e
 		}
-		if b := strings.TrimSpace(ov.Backend); b != "" {
-			cfg.Backend = b
-		}
-		if len(ov.Command) > 0 {
-			cfg.Command = ov.Command
-		}
-		if ov.RemoteControl.Kind != 0 {
-			rcNode = ov.RemoteControl
-		}
-		if ov.DangerouslySkipPermissions != nil {
-			cfg.DangerouslySkipPermissions = *ov.DangerouslySkipPermissions
-		}
 	}
-
-	cfg.RemoteControl = resolveRemoteControl(rcNode, SessionName(persona))
 	return cfg, nil
-}
-
-// parsePersonaFrontmatter isolates the YAML frontmatter block and unmarshals the
-// launch-relevant fields. (render.go's parseFrontmatter drops nested maps like
-// permissions, so it can't supply these.)
-func parsePersonaFrontmatter(raw []byte) (personaFrontmatter, error) {
-	var fm personaFrontmatter
-	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	text = strings.TrimLeft(text, "\n")
-	if !strings.HasPrefix(text, "---\n") {
-		return fm, nil
-	}
-	rest := text[len("---\n"):]
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		return fm, nil
-	}
-	if err := yaml.Unmarshal([]byte(rest[:end]), &fm); err != nil {
-		return fm, err
-	}
-	return fm, nil
-}
-
-// resolveRemoteControl turns a remoteControl node into a --remote-control value:
-// bool true => sessionName; a non-empty string => that string; false/absent => "".
-func resolveRemoteControl(node yaml.Node, sessionName string) string {
-	if node.Kind != yaml.ScalarNode {
-		return ""
-	}
-	var b bool
-	if err := node.Decode(&b); err == nil {
-		if b {
-			return sessionName
-		}
-		return ""
-	}
-	var s string
-	if err := node.Decode(&s); err == nil {
-		return strings.TrimSpace(s)
-	}
-	return ""
 }
 
 // NewUUID returns a random v4 UUID string using only the standard library.
@@ -492,7 +485,7 @@ type Manifest struct {
 func LoadManifest() (*Manifest, error) {
 	b, err := os.ReadFile(ManifestPath())
 	if errors.Is(err, fs.ErrNotExist) {
-		return &Manifest{Files: map[string]string{}}, nil
+		return &Manifest{Version: ManifestVersion, Files: map[string]string{}}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -509,11 +502,7 @@ func LoadManifest() (*Manifest, error) {
 
 // Save writes the manifest back to disk.
 func (m *Manifest) Save() error {
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(ManifestPath(), b, 0o644)
+	return CommitManifestV2(".", m)
 }
 
 // SHA returns the hex-encoded sha256 of b, used for manifest comparisons.

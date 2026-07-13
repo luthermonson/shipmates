@@ -1,5 +1,5 @@
 ---
-description: Fleet standup — per-worker breakdown of open issues, open PRs, and what each is waiting on. The daily "where is everything" picture. Named /standup to avoid colliding with Claude Code's built-in /status.
+description: Fleet standup — per-worker breakdown of open issues, open PRs, and what each is waiting on.
 ---
 
 Run a quick fleet status by worker. Read-only — this command does NOT
@@ -21,7 +21,7 @@ Do NOT fall back to scraping `--web` HTML — the JSON output is the source of t
 
 The bucket labels are the **active crew** for this project: read the persona
 names from `shipmates.yaml` (the `crew:` map, or the personas present in
-`.claude/agents/`). Bucket every issue and PR by its matching fleet label.
+`.codex/agents/`). Bucket every issue and PR by its matching fleet label.
 
 An item with no fleet label goes in a final **Unowned** bucket so it's visible —
 those are recruitment candidates or stale claims. If an item has multiple fleet

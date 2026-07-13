@@ -10,7 +10,6 @@ visibility checks. For repos marked `public`, prefer `GH_TOKEN= gh ...` for read
 <!--
 Append rows as you learn:
 
-| anthropics/claude-code | public | 2026-06-18 | docs/CHANGELOG only; no CLI source |
 | our-team/private-monorepo | private | 2026-06-20 | always use auth |
 
 If a repo's visibility changes (rare but possible — open-sourcing, going private),

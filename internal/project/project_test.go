@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -45,10 +47,10 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 
 	want := &Manifest{
-		Version: "1",
+		Version: ManifestVersion,
 		Files: map[string]string{
-			".claude/agents/captain.md": SHA([]byte("body")),
-			"shipmates.yaml":          SHA([]byte("cfg")),
+			".codex/agents/captain.toml":       SHA([]byte("body")),
+			".shipmates/policies/captain.yaml": SHA([]byte("policy")),
 		},
 	}
 	if err := want.Save(); err != nil {
@@ -84,31 +86,8 @@ func TestLoadManifestMissing(t *testing.T) {
 	if len(m.Files) != 0 {
 		t.Fatalf("Files len = %d, want 0", len(m.Files))
 	}
-}
-
-func TestSessionName(t *testing.T) {
-	tests := []struct {
-		name       string
-		configYAML string // empty => no shipmates.yaml written
-		persona    string
-		want       string
-	}{
-		{"with prefix", "sessionPrefix: myrepo\n", "captain", "myrepo-captain"},
-		{"empty prefix", "sessionPrefix: \"\"\n", "captain", "captain"},
-		{"no config file", "", "tester", "tester"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Chdir(t.TempDir())
-			if tt.configYAML != "" {
-				if err := os.WriteFile(ConfigName, []byte(tt.configYAML), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if got := SessionName(tt.persona); got != tt.want {
-				t.Fatalf("SessionName(%q) = %q, want %q", tt.persona, got, tt.want)
-			}
-		})
+	if m.Version != ManifestVersion {
+		t.Fatalf("Version = %q, want %q", m.Version, ManifestVersion)
 	}
 }
 
@@ -119,61 +98,15 @@ func TestResolvePersonaConfigMissing(t *testing.T) {
 		t.Fatalf("ResolvePersonaConfig missing persona: %v", err)
 	}
 	if !reflect.DeepEqual(cfg, PersonaConfig{}) {
-		t.Fatalf("missing persona = %+v, want zero PersonaConfig", cfg)
+		t.Fatalf("missing persona = %+v, want Codex default", cfg)
 	}
 }
 
-// writeAgent installs a fake persona file at AgentPath(persona) relative to cwd,
-// wrapping the given frontmatter body in --- delimiters.
-func writeAgent(t *testing.T, persona, frontmatter string) {
-	t.Helper()
-	if err := os.MkdirAll(AgentsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	content := "---\n" + frontmatter + "---\n\nbody text\n"
-	if err := os.WriteFile(AgentPath(persona), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestResolvePersonaConfigFrontmatterOnly(t *testing.T) {
+func TestResolvePersonaConfigCodexOverrides(t *testing.T) {
 	t.Chdir(t.TempDir())
-	writeAgent(t, "captain",
-		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\neffort: high\n")
-
-	cfg, err := ResolvePersonaConfig("captain")
-	if err != nil {
-		t.Fatalf("ResolvePersonaConfig: %v", err)
-	}
-	if cfg.Mode != "acceptEdits" {
-		t.Errorf("Mode = %q, want acceptEdits", cfg.Mode)
-	}
-	if cfg.RemoteControl != "captain" {
-		t.Errorf("RemoteControl = %q, want captain", cfg.RemoteControl)
-	}
-	if !cfg.DangerouslySkipPermissions {
-		t.Error("DangerouslySkipPermissions = false, want true")
-	}
-	if cfg.Model != "claude-opus-4-7" {
-		t.Errorf("Model = %q, want claude-opus-4-7", cfg.Model)
-	}
-	if cfg.Effort != "high" {
-		t.Errorf("Effort = %q, want high", cfg.Effort)
-	}
-}
-
-func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
-	t.Chdir(t.TempDir())
-	writeAgent(t, "captain",
-		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\neffort: high\n")
-
 	cfgYAML := "crew:\n" +
 		"  captain:\n" +
-		"    permissions:\n" +
-		"      mode: plan\n" +
-		"    remoteControl: custom-handle\n" +
-		"    dangerouslySkipPermissions: false\n" +
-		"    model: claude-haiku-4-5-20251001\n" +
+		"    model: gpt-5\n" +
 		"    effort: max\n"
 	if err := os.WriteFile(ConfigName, []byte(cfgYAML), 0o644); err != nil {
 		t.Fatal(err)
@@ -183,17 +116,8 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolvePersonaConfig: %v", err)
 	}
-	if got.Mode != "plan" {
-		t.Errorf("Mode = %q, want plan (override should win)", got.Mode)
-	}
-	if got.RemoteControl != "custom-handle" {
-		t.Errorf("RemoteControl = %q, want custom-handle (override should win)", got.RemoteControl)
-	}
-	if got.DangerouslySkipPermissions {
-		t.Error("DangerouslySkipPermissions = true, want false (override should win)")
-	}
-	if got.Model != "claude-haiku-4-5-20251001" {
-		t.Errorf("Model = %q, want claude-haiku-4-5-20251001 (override should win)", got.Model)
+	if got.Model != "gpt-5" {
+		t.Errorf("Model = %q, want gpt-5", got.Model)
 	}
 	if got.Effort != "max" {
 		t.Errorf("Effort = %q, want max (override should win)", got.Effort)
@@ -201,15 +125,15 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 }
 
 func TestPersonaConfigFingerprint(t *testing.T) {
-	base := PersonaConfig{Mode: "ask", Model: "opus", Effort: "high"}
+	base := PersonaConfig{Model: "opus", Effort: "high"}
 	if base.Fingerprint() != base.Fingerprint() {
 		t.Fatal("Fingerprint not stable for identical config")
 	}
 
 	// Baked settings (model, effort) must change the fingerprint -> auto-fresh.
 	mustDiffer := []PersonaConfig{
-		{Mode: "ask", Model: "haiku", Effort: "high"},
-		{Mode: "ask", Model: "opus", Effort: "low"},
+		{Model: "haiku", Effort: "high"},
+		{Model: "opus", Effort: "low"},
 	}
 	for i, c := range mustDiffer {
 		if c.Fingerprint() == base.Fingerprint() {
@@ -217,106 +141,6 @@ func TestPersonaConfigFingerprint(t *testing.T) {
 		}
 	}
 
-	// Per-invocation settings (mode, dangerouslySkipPermissions, remoteControl)
-	// are passed every call, so they must NOT change the fingerprint (no fresh).
-	mustMatch := []PersonaConfig{
-		{Mode: "plan", Model: "opus", Effort: "high"},
-		{Mode: "ask", Model: "opus", Effort: "high", DangerouslySkipPermissions: true},
-		{Mode: "ask", Model: "opus", Effort: "high", RemoteControl: "x"},
-	}
-	for i, c := range mustMatch {
-		if c.Fingerprint() != base.Fingerprint() {
-			t.Errorf("per-invocation change %d wrongly altered fingerprint", i)
-		}
-	}
-}
-
-func TestLaunchFlags(t *testing.T) {
-	cfg := PersonaConfig{
-		Mode:                       "acceptEdits",
-		Model:                      "opus",
-		Effort:                     "high",
-		DangerouslySkipPermissions: true,
-		RemoteControl:              "handle", // never a launch flag (caller handles it)
-	}
-
-	with := cfg.LaunchFlags(true)
-	wantWith := []string{"--dangerously-skip-permissions", "--permission-mode", "acceptEdits", "--model", "opus", "--effort", "high"}
-	if !reflect.DeepEqual(with, wantWith) {
-		t.Errorf("LaunchFlags(true) = %v, want %v", with, wantWith)
-	}
-
-	// permission=false (live-server path) drops the permission knobs, keeps model/effort.
-	without := cfg.LaunchFlags(false)
-	wantWithout := []string{"--model", "opus", "--effort", "high"}
-	if !reflect.DeepEqual(without, wantWithout) {
-		t.Errorf("LaunchFlags(false) = %v, want %v", without, wantWithout)
-	}
-
-	// Empty config yields no flags.
-	if f := (PersonaConfig{}).LaunchFlags(true); len(f) != 0 {
-		t.Errorf("empty LaunchFlags(true) = %v, want none", f)
-	}
-}
-
-func TestSessionMetaRoundTrip(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	if _, ok := ReadSessionMeta("captain"); ok {
-		t.Fatal("ReadSessionMeta ok=true before any session exists")
-	}
-
-	if err := WriteSessionMeta("captain", "repo-captain", "uuid-1", "abc123"); err != nil {
-		t.Fatalf("WriteSessionMeta: %v", err)
-	}
-	meta, ok := ReadSessionMeta("captain")
-	if !ok {
-		t.Fatal("ReadSessionMeta ok=false after write")
-	}
-	if meta.Name != "repo-captain" || meta.ID != "uuid-1" || meta.ConfigHash != "abc123" {
-		t.Fatalf("meta = %+v, want {repo-captain uuid-1 abc123}", meta)
-	}
-
-	// Legacy plain-name marker: read as name with empty hash (suppresses auto-fresh).
-	if err := os.WriteFile(SessionMarker("legacy"), []byte("repo-legacy\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	lm, ok := ReadSessionMeta("legacy")
-	if !ok {
-		t.Fatal("legacy marker not read as existing")
-	}
-	if lm.Name != "repo-legacy" || lm.ConfigHash != "" {
-		t.Fatalf("legacy meta = %+v, want name=repo-legacy, empty hash", lm)
-	}
-}
-
-func TestDeleteSessionMeta(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	// Deleting when nothing exists is not an error — auto-repair should be
-	// idempotent so retries after a partial state don't fail.
-	if err := DeleteSessionMeta("ghost"); err != nil {
-		t.Fatalf("DeleteSessionMeta(missing): %v", err)
-	}
-
-	// Write a marker, delete it, confirm it's gone.
-	if err := WriteSessionMeta("picard", "card-cannon-picard", "uuid-stale", "hash"); err != nil {
-		t.Fatalf("WriteSessionMeta: %v", err)
-	}
-	if _, ok := ReadSessionMeta("picard"); !ok {
-		t.Fatal("marker not written")
-	}
-	if err := DeleteSessionMeta("picard"); err != nil {
-		t.Fatalf("DeleteSessionMeta: %v", err)
-	}
-	if _, ok := ReadSessionMeta("picard"); ok {
-		t.Fatal("marker still readable after delete")
-	}
-
-	// Second delete of the same persona is a no-op, not an error.
-	if err := DeleteSessionMeta("picard"); err != nil {
-		t.Fatalf("DeleteSessionMeta(second): %v", err)
-	}
 }
 
 func TestNewUUID(t *testing.T) {
@@ -334,8 +158,178 @@ func TestNewUUID(t *testing.T) {
 	}
 }
 
-func TestAgentPath(t *testing.T) {
-	if got := AgentPath("captain"); got != filepath.Join(AgentsDir, "captain.md") {
-		t.Fatalf("AgentPath(captain) = %q", got)
+func TestPersonaValidationAndDispatchLockIsolation(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, bad := range []string{"", "../security", "Security", "security/other", "."} {
+		if err := ValidatePersonaName(bad); err == nil {
+			t.Errorf("ValidatePersonaName(%q) succeeded", bad)
+		}
+	}
+	releaseSecurity, err := AcquireDispatchLock("security")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseSecurity()
+	if _, err := AcquireDispatchLock("security"); err == nil || !strings.Contains(err.Error(), "busy") {
+		t.Fatalf("second same-persona lock = %v", err)
+	}
+	releaseTester, err := AcquireDispatchLock("tester")
+	if err != nil {
+		t.Fatalf("different persona blocked: %v", err)
+	}
+	releaseTester()
+}
+
+func TestDispatchLockReclaimsVerifiedStalePID(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(SessionsDir(), "security.dispatch.lock")
+	if err := os.WriteFile(path, []byte("2147483647\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, err := AcquireDispatchLock("security")
+	if err != nil {
+		t.Fatalf("reclaim stale lock: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(raw)) != strconv.Itoa(os.Getpid()) {
+		t.Fatalf("reclaimed lock = %q", raw)
+	}
+	release()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("released lock still exists: %v", err)
+	}
+}
+
+func TestDispatchLockRejectsMalformedContents(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(SessionsDir(), "security.dispatch.lock")
+	for _, contents := range []string{"not-a-pid\n", "0\n", "12 13\n", "   \n"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := AcquireDispatchLock("security"); err == nil || !strings.Contains(err.Error(), "malformed") {
+			t.Fatalf("contents %q error = %v", contents, err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != contents {
+			t.Fatalf("malformed lock was changed: got %q want %q", raw, contents)
+		}
+	}
+}
+
+func TestDispatchLockRefusesLivePIDWithoutKernelOwner(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(SessionsDir(), "security.dispatch.lock")
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireDispatchLock("security"); err == nil || !strings.Contains(err.Error(), "live PID") {
+		t.Fatalf("live PID error = %v", err)
+	}
+}
+
+func TestWriteBackendSessionMetaIsPrivate(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := WriteBackendSessionMeta("security", "codex", "thread-1", "thread-1", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(BackendSessionMarker("security", "codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("marker permissions = %o", got)
+	}
+}
+
+func TestResolvePersonaConfigDefaultsToCodex(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(CodexAgentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(CodexAgentPath("backend"), []byte("developer_instructions = \"role\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ResolvePersonaConfig("backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, PersonaConfig{}) {
+		t.Fatalf("default config = %+v", cfg)
+	}
+
+	cfg, err = ResolvePersonaConfig("backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, PersonaConfig{}) {
+		t.Fatalf("Codex-only config = %+v", cfg)
+	}
+
+}
+
+func TestResolvePersonaConfigRejectsIncompatibleSettings(t *testing.T) {
+	tests := []struct{ name, body, want string }{
+		{"backend field", "backend: command", "field backend not found"},
+		{"command field", "command: [tool]", "field command not found"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if err := os.WriteFile(ConfigName, []byte("crew:\n  security:\n    "+tt.body+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ResolvePersonaConfig("security")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestInstalledPersonaRequiresSafeValidCodexArtifact(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(CodexAgentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := CodexAgentPath("security")
+	for _, content := range []string{"", "name = \"security\"\n", "developer_instructions = \"   \"\n", "developer_instructions = nope\n"} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := InstalledPersonaPath("security"); err == nil {
+			t.Fatalf("invalid artifact accepted: %q", content)
+		}
+	}
+	if err := os.WriteFile(path, []byte("developer_instructions = \"Review safely.\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstalledPersonaPath("security"); err != nil {
+		t.Fatalf("valid artifact rejected: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/tmp/outside-persona.toml", path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstalledPersonaPath("security"); err == nil || !strings.Contains(err.Error(), "unsafe Codex artifact") {
+		t.Fatalf("symlink error = %v", err)
 	}
 }

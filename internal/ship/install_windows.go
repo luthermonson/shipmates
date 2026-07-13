@@ -14,8 +14,8 @@ import (
 const taskName = "ShipmatesShip"
 
 // Install registers the supervisor as a Scheduled Task that runs at the
-// user's logon — deliberately NOT a session-0 Windows service: claude needs
-// the user's environment, credentials, and profile to spawn mates.
+// user's logon rather than as a session-0 service, preserving the user's
+// Codex environment, credentials, and profile.
 func Install() error {
 	exe, err := os.Executable()
 	if err != nil {

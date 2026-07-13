@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
@@ -25,7 +26,7 @@ type frontmatter struct {
 
 // Render emits a thin-target version of a persona.
 //
-// Thin targets are one-way renders for tools that don't read Claude Code
+// Thin targets are one-way renders for tools that do not read Codex agents
 // subagent files natively. They degrade gracefully: the memory-load
 // instructions are dropped (no memory dynamics) and the body is condensed.
 //
@@ -34,7 +35,7 @@ type frontmatter struct {
 func Render(cat *catalog.Catalog) *cli.Command {
 	return &cli.Command{
 		Name:      "render",
-		Usage:     "render a persona for a thin target (agents-md|cursor|windsurf)",
+		Usage:     "render a persona for a target (agents-md|codex|cursor|windsurf)",
 		ArgsUsage: "<persona>",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "target", Required: true},
@@ -64,12 +65,14 @@ func Render(cat *catalog.Catalog) *cli.Command {
 			switch target {
 			case "agents-md":
 				out = renderAgentsMD(fm, body)
+			case "codex":
+				out = renderCodex(fm, body)
 			case "cursor":
 				out = renderCursor(fm, body)
 			case "windsurf":
 				out = renderWindsurf(fm, body)
 			default:
-				return fmt.Errorf("unknown target %q (want: agents-md|cursor|windsurf)", target)
+				return fmt.Errorf("unknown target %q (want: agents-md|codex|cursor|windsurf)", target)
 			}
 
 			if c.Bool("write") {
@@ -82,6 +85,7 @@ func Render(cat *catalog.Catalog) *cli.Command {
 }
 
 // writeRender persists a rendered thin target to its canonical destination.
+//   - codex:     .codex/agents/<persona>.toml — standalone custom agent, overwritten.
 //   - cursor:    .cursor/rules/<persona>.mdc — standalone per-persona rule, overwritten.
 //   - agents-md: a marked section in ./AGENTS.md.
 //   - windsurf:  a marked section in ./.windsurf/rules.md.
@@ -90,6 +94,16 @@ func Render(cat *catalog.Catalog) *cli.Command {
 // own marked block and leaves everything else untouched.
 func writeRender(target, persona, content string) error {
 	switch target {
+	case "codex":
+		path := filepath.Join(".codex", "agents", persona+".toml")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		slog.Info("wrote Codex custom agent", "persona", persona, "path", path)
+		return nil
 	case "cursor":
 		path := filepath.Join(".cursor", "rules", persona+".mdc")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -105,7 +119,7 @@ func writeRender(target, persona, content string) error {
 	case "windsurf":
 		return upsertMarkedSection(filepath.Join(".windsurf", "rules.md"), persona, content)
 	default:
-		return fmt.Errorf("unknown target %q (want: agents-md|cursor|windsurf)", target)
+		return fmt.Errorf("unknown target %q (want: agents-md|codex|cursor|windsurf)", target)
 	}
 }
 
@@ -303,6 +317,34 @@ func renderAgentsMD(fm frontmatter, body string) string {
 	}
 	b.WriteString(condenseBody(body))
 	b.WriteString("\n")
+	return b.String()
+}
+
+// renderCodex emits a project-scoped custom agent. Unlike the generic
+// AGENTS.md target, the persona remains independently addressable by Codex
+// subagent workflows and carries Shipmates' file-backed memory convention.
+func renderCodex(fm frontmatter, body string) string {
+	name := fm.Name
+	if name == "" {
+		name = "shipmate"
+	}
+	description := fm.Description
+	if description == "" {
+		description = "Shipmates persona"
+	}
+
+	instructions := strings.TrimSpace(body)
+	instructions += "\n\n## Persistent Memory\n\n" +
+		"At the start of each task, read the relevant files under `.shipmates/memory/" + name + "/`. " +
+		"Record durable project decisions, verified constraints, and reusable findings there when they would help a later task."
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "name = %s\n", strconv.Quote(name))
+	fmt.Fprintf(&b, "description = %s\n", strconv.Quote(description))
+	if len(fm.DomainGlob) > 0 {
+		fmt.Fprintf(&b, "# Primary domains: %s\n", strings.Join(fm.DomainGlob, ", "))
+	}
+	fmt.Fprintf(&b, "developer_instructions = %s\n", strconv.Quote(instructions))
 	return b.String()
 }
 

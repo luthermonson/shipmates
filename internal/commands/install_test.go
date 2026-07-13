@@ -123,17 +123,12 @@ func TestComposeAgent(t *testing.T) {
 	})
 }
 
-func TestAddPersona_VendorsPolicyYAML(t *testing.T) {
+func TestAddPersonaReplacesLegacyCatalogPolicyWithM5Policy(t *testing.T) {
 	cat := catalog.New(fstest.MapFS{
-		"catalog/geordi/.claude/agents/geordi.md": {Data: []byte("---\nname: geordi\n---\n\n# Geordi\n")},
+		"catalog/geordi/agent.md":    {Data: []byte("---\nname: geordi\n---\n\n# Geordi\n")},
 		"catalog/geordi/policy.yaml": {Data: []byte("allow:\n  - Bash(git status)\ndeny:\n  - Bash(rm -rf /)\n")},
 	})
 	t.Chdir(t.TempDir())
-	// Prep the layout addPersona expects.
-	if err := os.MkdirAll(project.AgentsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	if err := addPersona(cat, "geordi"); err != nil {
 		t.Fatalf("addPersona: %v", err)
 	}
@@ -143,26 +138,235 @@ func TestAddPersona_VendorsPolicyYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected vendored policy at %s: %v", polPath, err)
 	}
-	if !strings.Contains(string(b), "Bash(rm -rf /)") {
-		t.Errorf("vendored policy missing content: %s", string(b))
+	if string(b) != emptyStrictPolicy {
+		t.Errorf("persona policy = %q, want strict M5 empty policy", b)
+	}
+	if _, err := os.Stat(project.CodexAgentPath("geordi")); err != nil {
+		t.Fatalf("expected Codex agent at %s: %v", project.CodexAgentPath("geordi"), err)
+	}
+	if _, err := os.Stat(".legacy-runtime"); !os.IsNotExist(err) {
+		t.Fatalf("add created .legacy-runtime: %v", err)
+	}
+	m, err := project.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != project.ManifestVersion {
+		t.Fatalf("manifest version = %q", m.Version)
+	}
+	if len(m.Files) != 2 || m.Files[project.CodexAgentPath("geordi")] == "" || m.Files[project.PolicyPath("geordi")] == "" {
+		t.Fatalf("manifest files = %#v, want only Codex agent and policy", m.Files)
 	}
 }
 
-func TestAddPersona_NoPolicyYAMLIsFine(t *testing.T) {
-	// Personas without a policy.yaml must install cleanly and NOT create an
-	// empty policy file — that would be a footgun for operators wondering
-	// what's in the empty file.
+func TestAddPersonaWithoutCatalogPolicyInstallsFailClosedOverlay(t *testing.T) {
 	cat := catalog.New(fstest.MapFS{
-		"catalog/geordi/.claude/agents/geordi.md": {Data: []byte("---\nname: geordi\n---\n\n# Geordi\n")},
+		"catalog/geordi/agent.md": {Data: []byte("---\nname: geordi\n---\n\n# Geordi\n")},
 	})
 	t.Chdir(t.TempDir())
-	if err := os.MkdirAll(project.AgentsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := addPersona(cat, "geordi"); err != nil {
 		t.Fatalf("addPersona: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(".shipmates", "policies", "geordi.yaml")); !os.IsNotExist(err) {
-		t.Errorf("no-policy persona should not create a policy file (err=%v)", err)
+	b, err := os.ReadFile(filepath.Join(".shipmates", "policies", "geordi.yaml"))
+	if err != nil {
+		t.Fatalf("required persona policy missing: %v", err)
+	}
+	if string(b) != emptyStrictPolicy {
+		t.Fatalf("persona policy = %q", b)
+	}
+}
+
+func TestAddPersonaMigratesManagedLegacyPolicyButPreservesModified(t *testing.T) {
+	legacy := []byte("allow:\n  - Bash(git status)\nask: []\ndeny: []\n")
+	cat := catalog.New(fstest.MapFS{
+		"catalog/captain/agent.md":    {Data: []byte("---\nname: captain\n---\n\nLead.\n")},
+		"catalog/captain/policy.yaml": {Data: legacy},
+	})
+
+	for _, tc := range []struct {
+		name, disk string
+		want       []byte
+	}{
+		{name: "managed legacy migrates", disk: string(legacy), want: []byte(emptyStrictPolicy)},
+		{name: "modified legacy is preserved", disk: string(legacy) + "# user change\n", want: []byte(string(legacy) + "# user change\n")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if err := addPersona(cat, "captain"); err != nil {
+				t.Fatal(err)
+			}
+			path := project.PolicyPath("captain")
+			if err := os.WriteFile(path, []byte(tc.disk), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			m, err := project.LoadManifest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Files[path] = project.SHA(legacy)
+			if err := m.Save(); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := addPersona(cat, "captain"); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(tc.want) {
+				t.Fatalf("policy = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCatalogM5PolicyAcceptsOnlyStrictV1(t *testing.T) {
+	valid := []byte("version: 1\nallow: []\nask: []\ndeny: []\n")
+	for _, tc := range []struct {
+		name string
+		body []byte
+		want []byte
+	}{
+		{name: "valid v1", body: valid, want: valid},
+		{name: "legacy", body: []byte("allow: []\nask: []\ndeny: []\n"), want: []byte(emptyStrictPolicy)},
+		{name: "future version", body: []byte("version: 2\nallow: []\nask: []\ndeny: []\n"), want: []byte(emptyStrictPolicy)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := catalog.New(fstest.MapFS{"catalog/p/policy.yaml": {Data: tc.body}})
+			got, err := catalogM5Policy(cat, "p")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(tc.want) {
+				t.Fatalf("policy = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUpdateMigratesManagedLegacyCatalogPolicy(t *testing.T) {
+	legacy := []byte("allow: [Bash(git status)]\nask: []\ndeny: []\n")
+	cat := catalog.New(fstest.MapFS{
+		"catalog/captain/agent.md":    {Data: []byte("---\nname: captain\n---\n\nLead.\n")},
+		"catalog/captain/policy.yaml": {Data: legacy},
+	})
+	t.Chdir(t.TempDir())
+	if err := addPersona(cat, "captain"); err != nil {
+		t.Fatal(err)
+	}
+	path := project.PolicyPath("captain")
+	if err := os.WriteFile(path, legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := project.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Files[path] = project.SHA(legacy)
+	if err := m.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runUpdate(cat, "captain", "ours"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != emptyStrictPolicy {
+		t.Fatalf("policy = %q, want strict M5 empty policy", got)
+	}
+}
+
+func TestAddPersonaPreservesMemoryAndCodexSession(t *testing.T) {
+	cat := catalog.New(fstest.MapFS{
+		"catalog/security/agent.md":              {Data: []byte("---\nname: security\n---\n\nReview security.\n")},
+		"catalog/security/memory-seeds/notes.md": {Data: []byte("seed\n")},
+	})
+	t.Chdir(t.TempDir())
+	if err := addPersona(cat, "security"); err != nil {
+		t.Fatal(err)
+	}
+	notes := filepath.Join(project.MemoryDir("security"), "notes.md")
+	if err := os.WriteFile(notes, []byte("user knowledge\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project.MemoryDir("security"), "extra.md"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := project.WriteBackendSessionMeta("security", "codex", "thread-1", "thread-1", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(project.BackendSessionMarker("security", "codex"))
+
+	if err := addPersona(cat, "security"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(notes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "user knowledge\n" {
+		t.Fatalf("memory overwritten: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(project.MemoryDir("security"), "extra.md")); err != nil {
+		t.Fatalf("existing memory removed: %v", err)
+	}
+	after, err := os.ReadFile(project.BackendSessionMarker("security", "codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("Codex session marker changed during add")
+	}
+}
+
+func TestPersonaInstallStatusUsesOnlyValidCodexArtifacts(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(filepath.Join(".legacy-runtime", "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(".legacy-runtime", "agents", "security.md"), []byte("legacy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := personaInstallStatus("security"); got != "" {
+		t.Fatalf("LegacyRuntime-only status = %q", got)
+	}
+
+	if err := os.MkdirAll(project.CodexAgentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(project.CodexAgentPath("security"), []byte("developer_instructions = \"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := personaInstallStatus("security"); got != "invalid-codex" {
+		t.Fatalf("invalid Codex status = %q", got)
+	}
+	if err := os.WriteFile(project.CodexAgentPath("security"), []byte("developer_instructions = \"Review.\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := personaInstallStatus("security"); got != "installed" {
+		t.Fatalf("valid Codex status = %q", got)
+	}
+}
+
+func TestPersonaInstallStatusDoesNotTouchManifest(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(project.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte("legacy manifest bytes\n")
+	if err := os.WriteFile(project.ManifestPath(), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = personaInstallStatus("security")
+	got, err := os.ReadFile(project.ManifestPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(manifest) {
+		t.Fatal("list discovery modified manifest")
 	}
 }

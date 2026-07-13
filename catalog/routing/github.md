@@ -30,7 +30,7 @@ GitHub issues are the **human-facing contract layer**; the beads graph (`bd`) is
 - Branch off `origin/main` (NOT local `main`, which may lag):
 
   ```
-  git worktree add .claude/worktrees/<short-name> -b worktree-<short-name> origin/main
+  git worktree add .shipmates/worktrees/<short-name> -b worktree-<short-name> origin/main
   ```
 
 - The worktree dir mirrors the branch with the `worktree-` prefix stripped. Multiple in-flight issues → multiple worktrees, no collisions on `main`.
@@ -67,7 +67,7 @@ Skipping step 1 is code-skimming, not reviewing.
 ### Cleanup ceremony after every merge (run in order)
 
 1. `gh pr merge <n> --merge --delete-branch`
-2. `git worktree remove .claude/worktrees/<short-name>` — this MUST come before deleting the local branch (git refuses to delete a branch a worktree is checked out on).
+2. `git worktree remove .shipmates/worktrees/<short-name>` — this MUST come before deleting the local branch (git refuses to delete a branch a worktree is checked out on).
 3. `git branch -D worktree-<short-name>`
 4. ⚠️ **`git pull origin main` on the root checkout — THE MOST IMPORTANT STEP.** Skip it and your next build/test runs stale code. This is the single biggest cause of misleading "I fixed it" reports.
 5. Verify: `git worktree list`, `git branch -a`, and `git status` on root main.

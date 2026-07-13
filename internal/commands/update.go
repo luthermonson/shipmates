@@ -43,14 +43,21 @@ const (
 	resSidecar                   // write catalog version to <file>.new
 )
 
-// runUpdate refreshes installed personas and slash commands from the embedded
-// catalog, applying the four-case logic (see reconcileFile). Memory is never
-// touched.
+// runUpdate refreshes canonical Codex personas and policies from the embedded
+// catalog, applying the four-case logic (see reconcileFile). Memory, sessions,
+// and unmanaged artifacts are never touched.
 func runUpdate(cat *catalog.Catalog, only, accept string) error {
 	m, err := project.LoadManifest()
 	if err != nil {
 		return err
 	}
+	if err := requireManifestV2(m, "update"); err != nil {
+		return err
+	}
+	return withPolicyWriteLock(func() error { return runUpdateLocked(cat, only, accept, m) })
+}
+
+func runUpdateLocked(cat *catalog.Catalog, only, accept string, m *project.Manifest) error {
 
 	st := &updateState{
 		in:          bufio.NewScanner(os.Stdin),
@@ -76,25 +83,18 @@ func runUpdate(cat *catalog.Catalog, only, accept string) error {
 		if err != nil {
 			return err
 		}
-		if err := reconcileFile(m, st, project.AgentPath(name), catBytes, "persona"); err != nil {
+		fm, body := splitPersona(catBytes)
+		codexBytes := []byte(renderCodex(fm, body))
+		codexPath := project.CodexAgentPath(name)
+		if err := reconcileFile(m, st, codexPath, codexBytes, "Codex agent"); err != nil {
 			return err
 		}
-	}
-
-	// Slash commands are project-level; refresh them too (not narrowed by `only`).
-	if only == "" {
-		cmds, err := cat.Commands()
+		policy, err := catalogM5Policy(cat, name)
 		if err != nil {
-			return err
+			return fmt.Errorf("read catalog policy %s: %w", name, err)
 		}
-		for _, name := range cmds {
-			catBytes, err := cat.CommandFile(name)
-			if err != nil {
-				return err
-			}
-			if err := reconcileFile(m, st, project.CommandPath(name), catBytes, "command"); err != nil {
-				return err
-			}
+		if err := reconcileFile(m, st, project.PolicyPath(name), policy, "policy"); err != nil {
+			return err
 		}
 	}
 
@@ -118,17 +118,27 @@ type updateState struct {
 }
 
 // reconcileFile applies the four-case update logic to one shipmates-managed
-// file (persona or command): re-add if missing-but-recorded, overwrite if
+// file (Codex persona or policy): re-add if missing-but-recorded, overwrite if
 // unchanged-by-user, leave user edits when the catalog is unchanged, and
 // diff-prompt when both diverged.
 func reconcileFile(m *project.Manifest, st *updateState, dst string, catBytes []byte, label string) error {
 	catSHA := project.SHA(catBytes)
 	baseline, recorded := m.Files[dst]
 
-	onDisk, statErr := os.ReadFile(dst)
+	info, statErr := os.Lstat(dst)
 	missing := errors.Is(statErr, os.ErrNotExist)
 	if statErr != nil && !missing {
-		return fmt.Errorf("read %s: %w", dst, statErr)
+		return fmt.Errorf("inspect %s: %w", dst, statErr)
+	}
+	if !missing && !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing to update managed target %s: not a regular file", dst)
+	}
+	var onDisk []byte
+	if !missing {
+		onDisk, statErr = os.ReadFile(dst)
+		if statErr != nil {
+			return fmt.Errorf("read %s: %w", dst, statErr)
+		}
 	}
 
 	if missing {
@@ -221,10 +231,18 @@ func reconcileFile(m *project.Manifest, st *updateState, dst string, catBytes []
 // `only` narrows to a single persona.
 func personasToUpdate(cat *catalog.Catalog, m *project.Manifest, only string) ([]string, error) {
 	if only != "" {
+		if err := project.ValidatePersonaName(only); err != nil {
+			return nil, err
+		}
 		if !cat.Has(only) {
 			return nil, fmt.Errorf("unknown persona %q", only)
 		}
-		return []string{only}, nil
+		path := project.CodexAgentPath(only)
+		_, recorded := m.Files[path]
+		if _, err := os.Lstat(path); err == nil || recorded {
+			return []string{only}, nil
+		}
+		return nil, fmt.Errorf("persona %q is not installed", only)
 	}
 	avail, err := cat.Personas()
 	if err != nil {
@@ -232,12 +250,12 @@ func personasToUpdate(cat *catalog.Catalog, m *project.Manifest, only string) ([
 	}
 	var out []string
 	for _, name := range avail {
-		dst := project.AgentPath(name)
+		dst := project.CodexAgentPath(name)
 		if _, recorded := m.Files[dst]; recorded {
 			out = append(out, name)
 			continue
 		}
-		if _, err := os.Stat(dst); err == nil {
+		if _, err := os.Lstat(dst); err == nil {
 			out = append(out, name)
 		}
 	}
@@ -249,7 +267,13 @@ func writeManaged(dst string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(dst, b, 0o644)
+	if err := os.WriteFile(dst, b, 0o600); err != nil {
+		return err
+	}
+	// WriteFile preserves the mode of an existing file. Chmod only after the
+	// caller has validated/read that managed regular file, so upgrades safely
+	// migrate historical 0644 installs without widening an untrusted target.
+	return os.Chmod(dst, 0o600)
 }
 
 // isInteractive reports whether stdin is a character device (a terminal).

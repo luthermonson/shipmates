@@ -1,8 +1,8 @@
 // Package ship implements the per-host supervisor: one daemon that reads
 // ~/.shipmates/ship.yaml (a list of project dirs), keeps a captain server alive
 // in each, and restarts them on crash. It is the thing `ship install` wires
-// to run at logon (Windows Scheduled Task / macOS launchd user agent — NOT a
-// session-0 service: claude needs the user's environment and credentials).
+// to run at logon as a user-scoped Windows Scheduled Task or macOS launchd
+// agent so project-local Codex configuration and user credentials are available.
 package ship
 
 import (
@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	projectstate "github.com/luthermonson/shipmates/internal/project"
 	"gopkg.in/yaml.v3"
 )
 
@@ -209,12 +210,21 @@ func serverHealthy(dir string) bool {
 		return false
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+	scope, err := projectstate.ScopeID(dir)
+	if err != nil {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/health", port), nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-Shipmates-Project", scope)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	return resp.StatusCode == http.StatusOK && resp.Header.Get("X-Shipmates-Project") == scope
 }
 
 // shutdownServer asks the project's captain server to exit gracefully.
@@ -224,7 +234,16 @@ func shutdownServer(dir string) bool {
 		return false
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/shutdown", port), "application/json", nil)
+	scope, err := projectstate.ScopeID(dir)
+	if err != nil {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/shutdown", port), nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-Shipmates-Project", scope)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}

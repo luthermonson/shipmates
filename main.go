@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/commands"
@@ -31,32 +33,12 @@ func main() {
 			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 			return ctx, nil
 		},
-		Commands: []*cli.Command{
-			commands.Init(cat),
-			commands.Add(cat),
-			commands.List(cat),
-			commands.Remove(),
-			commands.Update(cat),
-			commands.Render(cat),
-			commands.Routing(cat),
-			commands.Open(),
-			commands.Ask(),
-			commands.Tell(),
-			commands.Feed(),
-			commands.Pending(),
-			commands.Allow(),
-			commands.Deny(),
-			commands.Fanout(),
-			commands.Drain(cat),
-			commands.DrainMany(cat),
-			commands.Autonomous(cat),
-			commands.Fleet(),
-			commands.Server(),
-			commands.Ship(),
-		},
+		Commands: commands.PublicCommands(cat),
 	}
 
-	if err := cmd.Run(context.Background(), os.Args); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := cmd.Run(ctx, os.Args); err != nil {
 		slog.Error("command failed", "err", err)
 		os.Exit(1)
 	}

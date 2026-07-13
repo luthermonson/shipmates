@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 
@@ -45,6 +44,14 @@ func Fanout() *cli.Command {
 			if len(personas) == 0 || prompt == "" {
 				return errors.New("usage: shipmates fanout <p1,p2,...> <prompt>")
 			}
+			inventory, err := project.CanonicalPersonaInventory(".")
+			if err != nil {
+				return err
+			}
+			byName := make(map[string]*project.InstalledPersona, len(inventory))
+			for i := range inventory {
+				byName[inventory[i].Name] = &inventory[i]
+			}
 
 			results := make([]fanoutResult, len(personas))
 			var wg sync.WaitGroup
@@ -52,7 +59,12 @@ func Fanout() *cli.Command {
 				wg.Add(1)
 				go func(i int, persona string) {
 					defer wg.Done()
-					out, err := oneShotDelegate(ctx, persona, prompt)
+					installed := byName[persona]
+					if installed == nil {
+						results[i] = fanoutResult{persona: persona, err: fmt.Errorf("persona %q is not installed", persona)}
+						return
+					}
+					out, err := oneShotDelegateInstalled(ctx, installed, prompt)
 					results[i] = fanoutResult{persona: persona, output: out, err: err}
 				}(i, persona)
 			}
@@ -82,30 +94,21 @@ func Fanout() *cli.Command {
 	}
 }
 
-// oneShotDelegate runs a single persona's one-shot claude turn, returning its
-// combined stdout+stderr. It follows Ask's logic: create the session the first
-// time (--session-id/--name), resume it afterward (--resume), and write the
-// session marker on a successful create. The persona must be installed.
+// oneShotDelegate runs one canonical Codex persona with isolated output.
 func oneShotDelegate(ctx context.Context, persona, prompt string) ([]byte, error) {
-	if _, err := os.Stat(project.AgentPath(persona)); err != nil {
-		return nil, fmt.Errorf("persona %q is not installed", persona)
+	installed, err := project.CanonicalPersonaAt(".", persona)
+	if err != nil {
+		return nil, err
 	}
+	return oneShotDelegateInstalled(ctx, installed, prompt)
+}
 
-	cfg, idArgs, id, name, fp := sessionLaunch(persona, false)
-	args := append([]string{"-p"}, idArgs...)
-	args = append(args, cfg.LaunchFlags(true)...)
-	args = append(args, prompt)
-
+func oneShotDelegateInstalled(ctx context.Context, installed *project.InstalledPersona, prompt string) ([]byte, error) {
+	cfg, err := project.ResolvePersonaConfig(installed.Name)
+	if err != nil {
+		return nil, err
+	}
 	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Stdin = strings.NewReader("") // immediate EOF — skip claude's ~3s stdin wait
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		return buf.Bytes(), err
-	}
-	if err := project.WriteSessionMeta(persona, name, id, fp); err != nil {
-		return buf.Bytes(), err
-	}
-	return buf.Bytes(), nil
+	err = dispatchCodexInstalled(ctx, installed, prompt, false, cfg, &buf, &buf)
+	return buf.Bytes(), err
 }

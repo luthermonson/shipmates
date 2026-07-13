@@ -1,7 +1,7 @@
 // Package catalog provides read access to the persona catalog embedded in the
 // shipmates binary. The on-disk source layout is:
 //
-//	catalog/<persona>/.claude/agents/<persona>.md   (the persona/subagent file)
+//	catalog/<persona>/agent.md                      (Codex persona instructions)
 //	catalog/<persona>/memory-seeds/*.md             (starter memory copied on install)
 package catalog
 
@@ -45,9 +45,9 @@ func (c *Catalog) Has(name string) bool {
 	return err == nil && info.IsDir()
 }
 
-// AgentFile returns the raw bytes of a persona's subagent markdown file.
+// AgentFile returns the raw bytes of a persona's Codex instruction file.
 func (c *Catalog) AgentFile(name string) ([]byte, error) {
-	return fs.ReadFile(c.fsys, path.Join("catalog", name, ".claude", "agents", name+".md"))
+	return fs.ReadFile(c.fsys, path.Join("catalog", name, "agent.md"))
 }
 
 // Commands returns the sorted names of slash commands in the catalog

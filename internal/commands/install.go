@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -13,16 +14,21 @@ import (
 	"text/template"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
+	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
 )
+
+const emptyStrictPolicy = "version: 1\nallow: []\nask: []\ndeny: []\n"
+
+var acquirePolicyWriteLock = project.AcquirePolicyWriteLock
 
 // defaultConfig renders the starter shipmates.yaml, baking in the session
 // prefix (the repo name) at init time. Leave sessionPrefix empty for no prefix.
 func defaultConfig(sessionPrefix string) string {
 	return fmt.Sprintf(`# shipmates.yaml — crew configuration for this project
-# Personas live as Claude Code subagent files in .claude/agents/.
-# Per-persona overrides (permission mode, remoteControl, model/effort) go here.
+# Personas are installed as Codex custom agents under .codex/agents/.
+# Per-persona Codex model/effort or explicit command argv overrides go here.
 
 # Prefix for per-persona session names (--name / --resume handles), written as
 # this repo's name at init. Leave it empty (sessionPrefix: "") for no prefix, or
@@ -30,19 +36,14 @@ func defaultConfig(sessionPrefix string) string {
 sessionPrefix: %s
 
 # Per-persona overrides. Uncomment the crew key and add child keys to override
-# permission mode, remoteControl, model/effort, etc. Keeping it fully commented
+# Codex model or reasoning effort. Keeping it commented
 # means there's no active empty crew key — so appending your own crew block
 # won't create a duplicate top-level key (which yaml.v3 rejects).
 # crew:
-#   security:
-#     permissions: { mode: ask }
-#   backend:
-#     dangerouslySkipPermissions: true
 #   tester:
-#     model: claude-haiku-4-5-20251001   # run this persona on a cheaper/faster model
+#     model: gpt-5.4
 #   architect:
 #     effort: high                       # low|medium|high|xhigh|max
-
 # Routing substrate. Set to "github" to append GitHub issues/PRs routing
 # conventions (claim-by-label, worktree-per-issue, Closes #n, verdict merge
 # gate, cleanup ceremony) to every crew persona at install/update time. Leave
@@ -72,15 +73,28 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			&cli.StringFlag{Name: "crew", Usage: "comma-separated personas to add immediately"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
+			m, err := project.LoadManifest()
+			if err != nil {
+				return err
+			}
+			if err := requireManifestV2(m, "init"); err != nil {
+				return err
+			}
 			for _, d := range []string{
 				project.Dir,
 				filepath.Join(project.Dir, project.MemoryDirName),
 				filepath.Join(project.Dir, project.SessionsDirName),
-				project.AgentsDir,
+				project.PoliciesDir(),
+				project.CodexAgentsDir,
 			} {
 				if err := os.MkdirAll(d, 0o755); err != nil {
 					return err
 				}
+			}
+			if err := withPolicyWriteLock(func() error {
+				return writeMissingPolicyFile(filepath.Join(project.Dir, "policy.yaml"), []byte(emptyStrictPolicy))
+			}); err != nil {
+				return err
 			}
 
 			if _, err := os.Stat(project.ConfigName); errors.Is(err, fs.ErrNotExist) {
@@ -90,19 +104,6 @@ func Init(cat *catalog.Catalog) *cli.Command {
 				slog.Info("wrote", "file", project.ConfigName)
 			}
 
-			m, err := project.LoadManifest()
-			if err != nil {
-				return err
-			}
-			if err := installCommands(cat, m); err != nil {
-				return err
-			}
-			if err := ensureAttachGitignore(); err != nil {
-				// Non-fatal: the inbox is regenerable and a missing
-				// gitignore only means the operator has to add it by
-				// hand. Warn and keep going.
-				slog.Warn("could not update .gitignore for attach inbox", "err", err)
-			}
 			if err := m.Save(); err != nil {
 				return err
 			}
@@ -124,11 +125,11 @@ func Init(cat *catalog.Catalog) *cli.Command {
 	}
 }
 
-// Add vendors a persona into .claude/agents and seeds its memory.
+// Add installs a canonical Codex persona, policy, and missing memory seeds.
 func Add(cat *catalog.Catalog) *cli.Command {
 	return &cli.Command{
 		Name:      "add",
-		Usage:     "vendor a persona into .claude/agents and seed its memory",
+		Usage:     "install a Codex persona, policy, and missing memory seeds",
 		ArgsUsage: "<persona>",
 		Action: func(ctx context.Context, c *cli.Command) error {
 			name := c.Args().First()
@@ -151,15 +152,23 @@ func List(cat *catalog.Catalog) *cli.Command {
 				return err
 			}
 			for _, name := range avail {
-				status := ""
-				if _, err := os.Stat(project.AgentPath(name)); err == nil {
-					status = "installed"
-				}
-				fmt.Printf("%-14s %s\n", name, status)
+				status := personaInstallStatus(name)
+				fmt.Fprintf(c.Root().Writer, "%-14s %s\n", name, status)
 			}
 			return nil
 		},
 	}
+}
+
+// personaInstallStatus reads only the canonical Codex inventory.
+func personaInstallStatus(name string) string {
+	if _, err := os.Lstat(project.CodexAgentPath(name)); err == nil {
+		if _, err := project.InstalledPersonaPath(name); err == nil {
+			return "installed"
+		}
+		return "invalid-codex"
+	}
+	return ""
 }
 
 // composeAgent returns the persona's agent file with the project's routing
@@ -305,35 +314,6 @@ func collapseBlankLines(b []byte) []byte {
 	return []byte(strings.TrimSpace(s) + "\n")
 }
 
-// installCommands vendors the catalog's slash commands into .claude/commands/,
-// recording each in the manifest. Existing command files that differ from what
-// shipmates installed are left untouched (user edits are preserved).
-func installCommands(cat *catalog.Catalog, m *project.Manifest) error {
-	names, err := cat.Commands()
-	if err != nil {
-		return err
-	}
-	for _, name := range names {
-		b, err := cat.CommandFile(name)
-		if err != nil {
-			return err
-		}
-		dst := project.CommandPath(name)
-		if existing, err := os.ReadFile(dst); err == nil && project.SHA(existing) != m.Files[dst] {
-			continue // user-edited or pre-existing — don't clobber
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(dst, b, 0o644); err != nil {
-			return err
-		}
-		m.Files[dst] = project.SHA(b)
-		slog.Info("installed command", "command", name, "path", dst)
-	}
-	return nil
-}
-
 // applyRouting upserts the active routing block into an arbitrary persona file
 // (custom or catalog): it strips any existing shipmates routing block, then
 // re-appends the current one. Idempotent — re-run to re-sync after the upstream
@@ -370,6 +350,23 @@ func addPersona(cat *catalog.Catalog, name string) error {
 	if !cat.Has(name) {
 		return fmt.Errorf("unknown persona %q", name)
 	}
+	// The directory descriptor is the synchronization object. Creating the
+	// control directory does not mutate policy; acquisition below reopens it
+	// without following symlinks before any canonical artifact is touched.
+	if err := os.MkdirAll(project.Dir, 0o755); err != nil {
+		return err
+	}
+	m, err := project.LoadManifest()
+	if err != nil {
+		return err
+	}
+	if err := requireManifestV2(m, "add"); err != nil {
+		return err
+	}
+	return withPolicyWriteLock(func() error { return addPersonaLocked(cat, name, m) })
+}
+
+func addPersonaLocked(cat *catalog.Catalog, name string, m *project.Manifest) error {
 
 	base, err := cat.AgentFile(name)
 	if err != nil {
@@ -380,20 +377,14 @@ func addPersona(cat *catalog.Catalog, name string) error {
 		return err
 	}
 
-	m, err := project.LoadManifest()
-	if err != nil {
+	// Render the canonical Codex artifact directly from the catalog persona;
+	// no alternate runtime artifact is created as an intermediate.
+	fm, body := splitPersona(agent)
+	codexAgent := []byte(renderCodex(fm, body))
+	codexPath := project.CodexAgentPath(name)
+	if err := reconcileAddFile(m, codexPath, codexAgent, "Codex agent"); err != nil {
 		return err
 	}
-
-	dst := project.AgentPath(name)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(dst, agent, 0o644); err != nil {
-		return err
-	}
-	m.Files[dst] = project.SHA(agent)
-	slog.Info("installed persona", "persona", name, "path", dst)
 
 	// Seed memory — but never overwrite existing memory (it's sacred).
 	memDir := project.MemoryDir(name)
@@ -413,7 +404,6 @@ func addPersona(cat *catalog.Catalog, name string) error {
 		if err := os.WriteFile(mp, content, 0o644); err != nil {
 			return err
 		}
-		m.Files[mp] = project.SHA(content)
 		slog.Info("seeded memory", "file", mp)
 	}
 
@@ -421,23 +411,77 @@ func addPersona(cat *catalog.Catalog, name string) error {
 	// .shipmates/policies/<persona>.yaml. Same "don't clobber user edits"
 	// discipline as installCommands: if the file already exists and its
 	// content diverges from what shipmates last installed, leave it alone.
-	if pol, err := cat.PolicyFile(name); err == nil {
-		polPath := project.PolicyPath(name)
-		if err := os.MkdirAll(filepath.Dir(polPath), 0o755); err != nil {
-			return err
-		}
-		if existing, err := os.ReadFile(polPath); err == nil && project.SHA(existing) != m.Files[polPath] {
-			slog.Debug("policy exists and was user-edited, leaving untouched", "file", polPath)
-		} else {
-			if err := os.WriteFile(polPath, pol, 0o644); err != nil {
-				return err
-			}
-			m.Files[polPath] = project.SHA(pol)
-			slog.Info("installed persona policy", "persona", name, "path", polPath)
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	pol, err := catalogM5Policy(cat, name)
+	if err != nil {
 		return fmt.Errorf("read policy for %s: %w", name, err)
+	}
+	if err := reconcileAddFile(m, project.PolicyPath(name), pol, "policy"); err != nil {
+		return err
 	}
 
 	return m.Save()
+}
+
+// catalogM5Policy returns a catalog overlay only when it satisfies the strict
+// M5 v1 contract. Older catalogs shipped incompatible permission lists; those
+// are not policy inputs and are represented by the fail-closed empty overlay.
+func catalogM5Policy(cat *catalog.Catalog, name string) ([]byte, error) {
+	b, err := cat.PolicyFile(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return []byte(emptyStrictPolicy), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	sources := []policy.Source{
+		{Descriptor: policy.SourceDescriptor{Layer: policy.LayerProject, Path: ".shipmates/policy.yaml", Present: true}, Bytes: []byte(emptyStrictPolicy)},
+		{Descriptor: policy.SourceDescriptor{Layer: policy.LayerProjectLocal, Path: ".shipmates/policy.local.yaml", Present: false}},
+		{Descriptor: policy.SourceDescriptor{Layer: policy.LayerPersona, Path: project.PolicyPath(name), Present: true}, Bytes: b},
+	}
+	if snapshot, _ := policy.Parse(name, "catalog", sources); snapshot == nil {
+		return []byte(emptyStrictPolicy), nil
+	}
+	return b, nil
+}
+
+func withPolicyWriteLock(mutate func() error) error {
+	lock, err := acquirePolicyWriteLock(".")
+	if err != nil {
+		return err
+	}
+	mutateErr := mutate()
+	closeErr := lock.Close()
+	return errors.Join(mutateErr, closeErr)
+}
+
+func writeMissingPolicyFile(path string, content []byte) error {
+	if _, err := os.Lstat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("inspect base policy: %w", err)
+	}
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		return fmt.Errorf("write base policy: %w", err)
+	}
+	slog.Info("installed base policy", "path", path)
+	return nil
+}
+
+// reconcileAddFile installs a missing managed file, but applies the same
+// baseline/conflict rules as update when a target already exists. Add has no
+// conflict-acceptance flag, so conflicts always preserve local content.
+func reconcileAddFile(m *project.Manifest, path string, shipped []byte, label string) error {
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		if err := writeManaged(path, shipped); err != nil {
+			return err
+		}
+		m.Files[path] = project.SHA(shipped)
+		slog.Info("installed "+label, "path", path)
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+
+	st := &updateState{in: bufio.NewScanner(strings.NewReader(""))}
+	return reconcileFile(m, st, path, shipped, label)
 }

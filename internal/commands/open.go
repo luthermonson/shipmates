@@ -5,16 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	"time"
 
+	"github.com/luthermonson/shipmates/internal/client"
+	"github.com/luthermonson/shipmates/internal/dashboard"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
 )
 
-// Open launches a long-running INTERACTIVE Claude Code session as a persona.
-// Unlike Ask (one-shot -p), this hands the terminal to claude's TUI and blocks
-// until the user exits. Session continuity mirrors Ask: create on first open,
-// resume thereafter.
+// Open attaches the structured local dashboard to a Codex session.
 func Open() *cli.Command {
 	return &cli.Command{
 		Name:      "open",
@@ -22,6 +21,7 @@ func Open() *cli.Command {
 		ArgsUsage: "<persona>",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "fresh", Usage: "start a new session instead of resuming (applies config changes like model/effort)"},
+			&cli.BoolFlag{Name: "plain", Usage: "avoid alternate-screen and cursor-addressed presentation"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			persona := c.Args().First()
@@ -29,32 +29,36 @@ func Open() *cli.Command {
 				return errors.New("usage: shipmates open <persona>")
 			}
 
-			agentPath := project.AgentPath(persona)
-			if _, err := os.Stat(agentPath); err != nil {
-				if os.IsNotExist(err) {
-					return fmt.Errorf("persona %q is not installed — run: shipmates add %s", persona, persona)
-				}
+			if _, err := project.CanonicalPersonaAt(".", persona); err != nil {
 				return err
 			}
-
-			cfg, idArgs, id, name, fp := sessionLaunch(persona, c.Bool("fresh"))
-			args := append([]string{}, idArgs...) // interactive: no -p
-			args = append(args, cfg.LaunchFlags(true)...)
-			if cfg.RemoteControl != "" {
-				args = append(args, "--remote-control", cfg.RemoteControl)
-				fmt.Fprintf(os.Stderr,
-					"remote control is ON for %q (session %q) — traffic routes through Anthropic-hosted relay infrastructure so the desktop/mobile app can drive it.\n",
-					persona, cfg.RemoteControl)
-			}
-
-			cmd := exec.CommandContext(ctx, "claude", args...)
-			cmd.Stdin = os.Stdin
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
+			guard, err := dashboard.NewGuard(dashboard.NewNativeTerminal(os.Stdin, os.Stdout), c.Bool("plain"))
+			if err != nil {
 				return err
 			}
-			return project.WriteSessionMeta(persona, name, id, fp)
+			if err := client.EnsureRunning(); err != nil {
+				return err
+			}
+			conn, err := dashboard.Connect(ctx, dashboard.HTTPTransport{}, persona, dashboard.AttachRequest{Fresh: c.Bool("fresh")})
+			if err != nil {
+				return err
+			}
+			defer func() {
+				releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_ = conn.Close(releaseCtx)
+			}()
+			model, err := dashboard.NewModel(conn.Attach)
+			if err != nil {
+				return err
+			}
+			err = dashboard.Run(ctx, guard, func(runCtx context.Context) error {
+				return dashboard.ActionLoop(runCtx, dashboard.NewNativeEditor(os.Stdin), dashboard.NativeSize(os.Stdout), dashboard.NativeRenderer(os.Stdout, c.Bool("plain")), model, conn)
+			})
+			if conn.Attach.State == "working" || conn.Attach.State == "steering" || conn.Attach.State == "interrupting" {
+				fmt.Fprintf(c.ErrWriter, "work continues; reconnect with shipmates open %s, observe with shipmates feed, or cancel with shipmates interrupt\n", persona)
+			}
+			return err
 		},
 	}
 }

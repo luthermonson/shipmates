@@ -1,6 +1,6 @@
 # Why Shipmates
 
-The persona-catalog tools — claude-skills, VoltAgent, Agency Agents — ship **headless experts**. A system prompt, a role description, a tool allowlist, and that's it. Every invocation starts from zero. There is no memory of the previous review, the rejected pattern, the constant that hurt to land, the gotcha somebody learned at 2am.
+Most persona catalogs ship **headless experts**: a system prompt, a role description, a tool allowlist, and little continuity. Every invocation starts from zero. There is no memory of the previous review, the rejected pattern, the constant that hurt to land, or the gotcha somebody learned at 2am.
 
 The result: you spend ~800 input tokens setting up the project context on every single call, and the expert spends ~300 output tokens telling you generic best-practice things you mostly already knew. High input, low output, **low signal-to-noise** — and the expert never gets better at your project specifically. They can't. There's no place for them to put what they'd have learned.
 
@@ -74,7 +74,7 @@ That's not a 10% better reviewer. That's a reviewer doing a job the headless one
 
 Week one, the architect persona is no better than a headless one — its memory is just the seed files the catalog shipped with. Week two, it's noticed two patterns and written them down. Week eight, it has thirty decision notes, ten rejected-pattern entries, a `crew-notes.md` describing what the security persona tends to miss, and a `partner-prefs.md` about how the human handles disagreement.
 
-A new contributor's PR lands. The architect reviews. It cites three relevant decisions, flags one drift back toward a pattern the team rejected in week three, and asks about a constraint encoded only in the memory dir. None of that is in the diff. None of it is in the codebase. None of it is in CLAUDE.md.
+A new contributor's PR lands. The architect reviews. It cites three relevant decisions, flags one drift back toward a pattern the team rejected in week three, and asks about a constraint encoded only in the memory dir. None of that is in the diff, the codebase, or a static instruction file.
 
 That's the bet. **The reviewer compounds.** Not because the model got better — because the memory got denser.
 

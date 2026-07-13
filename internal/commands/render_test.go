@@ -160,3 +160,39 @@ func TestRenderAgentsMD(t *testing.T) {
 		t.Errorf("renderAgentsMD output missing domain glob:\n%s", out)
 	}
 }
+
+func TestRenderCodex(t *testing.T) {
+	fm := frontmatter{
+		Name:        "security",
+		Description: "reviews application security",
+		DomainGlob:  []string{"**/*.go", "go.mod"},
+	}
+	out := renderCodex(fm, "# Role\n\nFind real security risks.")
+
+	if !strings.Contains(out, `name = "security"`) {
+		t.Errorf("renderCodex output missing name:\n%s", out)
+	}
+	if !strings.Contains(out, `description = "reviews application security"`) {
+		t.Errorf("renderCodex output missing description:\n%s", out)
+	}
+	if !strings.Contains(out, "developer_instructions =") {
+		t.Errorf("renderCodex output missing developer instructions:\n%s", out)
+	}
+	if !strings.Contains(out, ".shipmates/memory/security/") {
+		t.Errorf("renderCodex output missing memory path:\n%s", out)
+	}
+}
+
+func TestWriteRenderCodex(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := writeRender("codex", "security", "name = \"security\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(".codex/agents/security.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "name = \"security\"\n" {
+		t.Errorf("agent file = %q", b)
+	}
+}

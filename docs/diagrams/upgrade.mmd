@@ -1,53 +1,13 @@
 flowchart TB
-    Bin(["distribute new binary<br/>(brew, winget, curl, go install)<br/>distribution: out of scope"])
-    Cmd["shipmates update"]
-    Bin --> Cmd
-
-    Cmd --> ReadMan["read .shipmates/manifest.json<br/>last catalog ver + baseline SHA per file"]
-    ReadMan --> Ver{"binary catalog ver<br/>same as manifest?"}
-    Ver -->|same| Done0(["nothing to do, exit 0"])
-    Ver -->|newer| Iter["for each file in manifest"]
-
-    Iter --> Disk{"on disk?"}
-    Disk -->|missing| ReAdd["restore from catalog<br/>was previously added"]
-    Disk -->|present| Edit{"disk SHA same as<br/>baseline SHA?"}
-
-    Edit -->|unedited| CatA{"catalog SHA<br/>changed?"}
-    CatA -->|no| Skip1["no-op"]
-    CatA -->|yes| Over["overwrite with shipped<br/>bump baseline SHA"]
-
-    Edit -->|user-edited| CatB{"catalog SHA<br/>changed?"}
-    CatB -->|no| Skip2["leave alone<br/>user customization"]
-    CatB -->|yes| Conflict[/"CONFLICT<br/>render unified diff"/]
-
-    Conflict --> TTY{"stdout is TTY?"}
-    TTY -->|no| NonTTY{"--accept flag?"}
-    NonTTY -->|none or ours| Keep["keep yours<br/>default in CI"]
-    NonTTY -->|theirs or --force| Take["take shipped<br/>bump baseline SHA"]
-
-    TTY -->|yes| Prompt{"k keep, t take, s sidecar, d re-diff<br/>a keep-all, T take-all (auto-apply rest)"}
-    Prompt -->|k or a| Keep
-    Prompt -->|t or T| Take
-    Prompt -->|s| Side["write file.new sidecar<br/>baseline SHA unchanged"]
-    Prompt -->|d| Conflict
-
-    Iter -. orphan check .-> Orphan{"manifest entry no<br/>longer in catalog?"}
-    Orphan -->|yes| Flag["leave on disk<br/>flag (orphaned) in shipmates list<br/>NEVER auto-delete"]
-
-    Iter -. NEVER touched .-> Mem[("memory/persona/<br/>SACRED, user's wisdom")]
-
-    Over --> Finish
-    ReAdd --> Finish
-    Take --> Finish
-    Keep --> Finish
-    Skip1 --> Finish
-    Skip2 --> Finish
-    Side --> Finish
-    Flag --> Finish
-
-    Finish["rewrite manifest.json<br/>bump catalog ver<br/>bump SHAs for files taken"] --> Summary(["summary: X updated, Y kept,<br/>Z conflicts, N orphans"])
-
-    classDef sacred fill:#eef,stroke:#446
-    classDef conflict fill:#fee,stroke:#a44
-    class Mem sacred
-    class Conflict conflict
+    Update[shipmates update] --> Manifest[Read manifest v2 baselines]
+    Manifest --> Each[Inspect each managed Codex artifact]
+    Each --> Changed{user edited?}
+    Changed -->|no| Refresh[Refresh changed catalog content]
+    Changed -->|yes| Conflict[Keep, take, or write sidecar]
+    Refresh --> Commit[Atomically update manifest]
+    Conflict --> Commit
+    Each -. never overwrite .-> Memory[Persistent persona memory]
+    Legacy[Manifest v1] --> Refuse[Refuse normal update]
+    Refuse --> Plan[Explicit migrate codex --plan]
+    Plan --> Apply[Optional explicit --apply]
+    Apply --> Preserve[Preserve modified and untracked legacy data]
