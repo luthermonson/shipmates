@@ -73,6 +73,34 @@ func TestHTTPExactClosedOperatorSurfaceEndToEnd(t *testing.T) {
 	}
 }
 
+func TestHTTPSteerTargetDiscoveryIsCapabilityScopedAndClosed(t *testing.T) {
+	r, op, service, in, _ := fixture(t)
+	observer, err := r.IssueObserver([]string{in.ShipID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(credential string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/fleet/v1/steer-targets", nil)
+		req.Header.Set("Authorization", "Bearer "+credential)
+		w := httptest.NewRecorder()
+		HTTPHandler{Service: service}.ServeHTTP(w, req)
+		return w
+	}
+	w := request(op.Record.CredentialID + "." + op.Secret)
+	var got SteerTargetsV1
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &got) != nil || got.SchemaVersion != 1 || got.Targets == nil {
+		t.Fatalf("authorized discovery code=%d body=%s", w.Code, w.Body.String())
+	}
+	w = request(observer.CredentialID + "." + observer.Secret)
+	if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), in.ShipID) || strings.Contains(w.Body.String(), "target-000") {
+		t.Fatalf("observer discovery code=%d body=%s", w.Code, w.Body.String())
+	}
+	var decoded map[string]json.RawMessage
+	if json.Unmarshal(w.Body.Bytes(), &decoded) != nil || len(decoded) != 4 {
+		t.Fatalf("refusal schema=%s", w.Body.String())
+	}
+}
+
 func TestOperatorUIHasNoObserverReuseOrPersistence(t *testing.T) {
 	w := httptest.NewRecorder()
 	ProductHandler{}.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/steer/", nil))

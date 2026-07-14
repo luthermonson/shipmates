@@ -28,7 +28,7 @@ func Plan() *cli.Command {
 		Name:  "plan",
 		Usage: "plan a voyage with the Skipper, consult crew, and sail when approved",
 		Flags: []cli.Flag{
-			&cli.BoolFlag{Name: "fresh", Usage: "start a fresh Skipper planning thread"},
+			&cli.BoolFlag{Name: "fresh", Usage: "start a fresh Skipper thread and clear the active voyage draft"},
 			&cli.BoolFlag{Name: "plain", Usage: "avoid alternate-screen presentation"},
 		},
 		Action: runPlan,
@@ -132,6 +132,11 @@ func runPlanningRoom(ctx context.Context, skipper string, fresh, plain bool, ret
 		defer cancel()
 		_ = conn.Close(releaseCtx)
 	}()
+	if fresh {
+		if err := clearActiveVoyage(defaultVoyagePlan); err != nil {
+			return false, false, false, err
+		}
+	}
 	model, err := dashboard.NewModel(conn.Attach)
 	if err != nil {
 		return false, false, false, err
@@ -145,19 +150,17 @@ func runPlanningRoom(ctx context.Context, skipper string, fresh, plain bool, ret
 	sailRequested := false
 	retryFailed := false
 	verboseSail := false
+	var consultation planningConsult
 	refresh := func() { model.Sidebar = voyageSidebar(defaultVoyagePlan) }
 	hook := func(hookCtx context.Context, input dashboard.ParsedInput) (bool, bool, error) {
+		if consultation.Active() && (input.Kind == dashboard.ParsedMessage || input.Kind == dashboard.ParsedConsult || input.Kind == dashboard.ParsedSail) {
+			model.Notice("Architect consultation in progress; /quit and /interrupt remain available")
+			return true, false, nil
+		}
 		switch input.Kind {
 		case dashboard.ParsedConsult:
-			advice, err := consultArchitect(hookCtx, input.Text)
-			if err != nil {
-				return true, false, err
-			}
-			message := "Architect advisory requested by the Captain:\n\n" + advice + "\n\nEvaluate this advice against the Captain's stated goals. Explain any tradeoff, then update the unapproved structured voyage draft only if appropriate."
-			if err := sendPlanningMessage(hookCtx, model, conn, message); err != nil {
-				return true, false, err
-			}
-			model.Notice("architect consultation delivered to Skipper")
+			consultation.Start(hookCtx, input.Text, true, consultArchitect)
+			model.Notice("consulting Architect; Captain controller remains active")
 			return true, false, nil
 		case dashboard.ParsedSail:
 			if _, _, err := voyage.Load(defaultVoyagePlan); err != nil {
@@ -174,6 +177,32 @@ func runPlanningRoom(ctx context.Context, skipper string, fresh, plain bool, ret
 	var lastInvalidDraft [32]byte
 	syncHook := func(hookCtx context.Context, syncedModel *dashboard.Model, syncedConn *dashboard.Connection) error {
 		if syncedModel.State != livesession.Idle {
+			return nil
+		}
+		if result, ok := consultation.Poll(); ok {
+			if result.err != nil {
+				if result.captain {
+					syncedModel.Notice("Architect consultation failed: " + boundedSailText(result.err.Error(), 512))
+					return nil
+				}
+				message := "The automatic Architect consultation could not be completed: " + boundedSailText(result.err.Error(), 512) + ". Continue planning with the Captain using the available evidence. Do not ask the Captain to run /consult."
+				if err := sendPlanningMessage(hookCtx, syncedModel, syncedConn, message); err != nil {
+					return fmt.Errorf("automatic architect consultation failed: %v; Skipper notification failed: %w", result.err, err)
+				}
+				return nil
+			}
+			advice := boundedSailText(result.advice, 12<<10)
+			message := "Automatic Architect consultation requested by the Skipper.\n\nQuestion: " + result.question + "\n\nArchitect advice:\n" + advice + "\n\nEvaluate this advice against the Captain's goals, explain consequential tradeoffs, and update the unapproved voyage draft only when appropriate. Do not ask the Captain to run /consult."
+			if result.captain {
+				message = "Architect advisory requested by the Captain:\n\n" + advice + "\n\nEvaluate this advice against the Captain's stated goals. Explain any tradeoff, then update the unapproved structured voyage draft only if appropriate."
+			}
+			if err := sendPlanningMessage(hookCtx, syncedModel, syncedConn, message); err != nil {
+				return err
+			}
+			syncedModel.Notice("architect consultation delivered to Skipper")
+			return nil
+		}
+		if consultation.Active() {
 			return nil
 		}
 		question, sequence, eventIndex, ok := skipperConsultation(syncedModel.Events, lastAutomaticConsult)
@@ -196,24 +225,52 @@ func runPlanningRoom(ctx context.Context, skipper string, fresh, plain bool, ret
 		}
 		lastAutomaticConsult = sequence
 		syncedModel.Events[eventIndex].Text = "agent: Consulting Architect automatically: " + question
-		advice, err := consultArchitect(hookCtx, question)
-		if err != nil {
-			message := "The automatic Architect consultation could not be completed: " + boundedSailText(err.Error(), 512) + ". Continue planning with the Captain using the available evidence. Do not ask the Captain to run /consult."
-			if sendErr := sendPlanningMessage(hookCtx, syncedModel, syncedConn, message); sendErr != nil {
-				return fmt.Errorf("automatic architect consultation failed: %v; Skipper notification failed: %w", err, sendErr)
-			}
-			return nil
-		}
-		message := "Automatic Architect consultation requested by the Skipper.\n\nQuestion: " + question + "\n\nArchitect advice:\n" + advice + "\n\nEvaluate this advice against the Captain's goals, explain consequential tradeoffs, and update the unapproved voyage draft only when appropriate. Do not ask the Captain to run /consult."
-		if err := sendPlanningMessage(hookCtx, syncedModel, syncedConn, message); err != nil {
-			return err
-		}
-		syncedModel.Notice("architect consultation delivered automatically")
+		consultation.Start(hookCtx, question, false, consultArchitect)
+		syncedModel.Notice("consulting Architect automatically; Captain controller remains active")
 		return nil
 	}
 	editor := dashboard.NewNativeEditor(os.Stdin, os.Stdout)
 	err = dashboard.ActionLoopWithHooksAndSync(ctx, editor, dashboard.NativeSize(os.Stdout), dashboard.NativeRenderer(os.Stdout, plain, editor), model, conn, refresh, hook, syncHook)
 	return sailRequested, retryFailed, verboseSail, err
+}
+
+type planningConsultResult struct {
+	question string
+	advice   string
+	err      error
+	captain  bool
+}
+
+type planningConsult struct {
+	results <-chan planningConsultResult
+}
+
+func (p *planningConsult) Active() bool { return p.results != nil }
+
+func (p *planningConsult) Start(ctx context.Context, question string, captain bool, consult func(context.Context, string) (string, error)) bool {
+	if p.Active() {
+		return false
+	}
+	results := make(chan planningConsultResult, 1)
+	p.results = results
+	go func() {
+		advice, err := consult(ctx, question)
+		results <- planningConsultResult{question: question, advice: advice, err: err, captain: captain}
+	}()
+	return true
+}
+
+func (p *planningConsult) Poll() (planningConsultResult, bool) {
+	if !p.Active() {
+		return planningConsultResult{}, false
+	}
+	select {
+	case result := <-p.results:
+		p.results = nil
+		return result, true
+	default:
+		return planningConsultResult{}, false
+	}
 }
 
 func invalidVoyageDraft(path string) ([32]byte, error) {
@@ -245,6 +302,23 @@ func skipperConsultation(events []dashboard.DisplayEvent, after uint64) (string,
 		return boundedSailText(question, 2045), event.Sequence, i, true
 	}
 	return "", 0, 0, false
+}
+
+func clearActiveVoyage(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect active voyage draft: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("active voyage draft is not a regular file")
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("clear active voyage draft: %w", err)
+	}
+	return nil
 }
 
 func sendPlanningMessage(ctx context.Context, model *dashboard.Model, conn *dashboard.Connection, message string) error {

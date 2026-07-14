@@ -38,6 +38,7 @@ func (p *Production) Handler() http.Handler {
 	m.Handle("/api/fleet/v1/tunnel", p.Tunnel.WebSocketHandler())
 	if p.Steer != nil {
 		m.Handle("/api/fleet/v1/steer-tunnel", fleetsteer.ReverseHandler(p.Steer, p.Registry, p.Interrupt))
+		m.Handle("/api/fleet/v1/steer-targets", fleetsteer.HTTPHandler{Service: p.Steer})
 		m.Handle("/api/fleet/v1/turn-steers", fleetsteer.HTTPHandler{Service: p.Steer})
 		m.Handle("/steer/", fleetsteer.ProductHandler{API: fleetsteer.HTTPHandler{Service: p.Steer}})
 	}
@@ -131,6 +132,9 @@ func OpenProduction(c ProductionConfig) (*Production, error) {
 	if c.SteerEpoch != 0 {
 		steer, err = fleetsteer.NewService(c.FleetID, r, nil, c.Random)
 		if err != nil {
+			return nil, err
+		}
+		if err = steer.BindProjection(p, c.SteerEpoch); err != nil {
 			return nil, err
 		}
 		interrupt, err = fleetinterrupt.OpenServiceWithConfig(c.FleetID, r, c.Random, filepath.Join(c.AuthorityStore, "interrupt"), fleetinterrupt.ServiceConfig{Clock: c.InterruptClock, AdmissionClock: c.InterruptAdmissionClock, TargetLifetime: c.InterruptTargetLifetime, ObservationFreshness: c.InterruptObservationFreshness, SubjectAdmissionWindow: c.InterruptSubjectAdmissionWindow, ShipAdmissionWindow: c.InterruptShipAdmissionWindow, TargetAdmissionWindow: c.InterruptTargetAdmissionWindow})

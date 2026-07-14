@@ -8,7 +8,7 @@ import (
 
 func TestM7FleetGrammarContainsOnlyObserverCommands(t *testing.T) {
 	c := Fleet()
-	want := map[string]bool{"serve-observer": true, "steer": true, "interrupt": true, "ships": true, "status": true, "events": true, "follow": true}
+	want := map[string]bool{"init": true, "enrollment": true, "credential": true, "serve-observer": true, "steer": true, "steer-targets": true, "interrupt": true, "interrupt-targets": true, "ships": true, "status": true, "events": true, "follow": true}
 	if len(c.Commands) != len(want) {
 		t.Fatalf("commands=%d", len(c.Commands))
 	}

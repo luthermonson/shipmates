@@ -67,9 +67,22 @@ type EnrollmentResult struct {
 	Credential SecretCredential
 }
 type ShipPrincipal struct{ FleetID, ShipID, CredentialID string }
+type ShipCredentialRecord struct {
+	ShipID       string
+	CredentialID string
+	Generation   uint64
+	Revoked      bool
+	Pending      bool
+}
 type ObserverPrincipal struct {
 	FleetID, CredentialID, Capability string
 	ShipIDs                           []string
+}
+type ObserverCredentialRecord struct {
+	CredentialID string
+	FleetID      string
+	ShipIDs      []string
+	Revoked      bool
 }
 type OperatorPrincipal struct {
 	FleetID, SubjectID, CredentialID, Capability string
@@ -483,6 +496,18 @@ func (r *Registry) RevokeShip(shipID string) error {
 	return r.commitLocked(before)
 }
 
+// InspectShip returns ship and credential metadata only. Credential
+// verifiers, secrets, and pending rotation material are never returned.
+func (r *Registry) InspectShip(shipID string) (ShipCredentialRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.ships[shipID]
+	if s == nil {
+		return ShipCredentialRecord{}, fail(NotFound)
+	}
+	return ShipCredentialRecord{ShipID: shipID, CredentialID: s.current.id, Generation: s.generation, Revoked: s.revoked || s.current.revoked, Pending: s.rotation != nil}, nil
+}
+
 func (r *Registry) IssueObserver(shipIDs []string) (SecretCredential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -535,6 +560,23 @@ func (r *Registry) RevokeObserver(credentialID string) error {
 	}
 	o.revoked = true
 	return r.commitLocked(before)
+}
+
+// InspectObserver returns observer metadata without exposing its verifier or
+// secret. The returned ship scope is sorted for stable public output.
+func (r *Registry) InspectObserver(credentialID string) (ObserverCredentialRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	o := r.observers[credentialID]
+	if o == nil {
+		return ObserverCredentialRecord{}, fail(NotFound)
+	}
+	ids := make([]string, 0, len(o.ships))
+	for id := range o.ships {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ObserverCredentialRecord{CredentialID: credentialID, FleetID: r.fleetID, ShipIDs: ids, Revoked: o.revoked}, nil
 }
 
 func operatorRecord(o *operatorCredential) OperatorCredentialRecord {

@@ -120,7 +120,9 @@ when a consequential design decision needs specialist input; `/consult
 <question>` remains available as a Captain-initiated override. `/sail` starts an
 approved voyage, `/sail --verbose` opens the transparent operations-room view,
 and incomplete execution returns to the planning conversation with persisted
-blocker context.
+blocker context. `--fresh` starts a new Skipper thread and clears only the active
+`.shipmates/voyage.json` draft; completed voyage state, reports, and memory are
+preserved.
 
 ## Live sessions
 
@@ -192,14 +194,34 @@ Ship-side commands:
 
 Fleet-side commands:
 
+- `shipmates fleet init --authority-store <dir> --fleet-id <opaque-id>` creates
+  the owner-only durable authority store. Keep it outside repositories.
+- `shipmates fleet enrollment create ... --output <new-0600-file>` creates a
+  short-lived one-use artifact. Consume it with `fleet enrollment consume` from
+  that protected file or from non-echoing stdin; successful file consumption
+  removes the artifact and writes ship identity outside the repository.
+- `shipmates fleet credential issue --kind observer|steer|interrupt ...
+  --output <new-0600-file>` issues one role-separated secret. The command
+  prints metadata only. `credential inspect` prints metadata only; rotate,
+  commit, and revoke require the exact kind and generation where applicable.
 - `shipmates fleet serve-observer` runs the observer UI/API and authority.
 - `shipmates fleet ships` lists visible ships.
 - `shipmates fleet status` returns one bounded ship snapshot.
 - `shipmates fleet events` reads bounded normalized events.
 - `shipmates fleet follow` follows later events.
+- `shipmates fleet steer-targets` discovers fresh opaque steer targets using
+  only a `fleet.steer.turn.v1` credential.
 - `shipmates fleet steer` sends text to one exact active target.
+- `shipmates fleet interrupt-targets` discovers fresh opaque interrupt targets
+  using only a `fleet.interrupt.turn.v1` credential.
 - `shipmates fleet interrupt` interrupts one exact active target.
 
 Observer credentials are read-only. Steer and interrupt require separate,
-short-lived operation capabilities. Read [Fleet architecture](fleet-architecture.md)
-and [Operations](operations.md) before exposing an observer service.
+short-lived operation capabilities. Secret output paths must be absolute,
+create-new regular files with mode `0600`, and must not be repository paths,
+symlinks, existing files, argv values, URLs, stdout, logs, or error text. The
+authority store and ship identity store are also external to the project;
+Fleet service TLS certificates/keys are supplied separately to
+`fleet serve-observer`. Read [Fleet architecture](fleet-architecture.md), the
+[Fleet beta.2 runbook](fleet-beta2-runbook.md), and [Operations](operations.md)
+before exposing an observer service.

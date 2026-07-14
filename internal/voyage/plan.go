@@ -230,3 +230,78 @@ func Hash(canonical []byte) string {
 	sum := sha256.Sum256(bytes.TrimSpace(canonical))
 	return hex.EncodeToString(sum[:])
 }
+
+// TaskFingerprint is the deterministic execution contract for one task. It
+// intentionally includes ordered dependencies and every dispatch/escalation
+// field; task IDs alone are never an inheritance key.
+func TaskFingerprint(t Task) string {
+	return hashCanonical(struct {
+		ID, Persona, Summary, Prompt string
+		DependsOn                    []string
+		Models                       []string
+		Efforts                      []string
+		RetrySafe                    bool
+	}{t.ID, t.Persona, t.Summary, t.Prompt, t.DependsOn, t.Models, t.Efforts, t.RetrySafe})
+}
+
+// GlobalFingerprint conservatively covers plan fields whose change can alter
+// the meaning or authorization of every task in a voyage.
+func GlobalFingerprint(p *Plan) string {
+	return hashCanonical(struct {
+		Version            int
+		Title, Objective   string
+		Scope, NonGoals    []string
+		BlastArea, Risks   []string
+		AcceptanceCriteria []string
+		OpenDecisions      []string
+	}{p.Version, p.Title, p.Objective, p.Scope, p.NonGoals, p.BlastArea, p.Risks, p.AcceptanceCriteria, p.OpenDecisions})
+}
+
+// TaskFingerprints returns local and dependency-closure fingerprints in a
+// stable topological-independent form. A changed dependency changes every
+// dependent closure fingerprint.
+func TaskFingerprints(p *Plan) (map[string]string, map[string]string, error) {
+	if err := p.Validate(); err != nil {
+		return nil, nil, err
+	}
+	local := make(map[string]string, len(p.Tasks))
+	byID := make(map[string]Task, len(p.Tasks))
+	for _, t := range p.Tasks {
+		local[t.ID], byID[t.ID] = TaskFingerprint(t), t
+	}
+	closure := make(map[string]string, len(p.Tasks))
+	var visit func(string, map[string]bool) (string, error)
+	visit = func(id string, visiting map[string]bool) (string, error) {
+		if got, ok := closure[id]; ok {
+			return got, nil
+		}
+		if visiting[id] {
+			return "", errors.New("voyage task dependency graph contains a cycle")
+		}
+		visiting[id] = true
+		parts := []struct{ ID, Fingerprint string }{{id, local[id]}}
+		for _, dep := range byID[id].DependsOn {
+			fp, err := visit(dep, visiting)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, struct{ ID, Fingerprint string }{dep, fp})
+		}
+		delete(visiting, id)
+		got := hashCanonical(parts)
+		closure[id] = got
+		return got, nil
+	}
+	for _, t := range p.Tasks {
+		if _, err := visit(t.ID, map[string]bool{}); err != nil {
+			return nil, nil, err
+		}
+	}
+	return local, closure, nil
+}
+
+func hashCanonical(v any) string {
+	b, _ := json.Marshal(v)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}

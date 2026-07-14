@@ -108,6 +108,42 @@ func TestStateRoundTripAndRunningRecovery(t *testing.T) {
 	}
 }
 
+func TestPublishSuccessorRecoversOrphanedRunningTask(t *testing.T) {
+	p := validPlan()
+	hash := strings.Repeat("c", 64)
+	lineage := &Lineage{
+		PredecessorPlanHash:  strings.Repeat("d", 64),
+		PredecessorStateHash: strings.Repeat("e", 64),
+		CreatedAt:            NewState(&p, hash).StartedAt,
+	}
+	want := NewState(&p, hash)
+	want.Lineage = lineage
+	existing := NewState(&p, hash)
+	existing.Lineage = lineage
+	entry := existing.Tasks["build"]
+	entry.Status = Running
+	existing.Tasks["build"] = entry
+
+	path := filepath.Join(t.TempDir(), "successor.json")
+	if err := SaveState(path, existing); err != nil {
+		t.Fatal(err)
+	}
+	got, err := PublishSuccessor(path, want, &p, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Tasks["build"].Status != Pending {
+		t.Fatalf("orphaned successor task was not recovered: %#v", got.Tasks["build"])
+	}
+	persisted, err := LoadStateStrict(path, &p, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Tasks["build"].Status != Pending {
+		t.Fatalf("recovery was not persisted: %#v", persisted.Tasks["build"])
+	}
+}
+
 func TestStateRejectsUnknownExtraInvalidAndSymlink(t *testing.T) {
 	p := validPlan()
 	hash := strings.Repeat("b", 64)

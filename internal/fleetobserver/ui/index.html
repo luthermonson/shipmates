@@ -1,4 +1,38 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Fleet Observer — Read only</title><link rel="stylesheet" href="/observer/style.css"></head><body>
-<header><h1>Fleet Observer</h1><strong>Read only</strong></header>
-<main><form id="auth"><label>Observer credential <input id="credential" type="password" autocomplete="off" required></label><button type="submit">Observe fleet</button></form><p id="error" role="alert"></p><section id="fleet" hidden><p id="boundary" role="status"></p><div id="ships"></div><h2>Events</h2><ol id="events" aria-live="polite"></ol></section></main>
-<script src="/observer/app.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Fleet Observer — Read only</title>
+  <link rel="stylesheet" href="/observer/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div><p class="eyebrow">Fleet</p><h1>Fleet Observer</h1></div>
+    <strong class="readonly">Read only</strong>
+  </header>
+  <main>
+    <section aria-labelledby="auth-heading" id="auth-panel">
+      <h2 id="auth-heading">Connect to an observer</h2>
+      <form id="auth">
+        <label for="credential">Observer credential</label>
+        <input id="credential" type="password" autocomplete="off" required>
+        <button type="submit">Observe fleet</button>
+      </form>
+      <p id="error" class="error" role="alert"></p>
+    </section>
+    <section id="fleet" aria-labelledby="fleet-heading" hidden>
+      <h2 id="fleet-heading">Fleet status</h2>
+      <p id="boundary" class="boundary" role="status" aria-live="polite"></p>
+      <div id="ships"></div>
+      <section aria-labelledby="events-heading">
+        <h2 id="events-heading">Recent observed events</h2>
+        <p id="event-status" class="visually-hidden" role="status" aria-live="polite"></p>
+        <ol id="events" aria-label="Recent observed events"></ol>
+      </section>
+    </section>
+  </main>
+  <script src="/observer/app.js"></script>
+</body>
+</html>

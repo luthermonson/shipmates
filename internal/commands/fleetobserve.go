@@ -119,6 +119,36 @@ func fleetSteer() *cli.Command {
 	}}
 }
 
+func fleetSteerTargets() *cli.Command {
+	return &cli.Command{Name: "steer-targets", Usage: "discover bounded opaque steer targets for already-active turns", Flags: []cli.Flag{
+		&cli.StringFlag{Name: "fleet", Sources: cli.EnvVars("SHIPMATES_OPERATOR_URL"), Required: true},
+		&cli.StringFlag{Name: "credential-file", Sources: cli.EnvVars("SHIPMATES_OPERATOR_CREDENTIAL_FILE"), Required: true},
+		&cli.BoolFlag{Name: "json"},
+	}, Action: func(ctx context.Context, c *cli.Command) error {
+		if len(c.Args().Slice()) != 0 {
+			return errors.New("steer_targets_takes_no_arguments")
+		}
+		if _, err := fleetsteer.ValidateOperatorURL(c.String("fleet")); err != nil {
+			return err
+		}
+		cred, err := readRestrictedCredential(c.String("credential-file"))
+		if err != nil {
+			return err
+		}
+		v, err := (fleetsteer.Client{BaseURL: c.String("fleet"), Credential: cred}).Targets(ctx)
+		if err != nil {
+			return err
+		}
+		if c.Bool("json") {
+			return json.NewEncoder(c.Writer).Encode(v)
+		}
+		for _, target := range v.Targets {
+			fmt.Fprintf(c.Writer, "%s %s %s gen=%d target=%s expires=%s\n", safeTerminal(target.ShipID), safeTerminal(target.Persona), safeTerminal(target.FleetID), target.ConnectionGeneration, safeTerminal(target.SteerTargetRef), target.ExpiresAt.UTC().Format(time.RFC3339))
+		}
+		return nil
+	}}
+}
+
 func fleetInterrupt() *cli.Command {
 	return &cli.Command{Name: "interrupt", Usage: "interrupt one exact active remote turn", Flags: []cli.Flag{
 		&cli.StringFlag{Name: "fleet", Sources: cli.EnvVars("SHIPMATES_INTERRUPT_URL"), Required: true},
@@ -179,6 +209,36 @@ func fleetInterrupt() *cli.Command {
 		}
 		if res.Outcome == livesession.RemoteInterruptIndeterminate {
 			return steerExit{3}
+		}
+		return nil
+	}}
+}
+
+func fleetInterruptTargets() *cli.Command {
+	return &cli.Command{Name: "interrupt-targets", Usage: "discover bounded opaque interrupt targets for already-active turns", Flags: []cli.Flag{
+		&cli.StringFlag{Name: "fleet", Sources: cli.EnvVars("SHIPMATES_INTERRUPT_URL"), Required: true},
+		&cli.StringFlag{Name: "credential-file", Sources: cli.EnvVars("SHIPMATES_INTERRUPT_CREDENTIAL_FILE"), Required: true},
+		&cli.BoolFlag{Name: "json"},
+	}, Action: func(ctx context.Context, c *cli.Command) error {
+		if len(c.Args().Slice()) != 0 {
+			return errors.New("interrupt_targets_takes_no_arguments")
+		}
+		if _, err := fleetinterrupt.ValidateOperatorURL(c.String("fleet")); err != nil {
+			return err
+		}
+		cred, err := readRestrictedCredential(c.String("credential-file"))
+		if err != nil {
+			return err
+		}
+		v, err := (fleetinterrupt.Client{BaseURL: c.String("fleet"), Credential: cred}).Targets(ctx)
+		if err != nil {
+			return err
+		}
+		if c.Bool("json") {
+			return json.NewEncoder(c.Writer).Encode(v)
+		}
+		for _, target := range v.Targets {
+			fmt.Fprintf(c.Writer, "%s %s %s gen=%d target=%s expires=%s\n", safeTerminal(target.ShipID), safeTerminal(target.Persona), safeTerminal(target.FleetID), target.ConnectionGeneration, safeTerminal(target.InterruptTargetRef), target.ExpiresAt.UTC().Format(time.RFC3339))
 		}
 		return nil
 	}}

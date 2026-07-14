@@ -15,9 +15,12 @@ func fleetWithProductionConfig(production fleetobserver.ProductionConfig) *cli.C
 		Name:  "fleet",
 		Usage: "authenticated Fleet observation and exact-turn operations",
 		Commands: []*cli.Command{
+			FleetBootstrap(), FleetEnrollment(), FleetCredentials(),
 			fleetServeObserverWithConfig(production),
 			fleetSteer(),
+			fleetSteerTargets(),
 			fleetInterrupt(),
+			fleetInterruptTargets(),
 			fleetObserverShips(),
 			fleetObserverStatus(),
 			fleetObserverEvents(),

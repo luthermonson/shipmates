@@ -387,3 +387,86 @@ func TestSailInputRequestIsExplicitAndBounded(t *testing.T) {
 		t.Fatalf("question=%q ok=%v", question, ok)
 	}
 }
+
+func TestPublicSailAmendmentInheritsTaskOneAndDispatchesChangedSuccessor(t *testing.T) {
+	t.Setenv(codexapp.ManagedSessionEnvironment, "")
+	pre := voyage.Plan{Version: 1, Title: "Fleet-shaped amendment", Objective: "resume safely", Scope: []string{"observation", "control"}, NonGoals: []string{"remote start"}, BlastArea: []string{"Fleet"}, Risks: []string{"stale target"}, AcceptanceCriteria: []string{"Task 1 is preserved"}, OpenDecisions: []string{"Linux"}, Approved: true, Tasks: []voyage.Task{
+		{ID: "zero-to-observed-real-codex", Persona: "backend", Summary: "Observe", Prompt: "observe one active turn"},
+		{ID: "real-exact-turn-control", Persona: "tester", Summary: "Control", Prompt: "amended control contract", DependsOn: []string{"zero-to-observed-real-codex"}},
+	}}
+	successor := pre
+	successor.Tasks = append([]voyage.Task(nil), pre.Tasks...)
+	successor.Tasks[1].Prompt = "changed control contract"
+	root := sailTestProject(t, successor)
+	t.Chdir(root)
+	prePlanPath := filepath.Join(root, "original-voyage.json")
+	preHash, _ := writeCommandVoyagePlan(t, prePlanPath, pre)
+	preStatePath := filepath.Join(root, "original-voyage-state.json")
+	preState := voyage.NewState(&pre, preHash)
+	entry := preState.Tasks["zero-to-observed-real-codex"]
+	entry.Status, entry.Summary, entry.FinishedAt, entry.BeadID = voyage.Completed, "original completion evidence", time.Date(2026, 7, 14, 3, 0, 0, 0, time.UTC), "Shipmates-auz"
+	preState.Tasks["zero-to-observed-real-codex"] = entry
+	if err := voyage.SaveState(preStatePath, preState); err != nil {
+		t.Fatal(err)
+	}
+	preBytes := mustCommandRead(t, preStatePath)
+
+	old := sailTaskDispatcher
+	defer func() { sailTaskDispatcher = old }()
+	var dispatched []string
+	sailTaskDispatcher = func(_ context.Context, persona *project.InstalledPersona, _ string, _ project.PersonaConfig, stdout, _ io.Writer) error {
+		dispatched = append(dispatched, persona.Name)
+		_, _ = fmt.Fprintln(stdout, "changed task completed")
+		return nil
+	}
+	var output bytes.Buffer
+	rootCommand := &cli.Command{Name: "shipmates", Writer: &output, ErrWriter: &output, Commands: []*cli.Command{Sail()}}
+	if err := rootCommand.Run(context.Background(), []string{"shipmates", "sail", "--no-color", "--predecessor-plan", prePlanPath, "--predecessor-state", preStatePath}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(dispatched, []string{"tester"}) {
+		t.Fatalf("dispatched personas = %v", dispatched)
+	}
+	if !strings.Contains(output.String(), "INHERITED") || !strings.Contains(output.String(), "Observe") {
+		t.Fatalf("inherited status was not rendered: %s", output.String())
+	}
+	_, canonical, err := voyage.Load(filepath.Join(root, ".shipmates", "voyage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	successorHash := voyage.Hash(canonical)
+	successorState, err := voyage.LoadState(filepath.Join(root, ".shipmates", "voyages", successorHash[:16]+".json"), &successor, successorHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if successorState.Tasks["zero-to-observed-real-codex"].Inherited == nil || successorState.Tasks["zero-to-observed-real-codex"].BeadID != "Shipmates-auz" {
+		t.Fatalf("Task 1 inheritance = %+v", successorState.Tasks["zero-to-observed-real-codex"])
+	}
+	if successorState.Tasks["real-exact-turn-control"].Status != voyage.Completed {
+		t.Fatalf("Task 2 state = %+v", successorState.Tasks["real-exact-turn-control"])
+	}
+	if after := mustCommandRead(t, preStatePath); !bytes.Equal(preBytes, after) {
+		t.Fatal("public amendment changed predecessor bytes")
+	}
+}
+
+func writeCommandVoyagePlan(t *testing.T, path string, plan voyage.Plan) (string, []byte) {
+	t.Helper()
+	b, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return voyage.Hash(b), b
+}
+
+func mustCommandRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}

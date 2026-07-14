@@ -57,7 +57,7 @@ func TestBrowserIsReadOnlyAndCredentialSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	all := strings.ToLower(string(b) + string(js))
-	for _, forbidden := range []string{"localstorage", "sessionstorage", "websocket", "method:'post'", "method:'put'", "method:'patch'", "method:'delete'", "/tell", "/steer", "/approve", "pty", "attachment", "voice"} {
+	for _, forbidden := range []string{"localstorage", "sessionstorage", "indexeddb", "websocket", "method:'post'", "method:'put'", "method:'patch'", "method:'delete'", "/tell", "/steer", "/approve", "pty", "attachment", "voice", "upload", "transfer", "shell"} {
 		if strings.Contains(all, forbidden) {
 			t.Fatalf("browser contains prohibited surface %q", forbidden)
 		}
@@ -66,6 +66,23 @@ func TestBrowserIsReadOnlyAndCredentialSafe(t *testing.T) {
 		t.Fatal("missing read-only label")
 	}
 	if !strings.Contains(string(js), "cursor=`${epoch}:${r.next_cursor}`") {
-		t.Fatal("browser does not advance to authoritative next_cursor")
+		// The implementation uses a named cursor assignment so it is easier to
+		// audit than a generated transport or opaque state library.
+		if !strings.Contains(string(js), "cursor = `${epoch}:${result.next_cursor}`") {
+			t.Fatal("browser does not advance to authoritative next_cursor")
+		}
+	}
+	for _, required := range []string{"textContent", "replaceChildren", "MAX_RENDERED_EVENTS = 200", "credentials: 'omit'", "method: 'GET'"} {
+		if !strings.Contains(string(js), required) {
+			t.Fatalf("browser safety invariant missing %q", required)
+		}
+	}
+	for _, required := range []string{"aria-labelledby=\"fleet-heading\"", "role=\"alert\"", "aria-live=\"polite\"", "for=\"credential\""} {
+		if !strings.Contains(string(b), required) {
+			t.Fatalf("browser accessibility invariant missing %q", required)
+		}
+	}
+	if !strings.Contains(string(js), "document.createElement('table')") {
+		t.Fatal("browser does not construct a semantic table")
 	}
 }

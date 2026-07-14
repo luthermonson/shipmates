@@ -259,6 +259,49 @@ func TestCorrelationRejectsDuplicateAndHandlesOutOfOrder(t *testing.T) {
 	}
 }
 
+func TestSteerTurnUsesExpectedTurnIDPrecondition(t *testing.T) {
+	serverRead, clientWrite := ioPipe(t)
+	clientRead, serverWrite := ioPipe(t)
+	a := &Adapter{stdin: clientWrite, stdout: clientRead, nextID: 1, pending: make(map[int64]pendingCall), done: make(chan struct{}), maxFrame: 4096}
+	go a.readLoop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- a.SteerTurn(context.Background(), "thread-00000001", "turn-0000000001", "continue")
+	}()
+
+	line, err := bufio.NewReader(serverRead).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params struct {
+			ThreadID       string          `json:"threadId"`
+			ExpectedTurnID string          `json:"expectedTurnId"`
+			LegacyTurnID   json.RawMessage `json:"turnId"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(line, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Method != "turn/steer" || request.Params.ThreadID != "thread-00000001" || request.Params.ExpectedTurnID != "turn-0000000001" || request.Params.LegacyTurnID != nil {
+		t.Fatalf("steer request = %s", line)
+	}
+	id, ok := parseID(request.ID)
+	if !ok {
+		t.Fatal("missing request id")
+	}
+	response, _ := json.Marshal(map[string]any{"id": id, "result": map[string]any{}})
+	if _, err := serverWrite.Write(append(response, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func ioPipe(t *testing.T) (*os.File, *os.File) {
 	t.Helper()
 	r, w, err := os.Pipe()

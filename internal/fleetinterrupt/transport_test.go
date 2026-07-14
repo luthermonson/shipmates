@@ -3,11 +3,13 @@ package fleetinterrupt
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -213,6 +215,103 @@ func TestServiceDeadlineIsBounded(t *testing.T) {
 	r := s.Submit(ctx, "credential", "secret", SubmitV1{SchemaVersion: 1, FleetID: "fleet", FleetEpoch: 1, ShipID: "ship", ConnectionGeneration: 1, Persona: interruptPersonaRef(), InterruptTargetRef: interruptRef(3), OperationID: interruptRef(4)})
 	if r.Outcome != livesession.RemoteInterruptIndeterminate || r.ReasonCode != "delivery_unknown" {
 		t.Fatal(r)
+	}
+}
+
+// TestServiceAdmissionAndBoundedOperationCapacity drives only fake endpoints.
+// It proves the published admission ceilings, duplicate-waiter refusal, and
+// fixed operation store capacity without spending a real Codex turn.
+func TestServiceAdmissionWaiterAndOperationBounds(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	clock := &testClock{now: base}
+	admission := &testClock{now: base}
+	p := fleetidentity.OperatorPrincipal{FleetID: "fleet", SubjectID: "subject", CredentialID: "credential", Capability: fleetidentity.InterruptTurnCapability, CredentialGeneration: 1, ShipIDs: []string{"ship"}}
+	s, err := NewServiceWithConfig("fleet", fakeAuthority{principal: p}, cryptorand.Reader, ServiceConfig{Clock: clock, AdmissionClock: admission})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fast := &fakeEndpoint{result: livesession.RemoteInterruptResult{SchemaVersion: 1, Outcome: livesession.RemoteInterruptInterrupted, ReasonCode: "interrupted"}}
+	if _, err := s.Connect("ship", 1, fast); err != nil {
+		t.Fatal(err)
+	}
+	makeInput := func(op int) SubmitV1 {
+		id := make([]byte, 32)
+		id[0], id[1] = byte(op), byte(op>>8)
+		return SubmitV1{SchemaVersion: 1, FleetID: "fleet", FleetEpoch: 1, ShipID: "ship", ConnectionGeneration: 1, Persona: interruptPersonaRef(), InterruptTargetRef: interruptRef(byte(op)), OperationID: base64.RawURLEncoding.EncodeToString(id)}
+	}
+	for i := 2; i < 7; i++ {
+		admission.Advance(time.Second)
+		if got := s.SubmitAuthorized(context.Background(), p, makeInput(i)); got.Outcome != livesession.RemoteInterruptInterrupted {
+			t.Fatalf("admitted request %d = %+v", i, got)
+		}
+	}
+	if got := s.SubmitAuthorized(context.Background(), p, makeInput(7)); got.ReasonCode != "busy" {
+		t.Fatalf("subject admission did not refuse sixth request: %+v", got)
+	}
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	s.connections["ship"] = connection{generation: 1, endpoint: endpointFunc(func(_ context.Context, d DeliveryV1) livesession.RemoteInterruptResult {
+		once.Do(func() { close(entered) })
+		<-release
+		return result(d.Request.OperationID, livesession.RemoteInterruptInterrupted, "interrupted")
+	})}
+	admission.Advance(time.Minute)
+	in := makeInput(8)
+	first := make(chan livesession.RemoteInterruptResult, 1)
+	go func() { first <- s.SubmitAuthorized(context.Background(), p, in) }()
+	<-entered
+	waiters := make(chan livesession.RemoteInterruptResult, MaxFleetWaiters+1)
+	for i := 0; i < MaxFleetWaiters+1; i++ {
+		go func() { waiters <- s.SubmitAuthorized(context.Background(), p, in) }()
+	}
+	busy := 0
+	for i := 0; i < MaxFleetWaiters+1; i++ {
+		select {
+		case got := <-waiters:
+			if got.ReasonCode == "busy" {
+				busy++
+			} else {
+				t.Fatalf("waiter returned before release: %+v", got)
+			}
+		case <-time.After(time.Second):
+			// The other calls are correctly waiting on the in-flight operation.
+			i = MaxFleetWaiters + 1
+		}
+	}
+	if busy != 1 {
+		t.Fatalf("waiter refusal count=%d want 1", busy)
+	}
+	close(release)
+	<-first
+	for i := 0; i < MaxFleetWaiters; i++ {
+		if got := <-waiters; got.Outcome != livesession.RemoteInterruptInterrupted {
+			t.Fatalf("released waiter=%+v", got)
+		}
+	}
+
+	// Reopen a fresh service so the five admission records above do not affect
+	// the capacity check. Advancing only the admission clock stays deterministic
+	// while retaining all terminal operations in the storage bound.
+	s, err = NewServiceWithConfig("fleet", fakeAuthority{principal: p}, cryptorand.Reader, ServiceConfig{Clock: clock, AdmissionClock: admission})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Connect("ship", 1, fast); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxFleetOperations; i++ {
+		p.SubjectID = "subject-" + strconv.Itoa(i)
+		admission.Advance(time.Minute)
+		if got := s.SubmitAuthorized(context.Background(), p, makeInput(i)); got.Outcome != livesession.RemoteInterruptInterrupted {
+			t.Fatalf("capacity operation %d = %+v", i, got)
+		}
+	}
+	p.SubjectID = "subject-overflow"
+	admission.Advance(time.Minute)
+	if got := s.SubmitAuthorized(context.Background(), p, makeInput(MaxFleetOperations)); got.ReasonCode != "busy" {
+		t.Fatalf("operation capacity did not refuse overflow: %+v", got)
 	}
 }
 

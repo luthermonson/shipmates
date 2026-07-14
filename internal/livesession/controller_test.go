@@ -62,6 +62,19 @@ func TestExclusiveControllerAndObserverIsolation(t *testing.T) {
 		t.Fatal("observer changed lease")
 	}
 }
+
+func TestControllerMessageAllowsMultilineAdviceButRejectsControlBytes(t *testing.T) {
+	for _, valid := range []string{"one line", "architect advice:\n- option one\n- option two", "tab\tvalue"} {
+		if !validControllerMessage(valid) {
+			t.Fatalf("valid controller message rejected: %q", valid)
+		}
+	}
+	for _, invalid := range []string{"", "nul\x00byte", "carriage\rreturn", string([]byte{0xff})} {
+		if validControllerMessage(invalid) {
+			t.Fatalf("invalid controller message accepted: %q", invalid)
+		}
+	}
+}
 func TestReleaseIsExactAndReconnectGetsFreshAuthority(t *testing.T) {
 	m, s := controllerTestManager()
 	a, _ := m.AttachController("backend", "session", 0)

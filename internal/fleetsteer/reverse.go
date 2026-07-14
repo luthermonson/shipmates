@@ -18,16 +18,19 @@ import (
 
 type reverseRequest struct {
 	Type          string                          `json:"type"`
+	TargetQueryID string                          `json:"target_query_id,omitempty"`
 	Delivery      DeliveryV1                      `json:"delivery,omitempty"`
 	Interrupt     *fleetinterrupt.DeliveryV1      `json:"interrupt,omitempty"`
 	TargetInstall *fleetinterrupt.TargetInstallV1 `json:"target_install,omitempty"`
 }
 type reverseResult struct {
-	Type        string                             `json:"type"`
-	OperationID string                             `json:"operation_id"`
-	Result      livesession.RemoteSteerResult      `json:"result"`
-	Interrupt   *livesession.RemoteInterruptResult `json:"interrupt,omitempty"`
-	Installed   bool                               `json:"installed,omitempty"`
+	Type          string                             `json:"type"`
+	OperationID   string                             `json:"operation_id"`
+	Result        livesession.RemoteSteerResult      `json:"result"`
+	Interrupt     *livesession.RemoteInterruptResult `json:"interrupt,omitempty"`
+	Installed     bool                               `json:"installed,omitempty"`
+	TargetQueryID string                             `json:"target_query_id,omitempty"`
+	Targets       []SteerTargetV1                    `json:"targets,omitempty"`
 }
 type reverseReady struct {
 	Type                string `json:"type"`
@@ -67,9 +70,35 @@ type reverseEndpoint struct {
 	wait          map[string]chan livesession.RemoteSteerResult
 	waitInterrupt map[string]chan livesession.RemoteInterruptResult
 	waitInstall   map[string]chan bool
+	waitTargets   map[string]chan []SteerTargetV1
+	nextQuery     uint64
 	registry      *fleetidentity.Registry
 	shipID        string
 	clock         Clock
+}
+
+func (e *reverseEndpoint) PublicTargets(ctx context.Context) ([]SteerTargetV1, error) {
+	e.stateMu.Lock()
+	e.nextQuery++
+	id := "q_" + strconv.FormatUint(e.nextQuery, 10)
+	ch := make(chan []SteerTargetV1, 1)
+	e.waitTargets[id] = ch
+	e.stateMu.Unlock()
+	if e.writer.write(time.Now().Add(DeliveryDeadline), reverseRequest{Type: "steer_target_query", TargetQueryID: id}) != nil {
+		e.stateMu.Lock()
+		delete(e.waitTargets, id)
+		e.stateMu.Unlock()
+		return nil, errors.New("target_query_failed")
+	}
+	select {
+	case targets := <-ch:
+		return targets, nil
+	case <-ctx.Done():
+		e.stateMu.Lock()
+		delete(e.waitTargets, id)
+		e.stateMu.Unlock()
+		return nil, ctx.Err()
+	}
 }
 
 func (e *reverseEndpoint) InstallInterruptTarget(ctx context.Context, t fleetinterrupt.TargetInstallV1) error {
@@ -181,7 +210,7 @@ func ReverseHandler(service *Service, registry *fleetidentity.Registry, interrup
 		if err != nil {
 			return
 		}
-		ep := &reverseEndpoint{writer: &reverseWriter{conn: c}, wait: map[string]chan livesession.RemoteSteerResult{}, waitInterrupt: map[string]chan livesession.RemoteInterruptResult{}, waitInstall: map[string]chan bool{}, registry: registry, shipID: p.ShipID, clock: service.clock}
+		ep := &reverseEndpoint{writer: &reverseWriter{conn: c}, wait: map[string]chan livesession.RemoteSteerResult{}, waitInterrupt: map[string]chan livesession.RemoteInterruptResult{}, waitInstall: map[string]chan bool{}, waitTargets: map[string]chan []SteerTargetV1{}, registry: registry, shipID: p.ShipID, clock: service.clock}
 		disconnect, err := service.Connect(p.ShipID, gen, ep)
 		if err != nil {
 			_ = c.Close()
@@ -227,6 +256,16 @@ func ReverseHandler(service *Service, registry *fleetidentity.Registry, interrup
 					return
 				}
 				ch <- *out.Interrupt
+				continue
+			}
+			if out.Type == "steer_target_page" && out.TargetQueryID != "" && out.TargetQueryID == out.OperationID {
+				ch := ep.waitTargets[out.TargetQueryID]
+				delete(ep.waitTargets, out.TargetQueryID)
+				ep.stateMu.Unlock()
+				if ch == nil {
+					return
+				}
+				ch <- out.Targets
 				continue
 			}
 			if out.Type != "turn_steer_result" || out.Result.OperationID != out.OperationID {
@@ -323,6 +362,18 @@ func runReverseClient(ctx context.Context, destination string, identity fleetide
 			installed := ok && installer.InstallInterruptTarget(ctx, *in.TargetInstall) == nil
 			_ = c.SetWriteDeadline(time.Now().Add(DeliveryDeadline))
 			if c.WriteJSON(reverseResult{Type: "interrupt_target_installed", OperationID: in.TargetInstall.InterruptTargetRef, Installed: installed}) != nil {
+				return nil
+			}
+			continue
+		}
+		if in.Type == "steer_target_query" && in.TargetQueryID != "" {
+			provider, ok := any(endpoint).(TargetProvider)
+			var targets []SteerTargetV1
+			if ok {
+				targets, _ = provider.PublicTargets(ctx)
+			}
+			_ = c.SetWriteDeadline(time.Now().Add(DeliveryDeadline))
+			if c.WriteJSON(reverseResult{Type: "steer_target_page", OperationID: in.TargetQueryID, TargetQueryID: in.TargetQueryID, Targets: targets}) != nil {
 				return nil
 			}
 			continue

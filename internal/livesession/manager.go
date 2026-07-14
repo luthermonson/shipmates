@@ -121,7 +121,7 @@ func (m *Manager) ControlControllerInput(ctx context.Context, action ControllerA
 	state := s.state
 	s.mu.Unlock()
 	if action == ControllerMessage {
-		if text == "" || !utf8.ValidString(text) || strings.IndexFunc(text, func(r rune) bool { return r < 0x20 && r != '\t' }) >= 0 {
+		if !validControllerMessage(text) {
 			return ControlResult{}, failure(InvalidInput)
 		}
 		if len(text) > maxMessageBytes {
@@ -155,6 +155,12 @@ func (m *Manager) ControlControllerInput(ctx context.Context, action ControllerA
 		return m.Interrupt(ctx, persona, sessionID, threadID, turnID)
 	}
 	return ControlResult{}, failure(Internal)
+}
+
+func validControllerMessage(text string) bool {
+	return text != "" && utf8.ValidString(text) && strings.IndexFunc(text, func(r rune) bool {
+		return r < 0x20 && r != '\t' && r != '\n'
+	}) < 0
 }
 
 type Attach struct {

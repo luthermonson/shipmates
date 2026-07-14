@@ -38,6 +38,19 @@ shipmates feed backend --follow
 shipmates tell backend SESSION THREAD TURN 'Check the edge case too.'
 ```
 
+Fleet exact-turn control requires separate protected credentials. Discover a
+fresh bounded target first, then pass only that opaque reference to the matching
+control command; discovery never starts or queues work:
+
+```bash
+shipmates fleet steer-targets --fleet "$FLEET_URL" --credential-file "$STEER_CREDENTIAL" --json
+shipmates fleet interrupt-targets --fleet "$FLEET_URL" --credential-file "$INTERRUPT_CREDENTIAL" --json
+```
+
+Observer credentials and the opposite operation credential are refused before
+target disclosure. Do not copy private local session, thread, or turn IDs into
+Fleet commands or reports.
+
 Prefer small persona-specific tasks. Parallelize across personas, not multiple
 turns for one persona. Shipmates serializes each persona to protect continuity.
 
@@ -142,16 +155,11 @@ content or `--accept theirs` to accept the catalog. Memory is unchanged.
 Allow lease expiry, verify process ownership, then restart the local server.
 Stale requests are rejected instead of retargeted.
 
-## Fleet deployment checklist
+## Fleet deployment
 
-1. Run the observer behind TLS with a durable authority store.
-2. Create separate ship, observer, and operator identities.
-3. Restrict observer credentials to the minimum ship allowlist.
-4. Put credentials in environment or protected service state, never project
-   configuration or command history.
-5. Enroll the ship, confirm status, then start observation.
-6. Verify read-only roster, snapshot, events, and follow first.
-7. Test control against a disposable active turn.
-8. Verify audit, replay rejection, expiry, rotation, and revocation.
-
-Fleet is not a remote shell, job starter, approval channel, or file transport.
+Use the [Fleet v0.4.0-beta.2 runbook](fleet-beta2-runbook.md) as the single
+zero-to-observed-real-Codex procedure. It covers public bootstrap, verified TLS,
+read-only observation, exact-turn steering/interruption, credential lifecycle,
+recovery, containerized WSL evidence, UI, bounded fake-Codex load/soak, and
+teardown. Keep this operations guide focused on general Shipmates lifecycle;
+do not create a second Fleet command sequence here.

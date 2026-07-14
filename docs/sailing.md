@@ -141,6 +141,35 @@ Runtime state is stored separately beneath `.shipmates/voyages/`; the approved
 plan remains human-readable project content. Completed tasks are not rerun when
 the same plan resumes. Changing an approved plan creates a new voyage identity.
 
+## Approved amendments and predecessor lineage
+
+An amended plan must be approved by the Captain before migration. Supply both
+the immutable predecessor plan and its exact persisted state explicitly; Sail
+never guesses a predecessor or searches for one:
+
+```bash
+shipmates sail \
+  --plan .shipmates/amended-voyage.json \
+  --predecessor-plan .shipmates/original-voyage.json \
+  --predecessor-state .shipmates/voyages/<original-plan-hash>.json
+```
+
+The successor state is stored under its own plan hash. Migration validates both
+approved plans, the predecessor hash/state bytes, bounded regular-file paths,
+task sets, and completion evidence before publishing. It fingerprints the full
+task execution contract and conservative global voyage contract. Only a
+completed task with unchanged local and dependency-closure fingerprints is
+marked `INHERITED`; a changed task and every dependent task remain pending.
+
+Inherited status retains the original summary, timestamps, evidence references,
+and opaque Bead ID in bounded provenance. The predecessor plan/state and Beads
+are read-only. Sail does not recreate or relink inherited Beads; pending
+successor tasks use the ordinary optional Beads adapter and may depend on an
+inherited prerequisite. Repeating the same migration is idempotent; a
+different existing successor state, malformed input, unapproved predecessor,
+symlink, or ambiguous path fails closed. Use `--dry-run` with the same flags to
+inspect inheritance without publishing or dispatching.
+
 ## Display
 
 Interactive terminals receive stable persona colors, task-state marks, and

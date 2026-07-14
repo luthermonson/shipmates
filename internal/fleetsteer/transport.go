@@ -60,6 +60,31 @@ type Endpoint interface {
 	Deliver(context.Context, DeliveryV1) livesession.RemoteSteerResult
 }
 
+// SteerTargetV1 is the Fleet-visible exact-turn projection. The ship retains
+// the private tuple behind Reference and resolves it again before delivery.
+type SteerTargetV1 struct {
+	FleetID              string    `json:"fleet_id"`
+	FleetEpoch           uint64    `json:"fleet_epoch"`
+	ShipID               string    `json:"ship_id"`
+	ConnectionGeneration uint64    `json:"connection_generation"`
+	Persona              string    `json:"persona"`
+	SteerTargetRef       string    `json:"steer_target_ref"`
+	ExpiresAt            time.Time `json:"expires_at"`
+}
+
+type SteerTargetsV1 struct {
+	SchemaVersion     uint64          `json:"schema_version"`
+	ObservationEpoch  string          `json:"observation_epoch"`
+	ObservationCursor uint64          `json:"observation_cursor"`
+	Targets           []SteerTargetV1 `json:"targets"`
+}
+
+// TargetProvider is implemented by the authenticated reverse endpoint. It
+// exposes only the already-installed opaque target projection.
+type TargetProvider interface {
+	PublicTargets(context.Context) ([]SteerTargetV1, error)
+}
+
 type connection struct {
 	generation uint64
 	endpoint   Endpoint
@@ -74,6 +99,8 @@ type Service struct {
 	connections map[string]connection
 	changed     chan struct{}
 	audit       AuditSink
+	projection  *fleetobserve.Projection
+	epoch       uint64
 }
 
 // AuditRecordV1 is a closed redacted projection. It intentionally has no
@@ -100,6 +127,63 @@ type AuditRecordV1 struct {
 type AuditSink interface{ AppendRemoteSteer(AuditRecordV1) error }
 
 func (s *Service) SetAuditSink(a AuditSink) { s.mu.Lock(); s.audit = a; s.mu.Unlock() }
+
+func (s *Service) BindProjection(p *fleetobserve.Projection, epoch uint64) error {
+	if p == nil || epoch == 0 {
+		return errors.New("invalid_request")
+	}
+	s.mu.Lock()
+	s.projection, s.epoch = p, epoch
+	s.mu.Unlock()
+	return nil
+}
+
+// Targets returns only fresh, ship-installed opaque targets for the exact
+// authorized capability. Authentication and capability checks happen before
+// consulting the projection or any connection.
+func (s *Service) Targets(ctx context.Context, p fleetidentity.OperatorPrincipal, observationEpoch string, cursor uint64) SteerTargetsV1 {
+	out := SteerTargetsV1{SchemaVersion: 1, ObservationEpoch: observationEpoch, ObservationCursor: cursor, Targets: []SteerTargetV1{}}
+	if p.Capability != livesession.RemoteSteerCapability {
+		return out
+	}
+	s.mu.Lock()
+	projection, epoch := s.projection, s.epoch
+	s.mu.Unlock()
+	if projection == nil {
+		return out
+	}
+	snap := projection.Snapshot()
+	out.ObservationEpoch, out.ObservationCursor = snap.FleetEpoch, snap.SnapshotCursor
+	if observationEpoch != "" && (observationEpoch != snap.FleetEpoch || cursor != snap.SnapshotCursor) {
+		return out
+	}
+	for _, sh := range snap.Ships {
+		if sh.Connectivity != fleetobserve.Online || sh.ConnectionGeneration == 0 || !principalHasShip(p, sh.ShipID) || sh.LastObservedAt == nil || snap.GeneratedAt.Sub(*sh.LastObservedAt) >= fleetinterrupt.ObservationFreshness {
+			continue
+		}
+		s.mu.Lock()
+		c, ok := s.connections[sh.ShipID]
+		s.mu.Unlock()
+		if !ok || c.generation != sh.ConnectionGeneration {
+			continue
+		}
+		provider, ok := c.endpoint.(TargetProvider)
+		if !ok {
+			continue
+		}
+		targets, err := provider.PublicTargets(ctx)
+		if err != nil || len(targets) > 256 {
+			continue
+		}
+		now := s.clock.Now()
+		for _, target := range targets {
+			if target.FleetID == s.fleetID && target.FleetEpoch == epoch && target.ShipID == sh.ShipID && target.ConnectionGeneration == sh.ConnectionGeneration && target.SteerTargetRef != "" && target.ExpiresAt.After(now) && !target.ExpiresAt.After(now.Add(TargetLifetime)) {
+				out.Targets = append(out.Targets, target)
+			}
+		}
+	}
+	return out
+}
 
 func NewService(fleetID string, authority Authority, clock Clock, random io.Reader) (*Service, error) {
 	if fleetID == "" || authority == nil {
@@ -230,6 +314,15 @@ func validSubmit(in SubmitV1) bool {
 		}
 	}
 	return strings.TrimSpace(in.Message) != ""
+}
+
+func principalHasShip(p fleetidentity.OperatorPrincipal, shipID string) bool {
+	for _, id := range p.ShipIDs {
+		if id == shipID {
+			return true
+		}
+	}
+	return false
 }
 
 func randomID(r io.Reader, n int) (string, error) {
@@ -456,6 +549,23 @@ func (s *ShipEndpoint) InvalidateTargets() {
 	s.mu.Lock()
 	s.invalidateTargetsLocked()
 	s.mu.Unlock()
+}
+
+func (s *ShipEndpoint) PublicTargets(ctx context.Context) ([]SteerTargetV1, error) {
+	if ctx == nil {
+		return nil, errors.New("invalid_request")
+	}
+	now := s.steerClock.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]SteerTargetV1, 0, len(s.targets))
+	for _, t := range s.targets {
+		if !now.Before(t.ExpiresAt) {
+			continue
+		}
+		out = append(out, SteerTargetV1{FleetID: t.FleetID, FleetEpoch: t.FleetEpoch, ShipID: t.ShipID, ConnectionGeneration: t.ConnectionGeneration, Persona: t.Persona, SteerTargetRef: t.Reference, ExpiresAt: t.ExpiresAt})
+	}
+	return out, nil
 }
 
 func (s *ShipEndpoint) invalidateTargetsLocked() {

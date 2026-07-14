@@ -66,6 +66,22 @@ Use `fanout`, `drain`, `drain-many`, and `autonomous` for bounded
 multi-persona orchestration. Use `policy validate|explain`, `routing show|apply`,
 and `update` for project lifecycle maintenance.
 
+## A deterministic control plane
+
+Shipmates keeps project judgment in Codex while moving orchestration mechanics
+into the Go binary. The Skipper helps the Captain define scope, resolve
+ambiguity, consult specialists, and produce an approved voyage. Go then owns
+dependency scheduling, concurrency, persona isolation, model escalation,
+timeouts, retries, cancellation, policy enforcement, and durable resume. Crew
+personas spend their turns on the bounded work that actually requires judgment.
+
+This split avoids repeatedly asking a model to rediscover deterministic facts
+such as which task is ready, whether a dependency passed, or which retry tier
+comes next. It also makes execution easier to test, safer to interrupt, and more
+reliable after a crash. The architecture is designed to reduce orchestration
+token use, although exact savings depend on the voyage and require measured
+token telemetry rather than assumption.
+
 Beads is an optional first-class integration. If the external `bd` CLI is
 installed and the project is initialized, `sail` can mirror voyage tasks and
 dependencies to Beads. Beads owns its graph storage and schema; ordinary
@@ -92,6 +108,7 @@ terminals, or run generic commands.
 - [Sailing projects](docs/sailing.md) — plan, approval, execution, and Beads
 - [Configuration and state](docs/configuration.md) — project files and generated state
 - [Operations](docs/operations.md) — lifecycle, recovery, upgrades, Fleet
+- [Fleet beta.2 runbook](docs/fleet-beta2-runbook.md) — public bootstrap, TLS observation, exact-turn control, and release evidence
 - [Security](docs/security.md) — trust boundaries and excluded authority
 - [Architecture](docs/architecture.md) — runtime planes and ownership
 - [Fleet architecture](docs/fleet-architecture.md) — observer and exact-turn control

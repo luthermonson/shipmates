@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/luthermonson/shipmates/internal/voyage"
 )
@@ -91,5 +92,41 @@ esac
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q:\n%s", want, log)
 		}
+	}
+}
+
+func TestPrepareSailBeadsDoesNotDuplicateInheritedPrerequisite(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.Mkdir(".beads", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "bd.log")
+	script := filepath.Join(bin, "bd")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + logPath + "\"\ncase \"$1\" in create) printf '%s\\n' '{\"id\":\"successor-bead\"}' ;; prime) ;; show) printf '%s\\n' '{}' ;; esac\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	plan := &voyage.Plan{Version: 1, Title: "successor", Objective: "inherit safely", Approved: true, Tasks: []voyage.Task{
+		{ID: "one", Persona: "backend", Summary: "One", Prompt: "one"},
+		{ID: "two", Persona: "tester", Summary: "Two", Prompt: "two", DependsOn: []string{"one"}},
+	}}
+	state := voyage.NewState(plan, strings.Repeat("b", 64))
+	state.Tasks["one"] = voyage.TaskState{Status: voyage.Completed, BeadID: "Shipmates-auz", Inherited: &voyage.InheritedTask{PredecessorPlanHash: strings.Repeat("c", 64), PredecessorTaskID: "one", TaskFingerprint: strings.Repeat("d", 64), ClosureFingerprint: strings.Repeat("e", 64), Summary: "original", FinishedAt: time.Now().UTC(), OriginalBeadID: "Shipmates-auz"}}
+	statePath := filepath.Join(root, ".shipmates", "voyages", "state.json")
+	if _, err := prepareSailBeads(context.Background(), plan, state, strings.Repeat("b", 64), statePath); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "create --json --type=task --title=One") || !strings.Contains(string(log), "create --json --type=task --title=Two") {
+		t.Fatalf("inherited Bead was duplicated or pending Bead missing: %s", log)
 	}
 }

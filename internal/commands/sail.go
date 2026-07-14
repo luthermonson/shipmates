@@ -38,6 +38,8 @@ func Sail() *cli.Command {
 		Usage: "execute a captain-approved voyage until every job is done or blocked",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "plan", Value: defaultVoyagePlan, Usage: "approved voyage plan path"},
+			&cli.StringFlag{Name: "predecessor-plan", Usage: "explicit approved predecessor plan for a conservative amendment"},
+			&cli.StringFlag{Name: "predecessor-state", Usage: "immutable predecessor state path; required with --predecessor-plan"},
 			&cli.IntFlag{Name: "max-concurrent", Value: 3, Usage: "maximum crew turns in flight"},
 			&cli.DurationFlag{Name: "task-timeout", Value: 30 * time.Minute, Usage: "maximum duration of each crew task"},
 			&cli.BoolFlag{Name: "dry-run", Usage: "validate and display order without dispatching"},
@@ -69,6 +71,11 @@ func runSail(ctx context.Context, c *cli.Command) error {
 	if c.Duration("task-timeout") <= 0 {
 		return errors.New("task-timeout must be positive")
 	}
+	predecessorPlan := c.String("predecessor-plan")
+	predecessorState := c.String("predecessor-state")
+	if (predecessorPlan == "") != (predecessorState == "") {
+		return errors.New("predecessor-plan and predecessor-state must be supplied together")
+	}
 	if err := validateSailModelLadders(plan); err != nil {
 		return err
 	}
@@ -95,7 +102,26 @@ func runSail(ctx context.Context, c *cli.Command) error {
 		}
 		defer releaseVoyage()
 	}
-	state, err := voyage.LoadState(statePath, plan, hash)
+	var state *voyage.State
+	if predecessorPlan != "" {
+		predecessorPlan, pathErr := safeVoyagePlanPath(predecessorPlan)
+		if pathErr != nil {
+			return pathErr
+		}
+		predecessorState, pathErr = safeVoyageStatePath(predecessorState)
+		if pathErr != nil {
+			return pathErr
+		}
+		if c.Bool("dry-run") {
+			// Dry runs validate and render the exact migration result without
+			// publishing successor state.
+			state, err = voyage.MigrateSuccessorPreview(planPath, predecessorPlan, predecessorState, time.Now().UTC())
+		} else {
+			state, err = voyage.MigrateSuccessor(planPath, predecessorPlan, predecessorState, statePath, time.Now().UTC())
+		}
+	} else {
+		state, err = voyage.LoadState(statePath, plan, hash)
+	}
 	if err != nil {
 		return err
 	}
@@ -374,6 +400,34 @@ func safeVoyagePlanPath(path string) (string, error) {
 	return resolved, nil
 }
 
+func safeVoyageStatePath(path string) (string, error) {
+	root, err := project.CanonicalRoot(".")
+	if err != nil {
+		return "", errors.New("voyage project root is invalid")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", errors.New("voyage state path is invalid")
+	}
+	abs = filepath.Clean(abs)
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > voyage.MaxStateBytes {
+		return "", errors.New("voyage state must be a bounded regular file")
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", errors.New("voyage state path is invalid")
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("voyage state must be inside the project")
+	}
+	return resolved, nil
+}
+
 func sailTaskPrompt(plan *voyage.Plan, task voyage.Task) string {
 	return fmt.Sprintf("You are crew on the captain-approved voyage %q.\nObjective: %s\nYour bounded job: %s\n\n%s\n\nComplete the job in the workspace, verify your work, and report concrete results. Do not broaden the approved scope or recursively invoke Shipmates. If progress genuinely requires a Captain decision or unavailable input, do not guess or claim completion; return exactly SHIPMATES_NEEDS_INPUT: followed by one bounded question and its relevant options.", plan.Title, plan.Objective, task.Summary, task.Prompt)
 }
@@ -622,6 +676,10 @@ func (d sailDisplay) Header(p *voyage.Plan, hash string, dry bool) {
 	d.printf("\nSHIPMATES %s  %s\n%s\nVoyage %s\nCONTROL  Ctrl+C cancels active crew and preserves resumable state\n\n", mode, hash, strings.Repeat("=", 64), p.Title)
 }
 func (d sailDisplay) PlanTask(t voyage.Task, s voyage.TaskState) {
+	if s.Inherited != nil {
+		d.printf("  %-10s %s %s (from predecessor %s)\n", "INHERITED", d.personaLabel(t.Persona), t.Summary, s.Inherited.PredecessorPlanHash[:12])
+		return
+	}
 	d.printf("  %-10s %s %s\n", strings.ToUpper(string(s.Status)), d.personaLabel(t.Persona), t.Summary)
 }
 func (d sailDisplay) Started(t voyage.Task, cfg project.PersonaConfig) {

@@ -23,9 +23,13 @@ func prepareSailBeads(ctx context.Context, plan *voyage.Plan, state *voyage.Stat
 	if err != nil {
 		return nil, err
 	}
-	newIDs := make(map[string]bool)
 	for _, task := range plan.Tasks {
 		entry := state.Tasks[task.ID]
+		if entry.Inherited != nil {
+			// The predecessor Bead is immutable. Inherited prerequisites are
+			// satisfied from their recorded state and are never recreated.
+			continue
+		}
 		if entry.BeadID != "" {
 			continue
 		}
@@ -42,18 +46,24 @@ func prepareSailBeads(ctx context.Context, plan *voyage.Plan, state *voyage.Stat
 		}
 		entry.BeadID = id
 		state.Tasks[task.ID] = entry
-		newIDs[task.ID] = true
 		if err := voyage.SaveState(statePath, state); err != nil {
 			return nil, err
 		}
 	}
 	for _, task := range plan.Tasks {
 		entry := state.Tasks[task.ID]
+		if entry.Inherited != nil || entry.BeadID == "" {
+			continue
+		}
 		if entry.BeadDependenciesLinked {
 			continue
 		}
 		for _, dependency := range task.DependsOn {
-			if err := client.AddDependency(ctx, entry.BeadID, state.Tasks[dependency].BeadID); err != nil {
+			dependencyBead := state.Tasks[dependency].BeadID
+			if dependencyBead == "" {
+				continue
+			}
+			if err := client.AddDependency(ctx, entry.BeadID, dependencyBead); err != nil {
 				return nil, fmt.Errorf("link Bead dependency for task %q: %w", task.ID, err)
 			}
 		}
@@ -67,9 +77,6 @@ func prepareSailBeads(ctx context.Context, plan *voyage.Plan, state *voyage.Stat
 	for _, task := range plan.Tasks {
 		entry := state.Tasks[task.ID]
 		graph.records[task.ID] = client.Show(ctx, entry.BeadID)
-		if newIDs[task.ID] && entry.Status == voyage.Completed {
-			_ = client.Complete(ctx, entry.BeadID, entry.Summary)
-		}
 	}
 	return graph, nil
 }

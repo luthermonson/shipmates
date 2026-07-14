@@ -538,7 +538,7 @@ func (a *Adapter) SteerTurn(ctx context.Context, threadID, turnID, text string) 
 		return failure(ProtocolViolation)
 	}
 	var response map[string]any
-	err := a.call(ctx, "turn/steer", map[string]any{"threadId": threadID, "turnId": turnID, "input": []map[string]string{{"type": "text", "text": text}}}, &response)
+	err := a.call(ctx, "turn/steer", map[string]any{"threadId": threadID, "expectedTurnId": turnID, "input": []map[string]string{{"type": "text", "text": text}}}, &response)
 	if ctx.Err() != nil {
 		return failure(RequestTimeout)
 	}

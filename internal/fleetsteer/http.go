@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/luthermonson/shipmates/internal/fleetidentity"
 	"github.com/luthermonson/shipmates/internal/livesession"
 )
 
@@ -22,6 +23,10 @@ type HTTPHandler struct{ Service *Service }
 
 func (h HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	secure(w)
+	if r.URL.Path == "/api/fleet/v1/steer-targets" {
+		h.serveTargets(w, r)
+		return
+	}
 	if r.URL.Path != "/api/fleet/v1/turn-steers" {
 		writeHTTP(w, http.StatusNotFound, errorV1{1, "not_found"})
 		return
@@ -56,6 +61,34 @@ func (h HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeHTTP(w, status, res)
 }
 
+func (h HTTPHandler) serveTargets(w http.ResponseWriter, r *http.Request) {
+	empty := SteerTargetsV1{SchemaVersion: 1, Targets: []SteerTargetV1{}}
+	if r.Method != http.MethodGet || r.ContentLength != 0 || r.URL.RawQuery != "" || r.Header.Get("Content-Type") != "" || r.Header.Get("X-HTTP-Method-Override") != "" || h.Service == nil {
+		writeHTTP(w, http.StatusBadRequest, empty)
+		return
+	}
+	id, secret, ok := operatorBearer(r.Header.Get("Authorization"))
+	if !ok {
+		writeHTTP(w, http.StatusUnauthorized, empty)
+		return
+	}
+	auth, ok := h.Service.authority.(interface {
+		AuthenticateOperatorCredential(string, string) (fleetidentity.OperatorPrincipal, error)
+	})
+	if !ok {
+		writeHTTP(w, http.StatusUnauthorized, empty)
+		return
+	}
+	p, err := auth.AuthenticateOperatorCredential(id, secret)
+	if err != nil || p.Capability != livesession.RemoteSteerCapability {
+		writeHTTP(w, http.StatusUnauthorized, empty)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), DeliveryDeadline)
+	defer cancel()
+	writeHTTP(w, http.StatusOK, h.Service.Targets(ctx, p, "", 0))
+}
+
 func operatorBearer(h string) (string, string, bool) {
 	if len(h) < 8 || len(h) > 512 || !strings.HasPrefix(h, "Bearer ") {
 		return "", "", false
@@ -88,6 +121,42 @@ func writeHTTP(w http.ResponseWriter, status int, v any) {
 type Client struct {
 	BaseURL, Credential string
 	HTTP                *http.Client
+}
+
+func (c Client) Targets(ctx context.Context) (SteerTargetsV1, error) {
+	base, err := ValidateOperatorURL(c.BaseURL)
+	if err != nil {
+		return SteerTargetsV1{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base.String(), "/")+"/api/fleet/v1/steer-targets", nil)
+	if err != nil {
+		return SteerTargetsV1{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Credential)
+	hc := c.HTTP
+	if hc == nil {
+		hc = &http.Client{Timeout: DeliveryDeadline}
+	}
+	clone := *hc
+	clone.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		req.Header.Del("Authorization")
+		return errors.New("redirect_refused")
+	}
+	resp, err := clone.Do(req)
+	if err != nil {
+		return SteerTargetsV1{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return SteerTargetsV1{}, errors.New("target_discovery_refused")
+	}
+	var out SteerTargetsV1
+	d := json.NewDecoder(io.LimitReader(resp.Body, 64<<10))
+	d.DisallowUnknownFields()
+	if d.Decode(&out) != nil || out.SchemaVersion != 1 || out.Targets == nil {
+		return SteerTargetsV1{}, errors.New("invalid_fleet_response")
+	}
+	return out, nil
 }
 
 func (c Client) Submit(ctx context.Context, in SubmitV1) (livesession.RemoteSteerResult, error) {

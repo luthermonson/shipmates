@@ -37,12 +37,14 @@ func TestMain(m *testing.M) {
 }
 
 var m11PublicCommandTree = map[string][]string{
-	"":        {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail", "fleet", "server", "ship"},
-	"policy":  {"validate", "explain"},
-	"routing": {"apply", "show"},
-	"fleet":   {"serve-observer", "steer", "interrupt", "ships", "status", "events", "follow"},
-	"server":  {"serve", "stop"},
-	"ship":    {"observe", "serve", "add", "status", "install", "uninstall"},
+	"":                 {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail", "fleet", "server", "ship"},
+	"policy":           {"validate", "explain"},
+	"routing":          {"apply", "show"},
+	"fleet":            {"init", "enrollment", "credential", "serve-observer", "steer", "steer-targets", "interrupt", "interrupt-targets", "ships", "status", "events", "follow"},
+	"fleet/enrollment": {"create", "consume"},
+	"fleet/credential": {"issue", "inspect", "rotate", "commit", "revoke"},
+	"server":           {"serve", "stop"},
+	"ship":             {"observe", "serve", "add", "status", "install", "uninstall"},
 }
 
 func m11Root() *cli.Command {
