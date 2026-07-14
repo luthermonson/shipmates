@@ -18,7 +18,7 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// Ship manages the per-host supervisor: one daemon that keeps a captain server
+// Ship manages the per-host supervisor: one daemon that keeps a project server
 // alive in every project dir listed in ~/.shipmates/ship.yaml.
 func Ship() *cli.Command {
 	return shipWithProductionReadiness(nil, nil)
@@ -31,7 +31,7 @@ func shipWithProductionClock(clock fleetsteer.Clock) *cli.Command {
 func shipWithProductionReadiness(interruptClock fleetsteer.Clock, ready chan<- struct{}) *cli.Command {
 	return &cli.Command{
 		Name:  "ship",
-		Usage: "supervise this host's captains (one daemon per machine)",
+		Usage: "supervise this host's project servers (one daemon per machine)",
 		Commands: []*cli.Command{
 			{
 				Name: "observe", Usage: "publish this project's read-only state through the authenticated Fleet tunnel",
@@ -80,7 +80,7 @@ func shipWithProductionReadiness(interruptClock fleetsteer.Clock, ready chan<- s
 			},
 			{
 				Name:  "serve",
-				Usage: "run the supervisor: a captain server per configured project, restart on crash",
+				Usage: "run one coordination server per configured project and restart on crash",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "config", Usage: "ship.yaml path (default ~/.shipmates/ship.yaml)"},
 					&cli.StringFlag{Name: "log-file", Usage: "append supervisor logs to this file instead of stderr"},
@@ -131,7 +131,7 @@ func shipWithProductionReadiness(interruptClock fleetsteer.Clock, ready chan<- s
 			},
 			{
 				Name:  "status",
-				Usage: "show each configured project's captain state",
+				Usage: "show each configured project's server state",
 				Action: func(ctx context.Context, c *cli.Command) error {
 					path, err := ship.ConfigPath()
 					if err != nil {

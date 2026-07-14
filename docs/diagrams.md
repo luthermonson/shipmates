@@ -13,7 +13,7 @@ sequenceDiagram
     participant Local as Local loopback server
     participant Memory as Project memory
     Operator->>CLI: ask persona prompt
-    CLI->>Codex: codex exec --json
+    CLI->>Codex: managed Codex turn boundary
     Codex->>Memory: read persona context and memory
     Codex-->>CLI: normalized events and final response
     CLI-->>Operator: response

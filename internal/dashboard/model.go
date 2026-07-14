@@ -19,6 +19,8 @@ var ErrInvalidStream = errors.New("invalid_event_stream")
 type DisplayEvent struct {
 	Sequence uint64
 	Text     string
+	Kind     string
+	Partial  bool
 	Dropped  bool
 }
 
@@ -33,6 +35,19 @@ type Model struct {
 	PendingApproval    *livesession.ApprovalCard
 	next               uint64
 	Images             []PendingImage
+	Sidebar            *Sidebar
+	SidebarScroll      int
+}
+
+type Sidebar struct {
+	Title    string
+	Status   string
+	Sections []SidebarSection
+}
+
+type SidebarSection struct {
+	Heading string
+	Items   []string
 }
 type PendingImage struct {
 	path, name string
@@ -78,7 +93,7 @@ func (m *Model) ApplySnapshot(s livesession.Snapshot) error {
 }
 
 func (m *Model) Notice(text string) {
-	m.Events = append(m.Events, DisplayEvent{Text: safeText(text, maxDisplayBytes)})
+	m.Events = append(m.Events, DisplayEvent{Text: safeText(text, maxDisplayBytes), Kind: "notice"})
 	if len(m.Events) > 256 {
 		m.Events = append([]DisplayEvent(nil), m.Events[len(m.Events)-256:]...)
 	}
@@ -141,8 +156,37 @@ func (m *Model) apply(oldest, next uint64, dropped bool, events []livesession.Ev
 		if e.Sequence != m.next {
 			return ErrInvalidStream
 		}
-		if text, ok := presentEvent(e); ok {
-			m.Events = append(m.Events, DisplayEvent{Sequence: e.Sequence, Text: text})
+		if text, kind, partial, ok := presentEvent(e); ok {
+			if kind == "status" && (e.Kind == "turn.completed" || e.Kind == "turn.failed" || e.Kind == "turn.interrupted") {
+				for i := range m.Events {
+					m.Events[i].Partial = false
+				}
+			}
+			if kind == "agent" {
+				partialIndex := -1
+				for i := len(m.Events) - 1; i >= 0; i-- {
+					if m.Events[i].Kind == "agent" && m.Events[i].Partial {
+						partialIndex = i
+						break
+					}
+				}
+				if partialIndex >= 0 {
+					current := &m.Events[partialIndex]
+					if partial {
+						current.Text = safeText(current.Text+strings.TrimPrefix(text, "agent: "), maxDisplayBytes)
+					} else {
+						current.Text = text
+					}
+					current.Sequence, current.Partial = e.Sequence, partial
+					m.next++
+					continue
+				}
+			}
+			if kind == "activity" && len(m.Events) > 0 && m.Events[len(m.Events)-1].Kind == "activity" && m.Events[len(m.Events)-1].Text == text {
+				m.Events[len(m.Events)-1].Sequence = e.Sequence
+			} else {
+				m.Events = append(m.Events, DisplayEvent{Sequence: e.Sequence, Text: text, Kind: kind, Partial: partial})
+			}
 		}
 		m.next++
 	}
@@ -168,49 +212,53 @@ func validState(s livesession.State) bool {
 	return false
 }
 
-func presentEvent(e livesession.Event) (string, bool) {
+func presentEvent(e livesession.Event) (string, string, bool, bool) {
 	switch e.Kind {
 	case "agent.message":
 		v, ok := e.Data["text"].(string)
 		if !ok {
-			return "agent message unavailable", true
+			return "agent message unavailable", "agent", false, true
 		}
 		v = safeText(v, maxDisplayBytes)
 		if trunc, _ := e.Data["truncated"].(bool); trunc {
 			v += " [truncated]"
 		}
-		return "agent: " + v, true
+		partial, _ := e.Data["partial"].(bool)
+		return "agent: " + v, "agent", partial, true
 	case "activity":
 		v, _ := e.Data["category"].(string)
 		switch v {
 		case "analysis", "tool", "command", "search", "file", "other":
-			return "activity: " + v, true
+			if v == "other" {
+				return "", "", false, false
+			}
+			return "activity: " + v, "activity", false, true
 		}
-		return "activity", true
+		return "activity", "activity", false, true
 	case "session.starting":
-		return "session starting", true
+		return "session starting", "status", false, true
 	case "session.ready":
-		return "session ready", true
+		return "session ready", "status", false, true
 	case "turn.started":
-		return "turn started", true
+		return "turn started", "status", false, true
 	case "turn.completed":
-		return "turn completed", true
+		return "turn completed", "status", false, true
 	case "turn.interrupted":
-		return "turn interrupted", true
+		return "turn interrupted", "status", false, true
 	case "turn.failed":
-		return "turn failed", true
+		return "turn failed", "status", false, true
 	case "steering.accepted":
-		return "steer accepted", true
+		return "steer accepted", "status", false, true
 	case "steering.refused":
-		return "steer refused", true
+		return "steer refused", "status", false, true
 	case "interrupt.accepted":
-		return "interrupt accepted", true
+		return "interrupt accepted", "status", false, true
 	case "interrupt.refused":
-		return "interrupt refused", true
+		return "interrupt refused", "status", false, true
 	case "request.refused":
-		return "request refused", true
+		return "request refused", "status", false, true
 	default:
-		return "unsupported event", true
+		return "", "", false, false
 	}
 }
 

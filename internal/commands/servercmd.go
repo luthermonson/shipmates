@@ -10,11 +10,11 @@ import (
 )
 
 // Server manages the transient coordination server (usually auto-spawned by
-// `tell`, but exposed for manual control and the captain's SessionEnd hook).
+// `tell`, but exposed for manual project control).
 func Server() *cli.Command {
 	return &cli.Command{
 		Name:  "server",
-		Usage: "manage the transient captain-spawned coordination server",
+		Usage: "manage the transient project coordination server",
 		Commands: []*cli.Command{
 			{
 				Name:  "serve",

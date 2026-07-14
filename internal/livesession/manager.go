@@ -192,16 +192,20 @@ type Manager struct {
 }
 
 type StartOptions struct {
-	Persona string
-	Prompt  string
-	Fresh   bool
-	Images  []turninput.ImageDescriptorV1
+	Persona               string
+	Prompt                string
+	Fresh                 bool
+	Images                []turninput.ImageDescriptorV1
+	Config                *project.PersonaConfig
+	ExposeActivityDetails bool
 }
 
 // StartIdleOptions establishes an owned thread without sending model input.
 type StartIdleOptions struct {
-	Persona string
-	Fresh   bool
+	Persona               string
+	Fresh                 bool
+	Config                *project.PersonaConfig
+	ExposeActivityDetails bool
 }
 
 type Snapshot struct {
@@ -234,6 +238,8 @@ type Session struct {
 	controllerLeaseGeneration            uint64
 	controllerExpires                    time.Time
 	policySnapshot                       *policy.Snapshot
+	effort                               string
+	exposeActivityDetails                bool
 	approval                             *pendingApproval
 	approvalHistory                      map[string]approvalRecord
 	beginApproval                        func(NormalizedApprovalRequest, ApprovalEvaluation, ApprovalAuthority, approvalAdapter)
@@ -381,7 +387,7 @@ func (m *Manager) StartLive(ctx context.Context, opts StartOptions) (*Session, e
 	if opts.Prompt == "" {
 		return nil, failure(Internal)
 	}
-	s, err := m.StartIdle(ctx, StartIdleOptions{Persona: opts.Persona, Fresh: opts.Fresh})
+	s, err := m.StartIdle(ctx, StartIdleOptions{Persona: opts.Persona, Fresh: opts.Fresh, Config: opts.Config, ExposeActivityDetails: opts.ExposeActivityDetails})
 	if err != nil {
 		return nil, err
 	}
@@ -413,9 +419,15 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 	if _, err := project.InstalledPersonaPathAt(root, opts.Persona); err != nil {
 		return nil, err
 	}
-	cfg, err := project.ResolvePersonaConfigAt(root, opts.Persona)
-	if err != nil {
-		return nil, err
+	var cfg project.PersonaConfig
+	if opts.Config != nil {
+		cfg = *opts.Config
+	} else {
+		var err error
+		cfg, err = project.ResolvePersonaConfigAt(root, opts.Persona)
+		if err != nil {
+			return nil, err
+		}
 	}
 	instructions, err := project.CodexPersonaInstructionsAt(root, opts.Persona)
 	if err != nil {
@@ -439,7 +451,7 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 		m.mu.Unlock()
 		return nil, failure(Internal)
 	}
-	s := &Session{persona: opts.Persona, sessionID: sid, state: Starting, done: make(chan struct{}), nextSequence: 1, notify: make(chan struct{}, 1)}
+	s := &Session{persona: opts.Persona, sessionID: sid, state: Starting, done: make(chan struct{}), nextSequence: 1, notify: make(chan struct{}, 1), effort: cfg.Effort, exposeActivityDetails: opts.ExposeActivityDetails}
 	s.approvalNow = m.now
 	s.beginApproval = func(r NormalizedApprovalRequest, e ApprovalEvaluation, auth ApprovalAuthority, a approvalAdapter) {
 		if _, err := m.BeginApproval(r, e, auth, a); err != nil {
@@ -602,7 +614,7 @@ func (m *Manager) StartNextTurnInput(ctx context.Context, persona, sessionID, th
 		return ControlResult{}, failure(InvalidInput)
 	}
 
-	turn, err := a.StartTurn(ctx, threadID, codexapp.TurnInput{Text: text, Policy: policySnapshot, Images: images})
+	turn, err := a.StartTurn(ctx, threadID, codexapp.TurnInput{Text: text, Policy: policySnapshot, Images: images, Effort: s.effort})
 	s.mu.Lock()
 	s.turnStarting = false
 	if err != nil {
@@ -723,6 +735,22 @@ func (s *Session) handleApprovalRequest(event codexapp.Event) {
 		_, _ = a.ResolveApproval(ctx, AdapterApprovalRequest{event.BackendRequestID, event.ThreadID, event.TurnID, event.PolicySnapshotID}, DenyOnce)
 		return
 	}
+	if event.PolicyEffect == policy.Allow {
+		s.publishLocked("request.allowed", event.ThreadID, event.TurnID, map[string]any{"request_class": string(policy.ProcessExec), "runtime_outcome": "allowed", "policy_snapshot_id": event.PolicySnapshotID, "policy_effect": string(event.PolicyEffect), "matched_rules": event.MatchedRules})
+		s.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), ApprovalResponseDeadline)
+		defer cancel()
+		_, _ = a.ResolveApproval(ctx, AdapterApprovalRequest{event.BackendRequestID, event.ThreadID, event.TurnID, event.PolicySnapshotID}, AllowOnce)
+		return
+	}
+	if event.PolicyEffect == policy.Deny {
+		s.publishLocked("request.denied", event.ThreadID, event.TurnID, map[string]any{"request_class": string(policy.ProcessExec), "runtime_outcome": "denied", "policy_snapshot_id": event.PolicySnapshotID, "policy_effect": string(event.PolicyEffect), "matched_rules": event.MatchedRules})
+		s.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), ApprovalResponseDeadline)
+		defer cancel()
+		_, _ = a.ResolveApproval(ctx, AdapterApprovalRequest{event.BackendRequestID, event.ThreadID, event.TurnID, event.PolicySnapshotID}, DenyOnce)
+		return
+	}
 	if s.controllerID == "" || !s.approvalNow().Before(s.controllerExpires) {
 		s.publishLocked("request.refused", event.ThreadID, event.TurnID, map[string]any{"request_class": string(policy.ProcessExec), "runtime_outcome": "refused", "policy_snapshot_id": event.PolicySnapshotID, "policy_effect": string(event.PolicyEffect), "reason_code": "mediation_unavailable", "matched_rules": event.MatchedRules})
 		s.mu.Unlock()
@@ -778,7 +806,12 @@ func (s *Session) applyAdapterEventLocked(event codexapp.Event) bool {
 			s.publishLocked("agent.message", s.threadID, s.turnID, map[string]any{"text": text, "partial": event.Partial, "truncated": truncated})
 		}
 	case codexapp.Activity:
-		s.publishLocked("activity", s.threadID, s.turnID, map[string]any{"category": event.Category})
+		data := map[string]any{"category": event.Category}
+		if s.exposeActivityDetails && event.Detail != "" {
+			detail, _ := boundedText(event.Detail, maxMessageBytes)
+			data["detail"] = detail
+		}
+		s.publishLocked("activity", s.threadID, s.turnID, data)
 	case codexapp.TurnCompleted:
 		if s.state == Interrupting {
 			s.lastTerminal = "interrupted"

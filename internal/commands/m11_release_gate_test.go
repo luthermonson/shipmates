@@ -37,7 +37,7 @@ func TestMain(m *testing.M) {
 }
 
 var m11PublicCommandTree = map[string][]string{
-	"":        {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "fleet", "server", "ship"},
+	"":        {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail", "fleet", "server", "ship"},
 	"policy":  {"validate", "explain"},
 	"routing": {"apply", "show"},
 	"fleet":   {"serve-observer", "steer", "interrupt", "ships", "status", "events", "follow"},
@@ -196,6 +196,7 @@ func m11InstallHostileRuntimeGuard(t *testing.T) {
 }
 
 func TestM11HostileLegacyRuntimeAndLegacyCanariesAreUnreachable(t *testing.T) {
+	useLegacyCodexTestDispatcher(t)
 	root := t.TempDir()
 	t.Chdir(root)
 	legacyRoot := filepath.Join(root, ".legacy-runtime")
@@ -290,6 +291,9 @@ func TestM11HostileLegacyRuntimeAndLegacyCanariesAreUnreachable(t *testing.T) {
 		if err := runM10Command(t, tc.command, tc.argv...); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+	if err := os.WriteFile("shipmates.yaml", []byte("skipperPersona: security\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if err := runM10Command(t, Autonomous(cat), "autonomous", "--persona", "security", "--cap", "1"); err != nil {
 		t.Fatalf("autonomous: %v", err)

@@ -31,7 +31,10 @@ func (c *Catalog) Personas() ([]string, error) {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if !e.IsDir() {
+			continue
+		}
+		if info, err := fs.Stat(c.fsys, path.Join("catalog", e.Name(), "agent.md")); err == nil && !info.IsDir() {
 			names = append(names, e.Name())
 		}
 	}
@@ -41,8 +44,8 @@ func (c *Catalog) Personas() ([]string, error) {
 
 // Has reports whether a persona exists in the catalog.
 func (c *Catalog) Has(name string) bool {
-	info, err := fs.Stat(c.fsys, path.Join("catalog", name))
-	return err == nil && info.IsDir()
+	info, err := fs.Stat(c.fsys, path.Join("catalog", name, "agent.md"))
+	return err == nil && !info.IsDir()
 }
 
 // AgentFile returns the raw bytes of a persona's Codex instruction file.

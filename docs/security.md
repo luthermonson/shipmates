@@ -45,6 +45,29 @@ Approvals are single-request decisions. `/allow-once` creates no durable grant.
 Timeout, lease loss, policy change, ambiguous delivery, and stale state fail the
 request closed.
 
+## Voyage authority
+
+Voyage plans are regular files confined to the canonical project root. Strict
+JSON rejects unknown fields and malformed trailing content. Approval is set only
+after the skipper shows the complete plan to the human captain. Plan hashing
+separates runtime state for every revision.
+
+Before dispatch, `sail` validates the acyclic graph and every installed persona.
+Concurrency, task count, prompt size, and task duration are bounded. Downstream
+work never runs after dependency failure. State is written atomically with
+private permissions, and failure or cancellation cannot become success through
+presentation alone.
+
+Beads is optional. If enabled, the external `bd` CLI owns `.beads/` graph
+storage and schema; Shipmates passes bounded arguments and stores only opaque
+IDs. Ordinary projects do not require Beads.
+
+The planning TUI does not derive authority from conversation text. `/sail`
+reloads and validates the on-disk approved plan. Architect consultations remain
+advisory, and plan amendments require renewed Captain approval. Captain-input
+requests use a bounded final-result marker persisted as `needs_input`; they are
+not treated as successful task completion.
+
 ## Local server
 
 The server listens on an ephemeral loopback address. Clients discover it through
@@ -102,6 +125,6 @@ broadcast, mutate graphs, or run generic commands.
 ## Deliberate non-features
 
 The absence of generic backends, remote task start, remote approvals, terminals,
-uploads, hooks, graph execution, broadcast, rescue, conversation, and voice is a
+uploads, hooks, unapproved graph execution, broadcast, rescue, conversation, and voice is a
 security property. Adding one requires a new threat model, protocol,
 authorization scope, failure policy, tests, and documentation.

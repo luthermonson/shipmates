@@ -26,18 +26,16 @@ for arg in "$@"; do
 done
 
 if ! command -v go >/dev/null 2>&1; then
-  printf '%s\n' 'Go 1.26 or newer is required. Install Go, then run this script again.' >&2
+	printf '%s\n' 'Go 1.26.5 or newer is required. Install Go, then run this script again.' >&2
   exit 1
 fi
 
 go_version=$(go env GOVERSION)
-case "$go_version" in
-  go1.26.*|go1.[3-9][0-9].*|go[2-9].*) ;;
-  *)
-    printf 'Shipmates requires Go 1.26 or newer; found %s.\n' "$go_version" >&2
-    exit 1
-    ;;
-esac
+minimum=go1.26.5
+if [[ "$go_version" != devel* ]] && [[ $(printf '%s\n%s\n' "$minimum" "$go_version" | sort -V | head -n1) != "$minimum" ]]; then
+  printf 'Shipmates requires Go 1.26.5 or newer; found %s.\n' "$go_version" >&2
+  exit 1
+fi
 
 revision=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || printf 'local')
 version="codex-adaptation-${revision}"
@@ -82,5 +80,5 @@ if command -v codex >/dev/null 2>&1; then
     printf 'Codex CLI: installed but not logged in; run: codex login\n'
   fi
 else
-  printf 'Codex CLI: not found; install it before using backend: codex personas.\n'
+  printf 'Codex CLI: not found; install it before using Shipmates personas.\n'
 fi

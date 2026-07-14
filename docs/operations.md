@@ -1,9 +1,22 @@
 # Operations guide
 
-This guide covers normal operation, verification, service lifecycle, recovery,
-and Fleet deployment.
+This guide covers normal Linux operation, verification, service lifecycle,
+recovery, upgrades, and Fleet deployment.
 
 ## Daily workflow
+
+For a whole-project outcome, begin with the skipper and sail only after reviewing
+the complete plan:
+
+```bash
+shipmates open skipper
+shipmates sail --dry-run
+shipmates sail
+```
+
+Inspect `.shipmates/voyage.json` before sailing. On failure, read the persisted
+state path printed by `sail`; fix the blocker and use `--retry-failed` only when
+repeating those tasks is safe.
 
 Use one-shot delegation for a bounded turn:
 
@@ -22,7 +35,7 @@ Use explicit live controls from separate terminals or scripts:
 ```bash
 shipmates live backend 'Investigate the failure.'
 shipmates feed backend --follow
-shipmates tell backend SESSION THREAD TURN 'Check the Windows path too.'
+shipmates tell backend SESSION THREAD TURN 'Check the edge case too.'
 ```
 
 Prefer small persona-specific tasks. Parallelize across personas, not multiple
@@ -79,18 +92,16 @@ shipmates update
 Review conflicts instead of accepting content automatically. Existing memory is
 not an update target.
 
-## Release verification
+## Verification
 
 ```bash
 go test ./...
 go test -race ./...
 go vet ./...
-git diff --check
-GOOS=windows GOARCH=amd64 go build ./...
-GOOS=darwin GOARCH=amd64 go build ./...
+gofmt -l .
 ```
 
-The decisive Codex-only runtime check is:
+The decisive Codex-only smoke check is:
 
 ```bash
 tmp=$(mktemp -d)
@@ -101,8 +112,8 @@ test -f .codex/agents/backend.toml
 shipmates ask backend 'Do not modify files. Reply exactly: Codex-only smoke test passed.'
 ```
 
-Inspect the generated tree as part of this gate: it should contain only the
-documented Shipmates and Codex project surfaces.
+Inspect the generated tree as part of this gate. Native Windows/macOS builds
+and WSL setup are outside this repository's supported verification scope.
 
 ## Failure diagnosis
 

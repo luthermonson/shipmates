@@ -22,6 +22,7 @@ func fakeCatalog() fstest.MapFS {
 		"catalog/tester/agent.md": {
 			Data: []byte("---\nname: tester\n---\ntester body\n"),
 		},
+		"catalog/charters/drain.md": {Data: []byte("not a persona\n")},
 	}
 }
 
@@ -45,6 +46,7 @@ func TestHas(t *testing.T) {
 	}{
 		{"captain", true},
 		{"tester", true},
+		{"charters", false},
 		{"ghost", false},
 	}
 	for _, tt := range tests {

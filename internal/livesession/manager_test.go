@@ -28,6 +28,9 @@ func TestFakeLiveAppServer(t *testing.T) {
 	interrupts := 0
 	turns := 0
 	for in.Scan() {
+		if record := os.Getenv("SHIPMATES_FAKE_APPROVAL_RECORD"); record != "" && strings.Contains(in.Text(), `"id":91`) && !strings.Contains(in.Text(), `"method"`) {
+			_ = os.WriteFile(record, in.Bytes(), 0o600)
+		}
 		var req struct {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
@@ -316,6 +319,39 @@ func TestAttachedControllerMediatesExactAppServerApproval(t *testing.T) {
 	b, _ := json.Marshal(s.Feed(0))
 	if !strings.Contains(string(b), `"outcome":"allowed_once"`) || strings.Contains(string(b), "SECRET_APPROVAL") {
 		t.Fatalf("feed=%s", b)
+	}
+}
+
+func TestPolicyAllowResolvesWithoutController(t *testing.T) {
+	fixture(t, "backend")
+	allow := "version: 1\nallow:\n  - id: permit.test\n    kind: process.exec\n    match:\n      command_exact: \"SECRET_APPROVAL\"\n    reason: test\nask: []\ndeny: []\n"
+	if err := os.WriteFile(project.PolicyPath("backend"), []byte(allow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(t.TempDir(), "approval")
+	env := map[string]string{"SHIPMATES_FAKE_LIVE_SERVER": "1", "SHIPMATES_FAKE_THREAD": "thread-auto-allow", "SHIPMATES_FAKE_RECORD": filepath.Join(t.TempDir(), "resume"), "SHIPMATES_FAKE_LIVE_EVENTS": "1", "SHIPMATES_FAKE_APPROVAL_RECORD": record}
+	m := New(nil, codexapp.StartOptions{Command: []string{os.Args[0], "-test.run=^TestFakeLiveAppServer$"}, Environment: env, StartupTimeout: time.Second, ShutdownTimeout: 100 * time.Millisecond})
+	s, err := m.StartLive(context.Background(), StartOptions{Persona: "backend", Prompt: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+	deadline := time.Now().Add(time.Second)
+	for {
+		b, err := os.ReadFile(record)
+		if err == nil && strings.Contains(string(b), `"decision":"accept"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("automatic allow was not delivered: %s", b)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.mu.Lock()
+	pending := s.approval != nil
+	s.mu.Unlock()
+	if pending {
+		t.Fatal("allow rule created an operator approval")
 	}
 }
 

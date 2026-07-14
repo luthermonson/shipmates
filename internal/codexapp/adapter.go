@@ -23,8 +23,11 @@ import (
 )
 
 const (
-	defaultMaxFrame = 1 << 20
+	defaultMaxFrame = 8 << 20
 	defaultStderr   = 64 << 10
+	// ManagedSessionEnvironment marks commands launched by a Shipmates-owned
+	// Codex session so orchestration commands cannot recursively launch crews.
+	ManagedSessionEnvironment = "SHIPMATES_MANAGED_SESSION"
 )
 
 // Code is a stable, sanitized adapter failure code.
@@ -149,6 +152,7 @@ type TurnInput struct {
 	Text   string
 	Policy *policy.Snapshot
 	Images []turninput.ImageDescriptorV1
+	Effort string
 }
 
 type EventKind string
@@ -181,6 +185,7 @@ type Event struct {
 	OmittedMatches   int
 	BackendRequestID string
 	CommandExact     string
+	Detail           string
 }
 
 type ApprovalDecision string
@@ -334,6 +339,7 @@ func controlledEnvironment(extra map[string]string) []string {
 			values[k] = v
 		}
 	}
+	values[ManagedSessionEnvironment] = "1"
 	out := make([]string, 0, len(values))
 	for k, v := range values {
 		out = append(out, k+"="+v)
@@ -355,8 +361,8 @@ func (a *Adapter) readLoop() {
 	}
 	r := bufio.NewReaderSize(a.stdout, 64*1024)
 	for {
-		line, err := r.ReadSlice('\n')
-		if errors.Is(err, bufio.ErrBufferFull) || len(line) > a.maxFrame {
+		line, err := readBoundedFrame(r, a.maxFrame)
+		if errors.Is(err, errFrameTooLarge) {
 			a.fail(failure(MalformedFrame))
 			return
 		}
@@ -402,6 +408,26 @@ func (a *Adapter) readLoop() {
 		} // unknown notifications carry no authority
 		a.fail(failure(ProtocolViolation))
 		return
+	}
+}
+
+var errFrameTooLarge = errors.New("frame_too_large")
+
+func readBoundedFrame(r *bufio.Reader, limit int) ([]byte, error) {
+	if limit < 1 {
+		return nil, errFrameTooLarge
+	}
+	frame := make([]byte, 0, min(limit, 64*1024))
+	for {
+		fragment, err := r.ReadSlice('\n')
+		if len(fragment) > limit-len(frame) {
+			return nil, errFrameTooLarge
+		}
+		frame = append(frame, fragment...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return frame, err
 	}
 }
 
@@ -476,6 +502,9 @@ func (a *Adapter) StartTurn(ctx context.Context, threadID string, input TurnInpu
 		items = append(items, map[string]string{"type": "localImage", "path": image.AbsolutePath()})
 	}
 	params := map[string]any{"threadId": threadID, "input": items}
+	if input.Effort != "" {
+		params["effort"] = input.Effort
+	}
 	if err := a.callTurnStart(ctx, threadID, input.Policy, params, &response); err != nil {
 		if ctx.Err() != nil {
 			err = failure(RequestTimeout)
@@ -525,8 +554,14 @@ func (a *Adapter) notification(m rpcMessage) {
 			ID string `json:"id"`
 		} `json:"turn"`
 		Item struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type    string `json:"type"`
+			Text    string `json:"text"`
+			Command string `json:"command"`
+			Query   string `json:"query"`
+			Changes []struct {
+				Path string `json:"path"`
+				Kind string `json:"kind"`
+			} `json:"changes"`
 		} `json:"item"`
 	}
 	if json.Unmarshal(m.Params, &p) != nil {
@@ -557,10 +592,19 @@ func (a *Adapter) notification(m rpcMessage) {
 		switch p.Item.Type {
 		case "commandExecution":
 			e.Category = "command"
+			e.Detail = p.Item.Command
 		case "fileChange":
 			e.Category = "file_change"
+			var changes []string
+			for _, change := range p.Item.Changes {
+				if change.Path != "" {
+					changes = append(changes, strings.TrimSpace(change.Kind+" "+change.Path))
+				}
+			}
+			e.Detail = strings.Join(changes, ", ")
 		case "webSearch":
 			e.Category = "web_search"
+			e.Detail = p.Item.Query
 		case "mcpToolCall":
 			e.Category = "connected_tool"
 		default:

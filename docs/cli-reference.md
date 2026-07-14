@@ -80,7 +80,47 @@ or `--all`. Per-persona serialization protects continuity.
 
 ### `shipmates autonomous --persona <name> --cadence <duration> --cap <n>`
 
-Runs a bounded recurring drain loop as a local foreground process.
+Prints a bounded orchestration charter for an external scheduler. It does not
+install or run a scheduler itself.
+
+### `shipmates beads [bd arguments...]`
+
+Optional integration with the installed external `bd` CLI in the nearest
+initialized project. Initialize with `shipmates beads init`; Shipmates forces
+noninteractive setup and suppresses editor-agent and hook installation because
+it supplies Codex context directly. All other documented `bd` commands and
+flags pass through without shell evaluation:
+
+```bash
+shipmates beads ready --json
+shipmates beads show project-abc --json
+shipmates beads comments add project-abc "Verified the focused tests."
+```
+
+Running `shipmates beads` without arguments prints Beads project status.
+Beads owns graph storage and schema. Ordinary Shipmates projects do not need
+the `bd` CLI or a `.beads/` directory.
+
+### `shipmates sail`
+
+Executes the captain-approved `.shipmates/voyage.json` dependency graph until
+every task completes or a failure blocks progress. `--dry-run` validates and
+displays the order, `--max-concurrent` bounds parallel crew turns,
+`--task-timeout` bounds each task, `--retry-failed` resumes failed work, and
+`--verbose` shows task briefs, agent reports, and exact tool details exposed by
+Codex. Exact command arguments may contain sensitive values, so verbose mode is
+explicit. `--no-color` disables persona colors. State persists beneath
+`.shipmates/voyages/`. See [Sailing projects](sailing.md).
+
+### `shipmates plan [--fresh] [--plain]`
+
+Opens the interactive Captain-Skipper planning room with a validated voyage
+sidebar on wide terminals. The Skipper automatically consults the Architect
+when a consequential design decision needs specialist input; `/consult
+<question>` remains available as a Captain-initiated override. `/sail` starts an
+approved voyage, `/sail --verbose` opens the transparent operations-room view,
+and incomplete execution returns to the planning conversation with persisted
+blocker context.
 
 ## Live sessions
 

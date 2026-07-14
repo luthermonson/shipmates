@@ -35,6 +35,17 @@ func defaultConfig(sessionPrefix string) string {
 # change it to disambiguate two checkouts of the same repo / same-named projects.
 sessionPrefix: %s
 
+# The human operator is captain. The skipper is the conversational front door
+# and execution lead used to prepare captain-approved voyages.
+skipperPersona: skipper
+
+# Available Codex models ordered from least to most capable. Sail starts at the
+# first adequate tier and only moves right after a retry-safe failure.
+modelLadder:
+  - gpt-5.6-luna
+  - gpt-5.6-terra
+  - gpt-5.6-sol
+
 # Per-persona overrides. Uncomment the crew key and add child keys to override
 # Codex model or reasoning effort. Keeping it commented
 # means there's no active empty crew key — so appending your own crew block

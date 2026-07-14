@@ -15,7 +15,7 @@ func TestPublicCommandsAreDocumented(t *testing.T) {
 	commands := []string{
 		"init", "policy", "add", "list", "remove", "update", "render",
 		"routing", "open", "ask", "live", "tell", "feed", "interrupt",
-		"fanout", "drain", "drain-many", "autonomous", "fleet", "server", "ship",
+		"fanout", "drain", "drain-many", "autonomous", "plan", "sail", "fleet", "server", "ship",
 	}
 	for _, command := range commands {
 		if !strings.Contains(reference, "`shipmates "+command) {
@@ -29,6 +29,7 @@ func TestDocumentationSetAndCodexOnlyLanguage(t *testing.T) {
 	files := []string{
 		"README.md",
 		"docs/getting-started.md",
+		"docs/sailing.md",
 		"docs/cli-reference.md",
 		"docs/configuration.md",
 		"docs/operations.md",

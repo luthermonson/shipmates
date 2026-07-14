@@ -25,13 +25,13 @@ func (unsupportedNativeTerminal) Restore(any) error          { return ErrNativeT
 // The terminal guard refuses the runtime path before an editor is constructed.
 type NativeEditor struct{}
 
-func NewNativeEditor(*os.File) *NativeEditor { return &NativeEditor{} }
+func NewNativeEditor(*os.File, ...*os.File) *NativeEditor { return &NativeEditor{} }
 func (*NativeEditor) Next(context.Context) (Input, error) {
 	return Input{}, ErrNativeTTYUnsupported
 }
 
 func NativeSize(*os.File) Size { return Size{Width: 80, Height: 24} }
 
-func NativeRenderer(*os.File, bool) func(Screen) error {
+func NativeRenderer(*os.File, bool, ...*NativeEditor) func(Screen) error {
 	return func(Screen) error { return ErrNativeTTYUnsupported }
 }

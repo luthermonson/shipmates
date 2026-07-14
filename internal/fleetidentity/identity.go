@@ -681,9 +681,13 @@ func (r *Registry) AuthenticateOperatorCredential(credentialID, secret string) (
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	before := r.durableLocked()
-	if err := r.expireAndCommitLocked(before); err != nil { return OperatorPrincipal{}, err }
+	if err := r.expireAndCommitLocked(before); err != nil {
+		return OperatorPrincipal{}, err
+	}
 	o := r.operators[credentialID]
-	if o == nil || o.revoked || !validOperatorCapability(o.capability) || !r.clock.Now().Before(o.expires) || !verifies(secret, o.verifier) { return OperatorPrincipal{}, fail(Unauthorized) }
+	if o == nil || o.revoked || !validOperatorCapability(o.capability) || !r.clock.Now().Before(o.expires) || !verifies(secret, o.verifier) {
+		return OperatorPrincipal{}, fail(Unauthorized)
+	}
 	rec := operatorRecord(o)
 	return OperatorPrincipal{rec.FleetID, rec.SubjectID, rec.CredentialID, rec.Capability, rec.CredentialGeneration, rec.ShipIDs}, nil
 }

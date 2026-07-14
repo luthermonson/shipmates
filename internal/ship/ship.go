@@ -1,5 +1,5 @@
 // Package ship implements the per-host supervisor: one daemon that reads
-// ~/.shipmates/ship.yaml (a list of project dirs), keeps a captain server alive
+// ~/.shipmates/ship.yaml (a list of project dirs), keeps a project server alive
 // in each, and restarts them on crash. It is the thing `ship install` wires
 // to run at logon as a user-scoped Windows Scheduled Task or macOS launchd
 // agent so project-local Codex configuration and user credentials are available.
@@ -29,11 +29,11 @@ import (
 // yaml names WHERE a secret comes from (`SHIPMATES_FLEET_TOKEN: ${HOMELAB_TOKEN}`),
 // never the secret itself, so the file is safe to sync between hosts.
 type Config struct {
-	Env      map[string]string `yaml:"env,omitempty"` // host-level, applied to every captain
-	Projects []Project         `yaml:"projects"`      // one captain server per dir
+	Env      map[string]string `yaml:"env,omitempty"` // host-level, applied to every project
+	Projects []Project         `yaml:"projects"`      // one coordination server per dir
 }
 
-// Project is one supervised captain: a project dir plus per-project env overrides.
+// Project is one supervised project server plus per-project environment overrides.
 type Project struct {
 	Dir string            `yaml:"dir"`
 	Env map[string]string `yaml:"env,omitempty"`
@@ -50,7 +50,7 @@ func ConfigPath() (string, error) {
 
 // LoadConfig reads and validates a ship.yaml. Projects whose dir doesn't
 // exist are dropped with a warning rather than failing the whole ship — a
-// detached external drive shouldn't take down the other captains.
+// detached external drive should not take down the other projects.
 func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -92,7 +92,7 @@ func (c *Config) env(p Project) []string {
 	return out
 }
 
-// Restart pacing: crash-looping captains back off exponentially; a captain that
+// Restart pacing: crash-looping servers back off exponentially; a server that
 // stayed up healthyReset long has proven itself and resets the ladder.
 const (
 	backoffMin   = time.Second
@@ -120,7 +120,7 @@ func Run(ctx context.Context, c *Config) error {
 	return nil
 }
 
-// superviseLoop keeps one project's captain server alive: spawn, wait, restart
+// superviseLoop keeps one project's coordination server alive: spawn, wait, restart
 // with backoff. If a healthy server is already running in the dir (started
 // manually, or by a previous supervisor), it stands by and re-probes instead
 // of racing it — two servers in one project would fight over the port file.
@@ -131,7 +131,7 @@ func superviseLoop(ctx context.Context, exe string, p Project, env []string) {
 			return
 		}
 		if serverHealthy(p.Dir) {
-			slog.Info("ship: captain already running, standing by", "dir", p.Dir)
+			slog.Info("ship: project server already running, standing by", "dir", p.Dir)
 			if !sleepCtx(ctx, healthProbe) {
 				return
 			}
@@ -147,7 +147,7 @@ func superviseLoop(ctx context.Context, exe string, p Project, env []string) {
 		if uptime >= healthyReset {
 			backoff = backoffMin
 		}
-		slog.Warn("ship: captain exited, restarting", "dir", p.Dir, "uptime", uptime.Round(time.Second), "backoff", backoff, "err", err)
+		slog.Warn("ship: project server exited, restarting", "dir", p.Dir, "uptime", uptime.Round(time.Second), "backoff", backoff, "err", err)
 		if !sleepCtx(ctx, backoff) {
 			return
 		}
@@ -184,14 +184,14 @@ func runCaptain(ctx context.Context, exe, dir string, env []string) error {
 		cmd.Stderr = io.Discard
 	}
 
-	slog.Info("ship: starting captain", "dir", dir)
+	slog.Info("ship: starting project server", "dir", dir)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	return cmd.Wait()
 }
 
-// serverPort reads the project's recorded captain-server port, 0 when absent.
+// serverPort reads the project's recorded coordination-server port, 0 when absent.
 func serverPort(dir string) int {
 	b, err := os.ReadFile(filepath.Join(dir, ".shipmates", "sessions", "server.port"))
 	if err != nil {
@@ -227,7 +227,7 @@ func serverHealthy(dir string) bool {
 	return resp.StatusCode == http.StatusOK && resp.Header.Get("X-Shipmates-Project") == scope
 }
 
-// shutdownServer asks the project's captain server to exit gracefully.
+// shutdownServer asks the project's coordination server to exit gracefully.
 func shutdownServer(dir string) bool {
 	port := serverPort(dir)
 	if port == 0 {
@@ -307,7 +307,7 @@ type ProjectStatus struct {
 	PID     int
 }
 
-// StatusAll probes every configured project's recorded captain-server port.
+// StatusAll probes every configured project's recorded coordination-server port.
 func StatusAll(c *Config) []ProjectStatus {
 	out := make([]ProjectStatus, 0, len(c.Projects))
 	for _, p := range c.Projects {

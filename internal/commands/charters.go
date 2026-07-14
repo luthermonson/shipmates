@@ -206,7 +206,7 @@ func Autonomous(cat *catalog.Catalog) *cli.Command {
 		Name:  "autonomous",
 		Usage: "print a bounded Codex-native orchestration charter",
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "persona", Value: "captain", Usage: "coordinator persona"},
+			&cli.StringFlag{Name: "persona", Value: "skipper", Usage: "execution coordinator persona"},
 			&cli.StringFlag{Name: "cadence", Value: "5min,10,15,20,30", Usage: "external scheduler cadence hint"},
 			&cli.IntFlag{Name: "cap", Value: 3, Usage: "maximum tasks per persona in one cycle"},
 		},
@@ -222,6 +222,20 @@ func Autonomous(cat *catalog.Catalog) *cli.Command {
 }
 
 func autonomousCharter(cat *catalog.Catalog, coordinator, cadence string, cap int) (string, error) {
+	cfg, err := project.LoadConfig()
+	if err != nil {
+		return "", err
+	}
+	skipper := strings.TrimSpace(cfg.SkipperPersona)
+	if skipper == "" {
+		skipper = "skipper"
+	}
+	if coordinator != skipper {
+		return "", fmt.Errorf("autonomous coordinator must be configured skipper %q", skipper)
+	}
+	if _, err := project.CanonicalPersonaAt(".", skipper); err != nil {
+		return "", fmt.Errorf("configured skipper %q is not installed: %w", skipper, err)
+	}
 	all, err := installedPersonas()
 	if err != nil {
 		return "", err

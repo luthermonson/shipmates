@@ -2,8 +2,10 @@ package codexapp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -16,6 +18,34 @@ import (
 )
 
 const secret = "SHIPMATES-CANARY-DO-NOT-LEAK"
+
+func TestActivityNotificationsExposeBoundedStructuredDetail(t *testing.T) {
+	a := &Adapter{events: make(chan Event, 4), policies: make(map[turnKey]*policy.Snapshot)}
+	commandParams, _ := json.Marshal(map[string]any{"threadId": "thread", "turnId": "turn", "item": map[string]any{"type": "commandExecution", "command": "go test ./..."}})
+	a.notification(rpcMessage{Method: "item/started", Params: commandParams})
+	command := <-a.events
+	if command.Kind != Activity || command.Category != "command" || command.Detail != "go test ./..." {
+		t.Fatalf("command event = %+v", command)
+	}
+	fileParams, _ := json.Marshal(map[string]any{"threadId": "thread", "turnId": "turn", "item": map[string]any{"type": "fileChange", "changes": []map[string]string{{"kind": "update", "path": "internal/app.go"}}}})
+	a.notification(rpcMessage{Method: "item/started", Params: fileParams})
+	file := <-a.events
+	if file.Category != "file_change" || file.Detail != "update internal/app.go" {
+		t.Fatalf("file event = %+v", file)
+	}
+}
+
+func TestReadBoundedFrameAcceptsMultiMegabyteFrameWithinLimit(t *testing.T) {
+	payload := strings.Repeat("x", 2<<20)
+	frame := []byte(`{"method":"item/started","params":{"payload":"` + payload + `"}}` + "\n")
+	got, err := readBoundedFrame(bufio.NewReaderSize(strings.NewReader(string(frame)), 64*1024), 8<<20)
+	if err != nil || !bytes.Equal(got, frame) {
+		t.Fatalf("large frame: bytes=%d err=%v", len(got), err)
+	}
+	if _, err := readBoundedFrame(bufio.NewReaderSize(strings.NewReader(string(frame)), 64*1024), 1<<20); !errors.Is(err, errFrameTooLarge) {
+		t.Fatalf("oversized frame error = %v", err)
+	}
+}
 
 func TestFakeAppServerProcess(t *testing.T) {
 	if os.Getenv("SHIPMATES_FAKE_APP_SERVER") != "1" {

@@ -1,4 +1,4 @@
-// Package client lets CLI commands talk to the captain-spawned coordination
+// Package client lets CLI commands talk to the project coordination
 // server, auto-starting it (detached) when it isn't already running.
 package client
 

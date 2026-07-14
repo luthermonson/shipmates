@@ -333,3 +333,26 @@ func TestInstalledPersonaRequiresSafeValidCodexArtifact(t *testing.T) {
 		t.Fatalf("symlink error = %v", err)
 	}
 }
+
+func TestFindRootFromNestedDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ConfigName), []byte("version: 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "docs", "guide")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := FindRoot(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := CanonicalRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("FindRoot() = %q, want %q", got, want)
+	}
+}

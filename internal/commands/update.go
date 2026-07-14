@@ -47,6 +47,13 @@ const (
 // catalog, applying the four-case logic (see reconcileFile). Memory, sessions,
 // and unmanaged artifacts are never touched.
 func runUpdate(cat *catalog.Catalog, only, accept string) error {
+	migrated, err := migrateLegacyCaptain(cat)
+	if err != nil {
+		return err
+	}
+	if only == "captain" && migrated {
+		return nil
+	}
 	m, err := project.LoadManifest()
 	if err != nil {
 		return err
@@ -55,6 +62,115 @@ func runUpdate(cat *catalog.Catalog, only, accept string) error {
 		return err
 	}
 	return withPolicyWriteLock(func() error { return runUpdateLocked(cat, only, accept, m) })
+}
+
+// migrateLegacyCaptain installs the Phase 2 leadership split and removes only
+// unchanged Shipmates-owned captain artifacts. Memory and edited files are
+// preserved; the quartermaster receives a durable pointer to legacy memory.
+func migrateLegacyCaptain(cat *catalog.Catalog) (bool, error) {
+	if !cat.Has("quartermaster") || !cat.Has("skipper") {
+		return false, nil
+	}
+	if _, err := os.Lstat(project.CodexAgentPath("captain")); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	m, err := project.LoadManifest()
+	if err != nil {
+		return false, err
+	}
+	if err := requireManifestV2(m, "update"); err != nil {
+		return false, err
+	}
+	err = withPolicyWriteLock(func() error {
+		for _, persona := range []string{"quartermaster", "skipper"} {
+			if err := addPersonaLocked(cat, persona, m); err != nil {
+				return fmt.Errorf("install Phase 2 %s: %w", persona, err)
+			}
+		}
+		return archiveLegacyCaptain(m)
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func archiveLegacyCaptain(m *project.Manifest) error {
+	modified := make([]string, 0)
+	for _, path := range []string{project.CodexAgentPath("captain"), project.PolicyPath("captain")} {
+		baseline, managed := m.Files[path]
+		if !managed {
+			if _, err := os.Lstat(path); err == nil {
+				modified = append(modified, path)
+				if err := archiveCaptainArtifact(path); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		body, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			delete(m.Files, path)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if project.SHA(body) != baseline {
+			modified = append(modified, path)
+			if err := archiveCaptainArtifact(path); err != nil {
+				return err
+			}
+			delete(m.Files, path)
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		delete(m.Files, path)
+		slog.Info("removed unchanged legacy captain artifact", "path", path)
+	}
+	if err := m.Save(); err != nil {
+		return err
+	}
+	legacyMemory := filepath.Join(project.Dir, project.MemoryDirName, "captain")
+	if info, err := os.Stat(legacyMemory); err == nil && info.IsDir() {
+		quartermasterMemory := filepath.Join(project.Dir, project.MemoryDirName, "quartermaster")
+		if err := os.MkdirAll(quartermasterMemory, 0o755); err != nil {
+			return err
+		}
+		note := filepath.Join(quartermasterMemory, "legacy-captain-memory.md")
+		if _, err := os.Stat(note); errors.Is(err, os.ErrNotExist) {
+			content := "# Legacy captain memory\n\nPhase 2 reserves captain for the human. Review preserved strategic memory in `../captain/`; migrate durable knowledge deliberately without deleting its source.\n"
+			if err := os.WriteFile(note, []byte(content), 0o600); err != nil {
+				return err
+			}
+		}
+	}
+	if len(modified) > 0 {
+		slog.Warn("legacy captain artifacts were archived because they are edited or unmanaged", "paths", strings.Join(modified, ","))
+	}
+	return nil
+}
+
+func archiveCaptainArtifact(path string) error {
+	archiveDir := filepath.Join(project.Dir, "legacy", "captain")
+	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
+		return err
+	}
+	name := "agent.toml"
+	if strings.HasSuffix(path, ".yaml") {
+		name = "policy.yaml"
+	}
+	destination := filepath.Join(archiveDir, name)
+	if _, err := os.Lstat(destination); err == nil {
+		return fmt.Errorf("legacy captain archive already exists: %s", destination)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Rename(path, destination)
 }
 
 func runUpdateLocked(cat *catalog.Catalog, only, accept string, m *project.Manifest) error {

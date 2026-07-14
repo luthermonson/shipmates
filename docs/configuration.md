@@ -9,7 +9,11 @@ A typical configuration:
 
 ```yaml
 sessionPrefix: my-project
-captainPersona: captain
+skipperPersona: skipper
+modelLadder:
+  - gpt-5.6-luna
+  - gpt-5.6-terra
+  - gpt-5.6-sol
 sharedMemory: false
 
 crew:
@@ -23,12 +27,16 @@ routing: github
 routingOptions:
   bylines: true
   labels: true
-
-fleet:
-  url: wss://fleet.example.test/connect
-  tokenEnv: SHIPMATES_FLEET_TOKEN
-  name: my-project-dev
 ```
+
+`modelLadder` is ordered from least to most capable. `sail` requires it,
+starts tasks without an override at the first model with `low` effort, and
+rejects unknown or descending task ladders.
+
+The generated ladder uses Luna for routine, cost-sensitive work, Terra for a
+stronger balance of capability and cost, and Sol as the flagship fallback for
+the hardest tasks. Projects may reorder or replace the ladder to match the
+models their Codex workspace exposes.
 
 The parser uses a strict schema. Unknown keys are errors. Persona launch
 configuration supports Codex `model` and `effort` only; there is no alternate
@@ -40,9 +48,9 @@ backend or arbitrary process command.
 : Namespace used for project session naming. Initialization derives it from the
   repository directory. Keep it stable unless intentionally separating clones.
 
-`captainPersona`
-: Persona used as the project coordinator by supervisor and Fleet workflows.
-  Defaults to `captain`.
+`skipperPersona`
+: Human-facing execution lead used for voyage planning. The human operator is
+  captain; the default agent role is `skipper`.
 
 `sharedMemory`
 : Reserved project memory-sharing switch. The default is `false`; personas own
@@ -63,8 +71,24 @@ backend or arbitrary process command.
 : Controls persona-label queue conventions.
 
 `fleet`
-: Outbound observer/tunnel configuration. Credentials are never stored here;
-  `tokenEnv` names the environment variable that supplies them.
+: Optional project metadata. Ordinary projects do not need it. Fleet
+  enrollment, identity stores, tunnel destinations, and operator capabilities
+  are managed by the `ship` and `fleet` commands; see [Operations](operations.md)
+  and [Fleet architecture](fleet-architecture.md). Never put credentials here.
+
+## Optional Beads integration
+
+Beads is a first-class but optional integration for projects that want an
+external task graph. The external `bd` CLI owns `.beads/` storage, schema,
+synchronization, and graph behavior. Shipmates passes bounded arguments to
+`bd` and stores only opaque Bead IDs in voyage state; it does not vendor or
+reimplement Beads. Ordinary Shipmates projects do not require `bd` or `.beads/`.
+
+Enable it explicitly with:
+
+```bash
+shipmates beads init
+```
 
 ## Canonical persona files
 

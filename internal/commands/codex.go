@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/luthermonson/shipmates/internal/policy"
@@ -33,6 +34,20 @@ func dispatchCodexInstalled(ctx context.Context, installed *project.InstalledPer
 	return dispatchCodexInstalledImages(ctx, installed, prompt, fresh, cfg, nil, stdout, stderr)
 }
 func dispatchCodexInstalledImages(ctx context.Context, installed *project.InstalledPersona, prompt string, fresh bool, cfg project.PersonaConfig, batch *turninput.ImageBatchV1, stdout, stderr io.Writer) error {
+	var images []turninput.ImageDescriptorV1
+	if batch != nil {
+		if err := batch.Revalidate(); err != nil {
+			return err
+		}
+		images = batch.Images()
+	}
+	return codexTurnDispatcher(ctx, installed, prompt, fresh, cfg, images, stdout, stderr)
+}
+
+// dispatchCodexExecInstalledImages is retained for the low-level Codex JSONL
+// parser tests. Production dispatch uses app-server mediation above so every
+// process request is evaluated against the immutable Shipmates policy snapshot.
+func dispatchCodexExecInstalledImages(ctx context.Context, installed *project.InstalledPersona, prompt string, fresh bool, cfg project.PersonaConfig, batch *turninput.ImageBatchV1, stdout, stderr io.Writer) error {
 	persona := installed.Name
 	var images []turninput.ImageDescriptorV1
 	if batch != nil {
@@ -186,6 +201,9 @@ func codexArgsInstalledImages(installed *project.InstalledPersona, prompt string
 	args := []string{"exec", "--json", "--sandbox", "workspace-write"}
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
+	}
+	if cfg.Effort != "" {
+		args = append(args, "--config", "model_reasoning_effort="+strconv.Quote(cfg.Effort))
 	}
 	for _, image := range images {
 		args = append(args, "--image", image.AbsolutePath())

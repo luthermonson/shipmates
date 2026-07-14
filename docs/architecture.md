@@ -1,7 +1,15 @@
 # Architecture
 
 Shipmates is a Codex-native persona runtime with persistent project memory. The
-public product consists of five deliberately separate planes.
+public product consists of six deliberately separate planes.
+
+For installation and command usage, see [Getting started](getting-started.md)
+and the [CLI reference](cli-reference.md); this document records ownership and
+boundaries rather than repeating setup instructions.
+
+The human operator is captain. Runtime leadership is split between the skipper,
+which owns conversation and execution sequencing, and the quartermaster, which
+preserves strategic memory and constraints.
 
 ## Project state
 
@@ -12,17 +20,47 @@ public product consists of five deliberately separate planes.
 | `.shipmates/policies/<persona>.yaml` | Project-local execution policy |
 | `.shipmates/sessions/` | Bounded Codex continuity and local discovery state |
 | `.shipmates/manifest.json` | Managed-file baselines and catalog version |
+| `.shipmates/voyage.json` | Human-readable captain-approved execution plan |
+| `.shipmates/voyages/<hash>.json` | Private resumable state for an immutable plan |
 
 Catalog installation is conservative: missing memory seeds may be added, but
 normal updates do not replace learned memory. Managed file conflicts require an
 explicit keep/take decision. Persona inventory is derived from canonical Codex
 artifacts, not legacy directories.
 
+## Voyage plane
+
+The skipper turns a planning conversation into a strict versioned voyage plan.
+Planning does not dispatch work. The human captain reviews the complete plan and
+must explicitly approve it before `sail` accepts it.
+
+`sail` validates the plan hash, task identifiers, installed personas, dependency
+graph, bounds, and approval state before dispatch. It executes only
+dependency-ready tasks with bounded concurrency and per-task deadlines. Every
+transition is atomically persisted. Completed work survives restart; an
+interrupted running task returns to pending; failure blocks dependent work until
+the captain intentionally retries or revises the plan.
+
+The terminal display projects persisted state. Persona colors are presentation,
+never identity or authority. Redirected output remains complete without ANSI.
+
+`shipmates plan` attaches to the managed Skipper session and renders the
+strictly decoded voyage draft beside the conversation. `/consult` performs a
+bounded managed architect turn and returns advisory context to the Skipper;
+the architect cannot approve or dispatch. `/sail` reloads the approved file and
+enters the same Sail engine used by the headless command. Activity identifies
+persona, model, and effort. A bounded `SHIPMATES_NEEDS_INPUT:` crew result is
+persisted as `needs_input` and returns control to Captain-Skipper chat.
+
+Voyage execution can optionally mirror tasks to the external Beads CLI. Beads
+owns its graph storage and schema; projects without a Beads workspace use only
+Shipmates' validated plan and voyage state.
+
 ## Dispatch plane
 
 Local raster-image input is a turn-start primitive, not an attachment store.
-`ask --image` maps validated descriptors to Codex `exec --image` arguments;
-managed turns map them to text-first app-server `localImage` inputs. Validation
+`ask --image` and managed live turns map validated descriptors to text-first
+app-server `localImage` inputs. Validation
 bounds count and size, verifies magic bytes, pins filesystem identity, refuses
 links and out-of-project paths, and revalidates immediately before handoff.
 Only `image_count` may enter normalized events.
@@ -33,10 +71,10 @@ steering. Dashboard selection exists only in the attached local controller and
 applies atomically to its next exact idle turn.
 
 Synchronous `ask`, `fanout`, and drain operations load the installed persona,
-validate its immutable policy snapshot, and invoke `codex exec --json` directly.
-Normalized JSON events provide the thread identifier and final response.
-Shipmates stores a bounded continuity marker so a later turn can resume the
-same Codex thread. `--fresh` creates a new one.
+validate its immutable policy snapshot, and use the managed Codex app-server
+turn boundary. Normalized events provide the thread identifier and final
+response. Shipmates stores a bounded continuity marker so a later turn can
+resume the same Codex thread. `--fresh` creates a new one.
 
 ## Live control plane
 
@@ -115,7 +153,7 @@ pending/grant store, hook configuration, or alternate backend session marker.
 
 ## Explicitly deferred
 
-Image/file/PDF input, upload/inbox handling, remote start or approval, durable
-grants, hooks/plugins/webhooks, graph dispatch and scheduling, Codex terminal
+Generic file/PDF input, upload/inbox handling, remote start or approval, durable
+grants, hooks/plugins/webhooks, unapproved or remote graph dispatch, Codex terminal
 passthrough, rescue/restart, broadcast, hosted relay, conversation, and voice
 input/output are not shipped architecture.

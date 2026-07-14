@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -36,6 +37,14 @@ func TestCodexArgs(t *testing.T) {
 	if !strings.Contains(fresh[len(fresh)-1], ".shipmates/memory/security/") {
 		t.Fatalf("fresh prompt does not preserve memory: %q", fresh[len(fresh)-1])
 	}
+	configured, err := codexArgs("security", "configured", true, "", project.PersonaConfig{Model: "small-model", Effort: "low"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(configured, " ")
+	if !strings.Contains(joined, "--model small-model") || !strings.Contains(joined, `--config model_reasoning_effort="low"`) {
+		t.Fatalf("model and effort were not applied: %q", configured)
+	}
 
 	resume, err := codexArgs("security", "continue", false, "thread-123", project.PersonaConfig{})
 	if err != nil {
@@ -48,11 +57,37 @@ func TestCodexArgs(t *testing.T) {
 
 func installFakeCodex(t *testing.T, script string) {
 	t.Helper()
+	useLegacyCodexTestDispatcher(t)
 	bin := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nset -eu\n"+script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func useLegacyCodexTestDispatcher(t *testing.T) {
+	t.Helper()
+	previous := codexTurnDispatcher
+	codexTurnDispatcher = func(ctx context.Context, installed *project.InstalledPersona, prompt string, fresh bool, cfg project.PersonaConfig, images []turninput.ImageDescriptorV1, stdout, stderr io.Writer) error {
+		var batch *turninput.ImageBatchV1
+		if len(images) > 0 {
+			validated, err := turninput.ValidateImages(mustCanonicalRoot(t), descriptorPaths(images))
+			if err != nil {
+				return err
+			}
+			batch = validated
+		}
+		return dispatchCodexExecInstalledImages(ctx, installed, prompt, fresh, cfg, batch, stdout, stderr)
+	}
+	t.Cleanup(func() { codexTurnDispatcher = previous })
+}
+
+func descriptorPaths(images []turninput.ImageDescriptorV1) []string {
+	paths := make([]string, 0, len(images))
+	for _, image := range images {
+		paths = append(paths, image.DisplayPath())
+	}
+	return paths
 }
 
 func installCodexPersona(t *testing.T, persona string) {

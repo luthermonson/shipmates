@@ -110,6 +110,9 @@ func dispatchTo(ctx context.Context, persona, prompt string, fresh bool, stdout,
 	return dispatchToImages(ctx, persona, prompt, fresh, nil, stdout, stderr)
 }
 func dispatchToImages(ctx context.Context, persona, prompt string, fresh bool, paths []string, stdout, stderr io.Writer) error {
+	if persona == "captain" {
+		return errors.New("captain is reserved for the human operator; use skipper or quartermaster")
+	}
 	installed, err := project.CanonicalPersonaAt(".", persona)
 	if err != nil {
 		return err
@@ -143,7 +146,7 @@ func dispatchToInstalledImages(ctx context.Context, installed *project.Installed
 }
 
 // Tell sends a plain-string message to a live crew process via the server. The
-// CLI translates the string to a stream-json user message server-side; the captain
+// CLI translates the string to a stream-json user message server-side; the caller
 // never touches JSON.
 func Tell() *cli.Command {
 	return &cli.Command{

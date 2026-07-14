@@ -53,7 +53,8 @@ func Open() *cli.Command {
 				return err
 			}
 			err = dashboard.Run(ctx, guard, func(runCtx context.Context) error {
-				return dashboard.ActionLoop(runCtx, dashboard.NewNativeEditor(os.Stdin), dashboard.NativeSize(os.Stdout), dashboard.NativeRenderer(os.Stdout, c.Bool("plain")), model, conn)
+				editor := dashboard.NewNativeEditor(os.Stdin, os.Stdout)
+				return dashboard.ActionLoop(runCtx, editor, dashboard.NativeSize(os.Stdout), dashboard.NativeRenderer(os.Stdout, c.Bool("plain"), editor), model, conn)
 			})
 			if conn.Attach.State == "working" || conn.Attach.State == "steering" || conn.Attach.State == "interrupting" {
 				fmt.Fprintf(c.ErrWriter, "work continues; reconnect with shipmates open %s, observe with shipmates feed, or cancel with shipmates interrupt\n", persona)

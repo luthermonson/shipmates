@@ -135,8 +135,8 @@ func TestM5ExplicitValidationAndRuntimeTurnKeepTheirPolicyBoundaries(t *testing.
 	// failure happens before Codex lookup/start, so no model work can begin.
 	ask := &cli.Command{Name: "shipmates", Commands: []*cli.Command{Ask()}}
 	err = ask.Run(context.Background(), []string{"shipmates", "ask", "captain", "hello"})
-	if err == nil || err.Error() != "policy validation failed" {
-		t.Fatalf("ask error = %v, want fail-closed policy validation", err)
+	if err == nil || !strings.Contains(err.Error(), "captain is reserved") {
+		t.Fatalf("ask error = %v, want reserved human captain", err)
 	}
 }
 

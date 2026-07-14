@@ -111,6 +111,7 @@ func codexPersonasFromLog(t *testing.T, path string) []string {
 }
 
 func TestM10PublicCommandWorkflowsUseSortedCodexOnlyInventory(t *testing.T) {
+	useLegacyCodexTestDispatcher(t)
 	t.Chdir(t.TempDir())
 	writeM10CommandFixture(t, "zeta", "captain", "alpha")
 	logPath, legacyagentMarker := installM10CommandSentinels(t)

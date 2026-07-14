@@ -20,12 +20,14 @@ const (
 	InputResize
 	InputEOF
 	InputCancel
+	InputScroll
 )
 
 type Input struct {
-	Kind InputKind
-	Line string
-	Size Size
+	Kind   InputKind
+	Line   string
+	Size   Size
+	Scroll int
 }
 
 // Editor is fakeable and yields only completed local input events. Drafts are
@@ -47,6 +49,8 @@ const (
 	ParsedImageAdd
 	ParsedImageRemove
 	ParsedImageClear
+	ParsedConsult
+	ParsedSail
 	ParsedUnknown
 )
 
@@ -78,6 +82,13 @@ func ParseLine(line string) (ParsedInput, error) {
 		}
 		return ParsedInput{Kind: ParsedImageAdd, Text: p}, nil
 	}
+	if strings.HasPrefix(line, "/consult ") {
+		q := strings.TrimSpace(strings.TrimPrefix(line, "/consult "))
+		if q == "" {
+			return ParsedInput{}, ErrInvalidInput
+		}
+		return ParsedInput{Kind: ParsedConsult, Text: q}, nil
+	}
 	if strings.HasPrefix(line, "/image remove ") {
 		p := strings.TrimSpace(strings.TrimPrefix(line, "/image remove "))
 		if _, e := strconv.Atoi(p); e != nil {
@@ -99,6 +110,14 @@ func ParseLine(line string) (ParsedInput, error) {
 		return ParsedInput{Kind: ParsedAllowOnce}, nil
 	case "/deny":
 		return ParsedInput{Kind: ParsedDeny}, nil
+	case "/sail":
+		return ParsedInput{Kind: ParsedSail}, nil
+	case "/sail --retry-failed":
+		return ParsedInput{Kind: ParsedSail, Text: "retry-failed"}, nil
+	case "/sail --verbose":
+		return ParsedInput{Kind: ParsedSail, Text: "verbose"}, nil
+	case "/sail --retry-failed --verbose", "/sail --verbose --retry-failed":
+		return ParsedInput{Kind: ParsedSail, Text: "retry-failed verbose"}, nil
 	}
 	if strings.HasPrefix(line, "/") {
 		return ParsedInput{Kind: ParsedUnknown}, nil
@@ -126,6 +145,11 @@ func InputLoop(ctx context.Context, editor Editor, initial Size, render func(Scr
 			}
 		case InputEOF, InputCancel:
 			return nil
+		case InputScroll:
+			model.SidebarScroll = scrollOffset(model.SidebarScroll, in.Scroll, size.Height)
+			if err := render(Render(model, size)); err != nil {
+				return err
+			}
 		case InputLine:
 			p, err := ParseLine(in.Line)
 			if err != nil {
@@ -149,39 +173,79 @@ func InputLoop(ctx context.Context, editor Editor, initial Size, render func(Scr
 // Heartbeats run independently of blocked local input; cancellation and EOF
 // remain detach-only and Close is owned by the caller's restoration path.
 func ActionLoop(ctx context.Context, editor Editor, initial Size, render func(Screen) error, model *Model, conn *Connection) error {
+	return ActionLoopWithHooks(ctx, editor, initial, render, model, conn, nil, nil)
+}
+
+type InputHook func(context.Context, ParsedInput) (handled bool, exit bool, err error)
+type SyncHook func(context.Context, *Model, *Connection) error
+
+// ActionLoopWithHooks lets product-specific dashboards add commands and
+// refresh derived presentation state without duplicating controller logic.
+func ActionLoopWithHooks(ctx context.Context, editor Editor, initial Size, render func(Screen) error, model *Model, conn *Connection, beforeRender func(), hook InputHook) error {
 	lease := time.Duration(conn.Attach.LeaseTimeoutMS) * time.Millisecond
 	if lease <= 0 {
 		lease = 15 * time.Second
 	}
 	ticker := time.NewTicker(lease / 3)
 	defer ticker.Stop()
-	return ActionLoopWithTicks(ctx, editor, initial, render, model, conn, ticker.C)
+	return actionLoopWithTicks(ctx, editor, initial, render, model, conn, ticker.C, beforeRender, hook, nil)
+}
+
+// ActionLoopWithHooksAndSync adds a host callback after synchronized session
+// events are applied, without granting managed agents recursive launch access.
+func ActionLoopWithHooksAndSync(ctx context.Context, editor Editor, initial Size, render func(Screen) error, model *Model, conn *Connection, beforeRender func(), hook InputHook, syncHook SyncHook) error {
+	lease := time.Duration(conn.Attach.LeaseTimeoutMS) * time.Millisecond
+	if lease <= 0 {
+		lease = 15 * time.Second
+	}
+	ticker := time.NewTicker(lease / 3)
+	defer ticker.Stop()
+	return actionLoopWithTicks(ctx, editor, initial, render, model, conn, ticker.C, beforeRender, hook, syncHook)
 }
 
 // ActionLoopWithTicks exposes lease/feed ticks for deterministic fake-clock
 // integration tests; production uses ActionLoop's bounded lease cadence.
 func ActionLoopWithTicks(ctx context.Context, editor Editor, initial Size, render func(Screen) error, model *Model, conn *Connection, ticks <-chan time.Time) error {
+	return actionLoopWithTicks(ctx, editor, initial, render, model, conn, ticks, nil, nil, nil)
+}
+
+func actionLoopWithTicks(ctx context.Context, editor Editor, initial Size, render func(Screen) error, model *Model, conn *Connection, ticks <-chan time.Time, beforeRender func(), hook InputHook, syncHook SyncHook) error {
 	defer model.ClearImages()
+	inputCtx, cancelInput := context.WithCancel(ctx)
+	inputDone := make(chan struct{})
+	defer func() {
+		cancelInput()
+		select {
+		case <-inputDone:
+		case <-time.After(250 * time.Millisecond):
+		}
+	}()
 	size := initial
-	redraw := func() error { return render(Render(model, size)) }
+	redraw := func() error {
+		if beforeRender != nil {
+			beforeRender()
+		}
+		return render(Render(model, size))
+	}
 	if err := redraw(); err != nil {
 		return err
 	}
 	inCh := make(chan Input, 1)
 	errCh := make(chan error, 1)
 	go func() {
+		defer close(inputDone)
 		for {
-			in, err := editor.Next(ctx)
+			in, err := editor.Next(inputCtx)
 			if err != nil {
 				select {
 				case errCh <- err:
-				case <-ctx.Done():
+				case <-inputCtx.Done():
 				}
 				return
 			}
 			select {
 			case inCh <- in:
-			case <-ctx.Done():
+			case <-inputCtx.Done():
 				return
 			}
 			if in.Kind == InputEOF || in.Kind == InputCancel {
@@ -207,6 +271,11 @@ func ActionLoopWithTicks(ctx context.Context, editor Editor, initial Size, rende
 			if err := model.Reconnect(synced); err != nil {
 				return err
 			}
+			if syncHook != nil {
+				if err := syncHook(ctx, model, conn); err != nil {
+					model.Notice(err.Error())
+				}
+			}
 			if err := redraw(); err != nil {
 				return err
 			}
@@ -224,6 +293,12 @@ func ActionLoopWithTicks(ctx context.Context, editor Editor, initial Size, rende
 				return err
 			}
 			continue
+		case InputScroll:
+			model.SidebarScroll = scrollOffset(model.SidebarScroll, in.Scroll, size.Height)
+			if err := redraw(); err != nil {
+				return err
+			}
+			continue
 		case InputLine:
 		default:
 			return ErrInvalidInput
@@ -235,6 +310,25 @@ func ActionLoopWithTicks(ctx context.Context, editor Editor, initial Size, rende
 				return err
 			}
 			continue
+		}
+		if hook != nil {
+			handled, exit, hookErr := hook(ctx, p)
+			if hookErr != nil {
+				model.Notice(hookErr.Error())
+				if err := redraw(); err != nil {
+					return err
+				}
+				continue
+			}
+			if exit {
+				return nil
+			}
+			if handled {
+				if err := redraw(); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		switch p.Kind {
 		case ParsedNoop:
@@ -335,4 +429,22 @@ func ActionLoopWithTicks(ctx context.Context, editor Editor, initial Size, rende
 			return err
 		}
 	}
+}
+
+func scrollOffset(current, direction, height int) int {
+	if direction < -1 {
+		return 0
+	}
+	if direction > 1 {
+		return int(^uint(0) >> 1)
+	}
+	step := height / 2
+	if step < 1 {
+		step = 1
+	}
+	current += direction * step
+	if current < 0 {
+		return 0
+	}
+	return current
 }

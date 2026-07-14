@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -30,7 +31,7 @@ func TestDeterministicRedactedSnapshot(t *testing.T) {
 	}
 	s := Render(m, Size{Width: 80, Height: 6})
 	got := strings.Join(s.Lines, "\n")
-	want := "shipmates open backend | working | controller\nagent: hello�world [truncated]\nunsupported event\nrequest refused\n/help  /interrupt  /detach  /quit  // literal slash"
+	want := "shipmates open backend | working | controller\nagent: hello�world [truncated]\nrequest refused\n/help  /interrupt  /detach  /quit  // literal slash"
 	if got != want {
 		t.Fatalf("snapshot:\n%s\nwant:\n%s", got, want)
 	}
@@ -51,7 +52,7 @@ func TestDroppedHistoryResizeAndBoundedLayout(t *testing.T) {
 		t.Fatal(wide.Lines)
 	}
 	narrow := Render(m, Size{Width: 12, Height: 3})
-	want := []string{"shipmates o…", "turn comple…", "/help  /int…"}
+	want := []string{"shipmates o…", "completed", "/help  /int…"}
 	if !reflect.DeepEqual(narrow.Lines, want) {
 		t.Fatalf("narrow=%q", narrow.Lines)
 	}
@@ -59,6 +60,36 @@ func TestDroppedHistoryResizeAndBoundedLayout(t *testing.T) {
 		if len([]rune(line)) > 12 {
 			t.Fatal(line)
 		}
+	}
+}
+
+func TestAgentDeltasCoalesceAndWrapWithoutEllipsis(t *testing.T) {
+	m, err := NewModel(attach(
+		event(0, "agent.message", map[string]any{"text": "A thoughtfully", "partial": true}),
+		event(1, "activity", map[string]any{"category": "command"}),
+		event(2, "agent.message", map[string]any{"text": " composed response", "partial": true}),
+		event(3, "agent.message", map[string]any{"text": "A thoughtfully composed response"}),
+		event(4, "turn.completed", nil),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Events) != 3 || m.Events[0].Text != "agent: A thoughtfully composed response" || m.Events[0].Partial {
+		t.Fatalf("events=%+v", m.Events)
+	}
+	got := strings.Join(Render(m, Size{Width: 18, Height: 6}).Lines, "\n")
+	if !strings.Contains(got, "thoughtfully") || !strings.Contains(got, "composed response") || strings.Contains(got, "thoughtfull…") || strings.Contains(got, "composed respo…") {
+		t.Fatalf("wrapped output=%q", got)
+	}
+}
+
+func TestDashboardColorsDistinguishPersonaStatusAndSidebar(t *testing.T) {
+	line := colorizeDashboardLine("agent: hello │ VOYAGE PLAN", "skipper", true)
+	if !strings.Contains(line, "\x1b[1;96magent: hello") || !strings.Contains(line, "\x1b[97mVOYAGE PLAN") {
+		t.Fatalf("colored line=%q", line)
+	}
+	if colorizeDashboardLine("agent: hello", "skipper", false) == colorizeDashboardLine("agent: hello", "architect", false) {
+		t.Fatal("persona colors should be stable and distinct for skipper and architect")
 	}
 }
 
@@ -118,7 +149,7 @@ func TestInputLoopResizeCancellationAndNoActionWiring(t *testing.T) {
 }
 
 func TestInputGrammarAndLimits(t *testing.T) {
-	tests := map[string]ParsedInput{"": {Kind: ParsedNoop}, "//help": {Kind: ParsedMessage, Text: "/help"}, "///x": {Kind: ParsedMessage, Text: "//x"}, "/help": {Kind: ParsedHelp}, "/interrupt": {Kind: ParsedInterrupt}, "/detach": {Kind: ParsedDetach}, "/quit": {Kind: ParsedDetach}, "/help x": {Kind: ParsedUnknown}, " hi ": {Kind: ParsedMessage, Text: " hi "}}
+	tests := map[string]ParsedInput{"": {Kind: ParsedNoop}, "//help": {Kind: ParsedMessage, Text: "/help"}, "///x": {Kind: ParsedMessage, Text: "//x"}, "/help": {Kind: ParsedHelp}, "/interrupt": {Kind: ParsedInterrupt}, "/detach": {Kind: ParsedDetach}, "/quit": {Kind: ParsedDetach}, "/sail": {Kind: ParsedSail}, "/sail --retry-failed": {Kind: ParsedSail, Text: "retry-failed"}, "/sail --verbose": {Kind: ParsedSail, Text: "verbose"}, "/sail --verbose --retry-failed": {Kind: ParsedSail, Text: "retry-failed verbose"}, "/consult data boundaries": {Kind: ParsedConsult, Text: "data boundaries"}, "/help x": {Kind: ParsedUnknown}, " hi ": {Kind: ParsedMessage, Text: " hi "}}
 	for in, want := range tests {
 		got, err := ParseLine(in)
 		if err != nil || got != want {
@@ -130,6 +161,37 @@ func TestInputGrammarAndLimits(t *testing.T) {
 	}
 	if _, err := ParseLine(strings.Repeat("x", MaxInputBytes+1)); !errors.Is(err, ErrInputTooLarge) {
 		t.Fatal(err)
+	}
+}
+
+func TestWidePlanningSidebarAndNarrowFallback(t *testing.T) {
+	m, _ := NewModel(attach())
+	m.Sidebar = &Sidebar{Title: "Export voyage", Status: "DRAFT", Sections: []SidebarSection{{Heading: "Blast area", Items: []string{"Account API", "Worker"}}}}
+	wide := strings.Join(Render(m, Size{Width: 120, Height: 8}).Lines, "\n")
+	if !strings.Contains(wide, "Export voyage") || !strings.Contains(wide, "BLAST AREA") || !strings.Contains(wide, "│") {
+		t.Fatalf("wide sidebar = %s", wide)
+	}
+	narrow := strings.Join(Render(m, Size{Width: 80, Height: 5}).Lines, "\n")
+	if strings.Contains(narrow, "Export voyage") || strings.Contains(narrow, "│") {
+		t.Fatalf("narrow view did not fall back = %s", narrow)
+	}
+}
+
+func TestPlanningSidebarScrollsWithoutTruncatingContent(t *testing.T) {
+	m, _ := NewModel(attach())
+	items := make([]string, 20)
+	for i := range items {
+		items[i] = fmt.Sprintf("criterion-%02d", i)
+	}
+	m.Sidebar = &Sidebar{Title: "Long voyage", Status: "DRAFT", Sections: []SidebarSection{{Heading: "Acceptance", Items: items}}}
+	top := strings.Join(Render(m, Size{Width: 120, Height: 8}).Lines, "\n")
+	if !strings.Contains(top, "criterion-00") || strings.Contains(top, "criterion-19") {
+		t.Fatalf("top viewport=%s", top)
+	}
+	m.SidebarScroll = int(^uint(0) >> 1)
+	bottom := strings.Join(Render(m, Size{Width: 120, Height: 8}).Lines, "\n")
+	if strings.Contains(bottom, "criterion-00") || !strings.Contains(bottom, "criterion-19") {
+		t.Fatalf("bottom viewport=%s", bottom)
 	}
 }
 

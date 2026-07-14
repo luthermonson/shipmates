@@ -71,10 +71,12 @@ chmod +x "$tmp/bin/legacyagent"
 (
   cd "$tmp/project"
   PATH="$tmp/bin:$PATH" LEGACY_RUNTIME_CONFIG_DIR="$tmp/hostile" FORBIDDEN_PROVIDER_API_KEY=hostile "$tmp/shipmates" init
-  PATH="$tmp/bin:$PATH" "$tmp/shipmates" add captain
+  PATH="$tmp/bin:$PATH" "$tmp/shipmates" add quartermaster
+  PATH="$tmp/bin:$PATH" "$tmp/shipmates" add skipper
   PATH="$tmp/bin:$PATH" "$tmp/shipmates" list >/dev/null
 )
 test ! -e "$tmp/legacyagent-invoked" || { echo 'hostile legacyagent executable was invoked' >&2; exit 1; }
 test ! -e "$tmp/project/.legacy-runtime" || { echo 'ordinary workflow created .legacy-runtime state' >&2; exit 1; }
+test ! -e "$tmp/project/.codex/agents/captain.toml" || { echo 'captain agent was installed' >&2; exit 1; }
 
 echo 'Codex runtime closure verified'

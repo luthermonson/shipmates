@@ -121,6 +121,30 @@ func CanonicalRoot(root string) (string, error) {
 	return filepath.Clean(resolved), nil
 }
 
+// FindRoot locates the nearest initialized Shipmates project at or above start.
+// Commands that operate on a whole project use this to avoid creating a second
+// coordination scope when invoked from a repository subdirectory.
+func FindRoot(start string) (string, error) {
+	root, err := CanonicalRoot(start)
+	if err != nil {
+		return "", err
+	}
+	for {
+		info, statErr := os.Stat(filepath.Join(root, ConfigName))
+		if statErr == nil && !info.IsDir() {
+			return root, nil
+		}
+		if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+			return "", statErr
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			return "", errors.New("shipmates project not found; run shipmates init")
+		}
+		root = parent
+	}
+}
+
 // ScopeID returns a stable, non-secret identifier for a project root. It is
 // used only to prevent a loopback coordination server discovered through a
 // stale port file from accepting requests belonging to another checkout.
@@ -336,11 +360,10 @@ type Config struct {
 	// names are just the persona name). Configurable so two checkouts of the
 	// same repo (or same-named projects) don't collide on session handles.
 	SessionPrefix string `yaml:"sessionPrefix"`
-	// CaptainPersona names the coordinating persona on this ship — the front
-	// door the fleet opens and the identity in the tunnel clientKey.
-	// Defaults to "captain"; crews with themed coordinators set their own
-	// (e.g. picard, coach).
-	CaptainPersona string                  `yaml:"captainPersona"`
+	// SkipperPersona names the human-facing execution lead for this project.
+	// The human operator remains captain.
+	SkipperPersona string                  `yaml:"skipperPersona"`
+	ModelLadder    []string                `yaml:"modelLadder"`
 	SharedMemory   bool                    `yaml:"sharedMemory"`
 	Routing        string                  `yaml:"routing"`
 	RoutingOptions RoutingOptions          `yaml:"routingOptions"`
@@ -349,17 +372,17 @@ type Config struct {
 	Crew           map[string]CrewOverride `yaml:"crew"`
 }
 
-// FleetConfig points the captain at a central `shipmates fleet serve` instance.
-// When URL is non-empty the captain opens an outbound websocket on boot using
+// FleetConfig points the project server at a central observer instance.
+// When URL is non-empty the server opens an outbound websocket on boot using
 // rancher/remotedialer; the fleet can then dial back through the tunnel to the
-// captain's existing 127.0.0.1 server.
+// the project's existing 127.0.0.1 server.
 //
 // The secret is NEVER stored in shipmates.yaml (it gets committed to git).
-// TokenEnv names an environment variable the captain reads at boot to get the
+// TokenEnv names an environment variable the server reads at boot to get the
 // bearer token; default is SHIPMATES_FLEET_TOKEN. Set this var in your shell
 // (or systemd unit, launchd plist, etc.) — the config file stays clean.
 //
-// Name overrides the captain's identity on the fleet. Defaults to the repo
+// Name overrides the project's identity on the fleet. Defaults to the repo
 // directory name, so the clientKey is `<repo>:<persona>`. Set this if two
 // clones of the same repo connect to the same fleet and collide (e.g.
 // "card-cannon-dev" vs "card-cannon-scratch").
@@ -369,7 +392,7 @@ type FleetConfig struct {
 	Name     string `yaml:"name"`
 }
 
-// DefaultFleetTokenEnv is the env var the captain reads when FleetConfig.TokenEnv
+// DefaultFleetTokenEnv is the env var the server reads when FleetConfig.TokenEnv
 // is empty. Matches the var the fleet server and operator commands also read.
 const DefaultFleetTokenEnv = "SHIPMATES_FLEET_TOKEN"
 
@@ -463,6 +486,26 @@ func ResolvePersonaConfigAt(root, persona string) (PersonaConfig, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// ModelLadderAt returns the project's explicit least-to-most-capable model
+// ordering used by Sail to validate and select escalation tiers.
+func ModelLadderAt(root string) ([]string, error) {
+	conf, err := LoadConfigAt(root)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(conf.ModelLadder))
+	ladder := make([]string, 0, len(conf.ModelLadder))
+	for _, raw := range conf.ModelLadder {
+		model := strings.TrimSpace(raw)
+		if model == "" || seen[model] {
+			return nil, errors.New("modelLadder must contain unique non-empty model names")
+		}
+		seen[model] = true
+		ladder = append(ladder, model)
+	}
+	return ladder, nil
 }
 
 // NewUUID returns a random v4 UUID string using only the standard library.
