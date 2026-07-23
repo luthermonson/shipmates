@@ -325,7 +325,7 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 		if err != nil {
 			return nil, Capabilities{}, failure(Internal)
 		}
-		pidfd = containment.fd
+		pidfd = extractContainmentPidfd(containment)
 	} else {
 		if err := cmd.Start(); err != nil {
 			return nil, Capabilities{}, failure(Internal)

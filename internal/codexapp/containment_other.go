@@ -47,3 +47,9 @@ func (*ExecutionContainment) Empty() (bool, error) {
 	return false, errors.New("execution containment unavailable")
 }
 func (*ExecutionContainment) Close() error { return errors.New("execution containment unavailable") }
+
+// extractContainmentPidfd returns the pidfd guarded inside an
+// ExecutionContainment. Only implemented on Linux where the struct actually
+// carries a fd; other platforms return zero because containment startup
+// already fails and the value is never consulted.
+func extractContainmentPidfd(*ExecutionContainment) int { return 0 }
