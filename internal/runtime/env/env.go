@@ -35,7 +35,7 @@ func (s *Selector) Select(ctx context.Context, projectDir, cliRuntime string) (r
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve runtime: %w", err)
 	}
-	rt, err := factory.NewFromConfig(ctx, resolved.Runtime, resolved.Settings)
+	rt, err := factory.NewFromResolved(ctx, resolved)
 	if err != nil {
 		// Codex is a known "needs more" case; surface it as ErrNotConfigured
 		// so commands can print an actionable message.
