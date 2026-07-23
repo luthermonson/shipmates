@@ -1,3 +1,10 @@
+//go:build unix
+
+// The runtime installer is Linux-only by design (it installs a systemd
+// unit, cgroup delegation slice, and the shipmates-cgroup-launcher helper
+// under /usr/libexec). Windows/macOS have no equivalent target, and the
+// direct O_NOFOLLOW / Stat_t use here is Unix-only.
+
 package installer
 
 import (

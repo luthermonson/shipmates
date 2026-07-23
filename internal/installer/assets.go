@@ -1,5 +1,10 @@
+//go:build unix
+
 // Package installer owns the offline, fixed-layout Shipmates runtime installer.
 // It deliberately has no network, credential, or service-manager dependency.
+//
+// Linux/Unix-only: the installer targets systemd + cgroup delegation. Windows
+// and macOS have no equivalent runtime installation surface.
 package installer
 
 import (

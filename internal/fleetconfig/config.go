@@ -1,6 +1,11 @@
+//go:build unix
+
 // Package fleetconfig loads the administrator-provisioned, qualifier-only Fleet
 // binding. It deliberately has no network client and never exposes secrets as
 // strings outside the ship-proof callback.
+//
+// Unix-only: uses direct syscalls (O_NOFOLLOW/O_CLOEXEC/Openat/Fstat). A
+// Windows port is deferred to Phase 5+ of docs/runtime-interface-plan.md.
 package fleetconfig
 
 import (
