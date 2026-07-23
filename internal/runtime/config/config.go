@@ -22,12 +22,31 @@ type File struct {
 	// runtime implementations can consume their own settings blob without
 	// this package needing to know them.
 	Runtimes map[string]map[string]any `yaml:"runtimes,omitempty"`
+	// Containment configures process-containment for spawned turns.
+	Containment Containment `yaml:"containment,omitempty"`
+}
+
+// Containment is the on-disk shape for the containment: block.
+//
+//	containment:
+//	  mode: watchdog        # watchdog | cgroup | none
+//	  memory_limit_mb: 8192  # 0 = uncapped
+//	  cpu_limit_seconds: 0
+//	  poll_interval_ms: 500
+//	  graceful_timeout_ms: 2000
+type Containment struct {
+	Mode              string `yaml:"mode,omitempty"`
+	MemoryLimitMB     int64  `yaml:"memory_limit_mb,omitempty"`
+	CPULimitSeconds   int64  `yaml:"cpu_limit_seconds,omitempty"`
+	PollIntervalMS    int64  `yaml:"poll_interval_ms,omitempty"`
+	GracefulTimeoutMS int64  `yaml:"graceful_timeout_ms,omitempty"`
 }
 
 // Resolved captures the final runtime selection after precedence rules.
 type Resolved struct {
-	Runtime  string
-	Settings map[string]any
+	Runtime     string
+	Settings    map[string]any
+	Containment Containment
 	// Source describes where the selection came from, for --explain / logs.
 	Source string
 }
@@ -85,7 +104,16 @@ func Resolve(cliRuntime string, project, user File) (Resolved, error) {
 	} else if s, ok := user.Runtimes[pick]; ok {
 		settings = s
 	}
-	return Resolved{Runtime: pick, Settings: settings, Source: source}, nil
+	// Containment: project overrides user; the mode field decides "was it
+	// set?" for purposes of falling through.
+	contain := project.Containment
+	if contain.Mode == "" && user.Containment.Mode != "" {
+		contain = user.Containment
+	}
+	if contain.Mode == "" {
+		contain.Mode = "watchdog" // sensible default: bounded but no privileges required
+	}
+	return Resolved{Runtime: pick, Settings: settings, Containment: contain, Source: source}, nil
 }
 
 func loadFile(path string) (File, error) {
