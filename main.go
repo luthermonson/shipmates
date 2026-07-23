@@ -31,6 +31,11 @@ func main() {
 		Version: version,
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "verbose", Usage: "enable debug logging"},
+			&cli.StringFlag{
+				Name:    "runtime",
+				Usage:   "AI runtime to drive personas: claude | codex (overrides .shipmates/config.yaml)",
+				Sources: cli.EnvVars("SHIPMATES_RUNTIME"),
+			},
 		},
 		Before: func(ctx context.Context, c *cli.Command) (context.Context, error) {
 			level := slog.LevelInfo
