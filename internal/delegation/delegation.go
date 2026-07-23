@@ -1,6 +1,12 @@
+//go:build unix
+
 // Package delegation implements the ship-local, non-transport portion of
 // Fleet Commander M1. It validates one signed offer, reserves one assessment,
 // and persists only bounded redacted lifecycle/provenance records.
+//
+// Unix-only for now: uses golang.org/x/sys/unix flock/openat directly. A
+// Windows implementation (using LockFileEx) is deferred to Phase 5 of the
+// runtime-interface plan (docs/runtime-interface-plan.md).
 package delegation
 
 import (

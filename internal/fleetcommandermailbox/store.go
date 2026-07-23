@@ -1,5 +1,11 @@
+//go:build unix
+
 // Package fleetcommandermailbox is the Fleet-owned durable half of M3. It is
 // deliberately local: transport adapters may call it, but it owns no tunnel.
+//
+// Unix-only for now: uses direct syscalls (O_NOFOLLOW/O_CLOEXEC/close). A
+// Windows implementation is deferred to Phase 5 of the runtime-interface
+// plan (docs/runtime-interface-plan.md).
 package fleetcommandermailbox
 
 import (
