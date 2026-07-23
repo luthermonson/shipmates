@@ -14,7 +14,6 @@
 // It's intentionally minimal: single-turn invocations, no PTY, no
 // interactive multi-turn conversations, no persona-side hooks. Follow-ups:
 //
-//   - JSONL event parsing (see fanoutTurn TODO)
 //   - Session persistence across restarts (Claude Code already stores by
 //     session-id under ~/.claude; we just need to remember which id
 //     belongs to which shipmates persona)
@@ -36,6 +35,8 @@ import (
 	"time"
 
 	"github.com/luthermonson/shipmates/internal/runtime"
+	"github.com/luthermonson/shipmates/internal/runtime/containment"
+	"github.com/luthermonson/shipmates/internal/runtime/containment/none"
 )
 
 // Runtime is the claude-backed runtime.Runtime. Zero value is not usable;
@@ -45,6 +46,13 @@ type Runtime struct {
 	binary string
 	// defaultArgs are appended to every invocation (e.g. per-firm flags).
 	defaultArgs []string
+
+	// contain wraps every subprocess spawn so RSS/CPU are bounded per turn.
+	// Defaults to the no-op watcher when unset.
+	contain containment.Watcher
+	// limits are the per-turn budget applied via contain.Start(). Zero =
+	// no bounds.
+	limits containment.Limits
 
 	stream  chan runtime.Event
 	stopFan chan struct{}
@@ -62,6 +70,13 @@ type Config struct {
 	// DefaultArgs appear on every claude invocation before the turn
 	// message, after the session-id + output-format flags.
 	DefaultArgs []string
+	// Containment is the process-containment mode for spawned turns.
+	// nil defaults to none (no-op watcher). Plug in
+	// containment/watchdog.New() or a cgroup Watcher to bound memory/CPU.
+	Containment containment.Watcher
+	// Limits are applied by Containment on every turn spawn. Zero-value
+	// means no bounds.
+	Limits containment.Limits
 }
 
 // New returns a claude runtime. It resolves the binary once; if the CLI is
@@ -73,9 +88,15 @@ func New(cfg Config) *Runtime {
 	if binary == "" {
 		binary = "claude"
 	}
+	contain := cfg.Containment
+	if contain == nil {
+		contain = none.New()
+	}
 	return &Runtime{
 		binary:      binary,
 		defaultArgs: append([]string(nil), cfg.DefaultArgs...),
+		contain:     contain,
+		limits:      cfg.Limits,
 		stream:      make(chan runtime.Event, 64),
 		stopFan:     make(chan struct{}),
 		sessions:    map[string]*session{},
@@ -127,15 +148,15 @@ func (r *Runtime) ResumeSession(_ context.Context, id string, spec runtime.Sessi
 
 // CloseSession implements runtime.Runtime. Drops shipmates-side bookkeeping
 // and interrupts any turn currently running under the session.
-func (r *Runtime) CloseSession(_ context.Context, id string) error {
+func (r *Runtime) CloseSession(ctx context.Context, id string) error {
 	r.sessMu.Lock()
 	s, ok := r.sessions[id]
 	if ok {
 		delete(r.sessions, id)
 	}
 	r.sessMu.Unlock()
-	if ok && s.currentCmd != nil {
-		_ = s.currentCmd.Process.Kill()
+	if ok && s.currentHandle != nil {
+		_ = s.currentHandle.Close(ctx)
 	}
 	return nil
 }
@@ -176,10 +197,13 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 	if err != nil {
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
+	// Route the spawn through containment so RSS/CPU are bounded per turn.
+	handle, err := r.contain.Start(cmd, r.limits)
+	if err != nil {
 		return nil, err
 	}
 	s.currentCmd = cmd
+	s.currentHandle = handle
 
 	// Write the turn message and close stdin so claude knows we're done.
 	go func() {
@@ -187,24 +211,25 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 		_, _ = io.WriteString(stdin, in.Text)
 	}()
 
-	// Fan out events from claude's JSONL output into r.stream. Real JSONL
-	// event decoding is TODO (see package doc); the placeholder emits
-	// KindText on any stdout, plus KindTurnDone / KindError on exit.
-	go r.fanoutTurn(sessionID, turnID, cmd, stdout)
+	// Fan out events from claude's JSONL output into r.stream; the
+	// Handle's Done() supplies the terminal event (natural exit, memory
+	// kill, requested close).
+	go r.fanoutTurn(sessionID, turnID, handle, stdout)
 
 	return &turn{id: turnID, sessionID: sessionID, startedAt: time.Now()}, nil
 }
 
 // InterruptTurn implements runtime.Runtime. Claude Code has no in-band
-// interrupt; we signal the underlying process instead.
-func (r *Runtime) InterruptTurn(_ context.Context, sessionID, _ string) error {
+// interrupt; we tear down the containment handle so the whole process
+// tree dies atomically (Job Object on Windows, process group on Unix).
+func (r *Runtime) InterruptTurn(ctx context.Context, sessionID, _ string) error {
 	r.sessMu.Lock()
 	s, ok := r.sessions[sessionID]
 	r.sessMu.Unlock()
-	if !ok || s.currentCmd == nil || s.currentCmd.Process == nil {
+	if !ok || s.currentHandle == nil {
 		return &runtime.ErrUnsupported{Runtime: "claude", Feature: "InterruptTurn on inactive session"}
 	}
-	return s.currentCmd.Process.Kill()
+	return s.currentHandle.Close(ctx)
 }
 
 // SteerTurn implements runtime.Runtime. Claude Code has no equivalent of
@@ -223,19 +248,18 @@ func (r *Runtime) ResolveApproval(context.Context, runtime.ApprovalResponse, run
 	return false, &runtime.ErrUnsupported{Runtime: "claude", Feature: "ResolveApproval (Phase 4 hook plumbing)"}
 }
 
-// Close implements runtime.Runtime.
-func (r *Runtime) Close(context.Context) error {
+// Close implements runtime.Runtime. Tears down every open session's
+// containment handle so the whole spawned process tree exits.
+func (r *Runtime) Close(ctx context.Context) error {
 	r.stopped.Do(func() { close(r.stopFan) })
 	r.sessMu.Lock()
 	for _, s := range r.sessions {
-		if s.currentCmd != nil && s.currentCmd.Process != nil {
-			_ = s.currentCmd.Process.Kill()
+		if s.currentHandle != nil {
+			_ = s.currentHandle.Close(ctx)
 		}
 	}
 	r.sessions = map[string]*session{}
 	r.sessMu.Unlock()
-	// Give the stream a moment to drain; consumers see the channel close
-	// via fanoutTurn's exits.
 	return nil
 }
 
@@ -252,32 +276,40 @@ func (r *Runtime) rememberSession(id string, spec runtime.SessionSpec) *session 
 	return s
 }
 
-// fanoutTurn currently emits a simple TurnStarted → TurnDone/Error signal
-// without decoding the JSONL frames. Real event mapping (assistant
-// messages, tool_use blocks, tool_result blocks) lands in a follow-up
-// commit; this is the transport skeleton.
-func (r *Runtime) fanoutTurn(sessionID, turnID string, cmd *exec.Cmd, stdout io.Reader) {
+// fanoutTurn reads JSONL frames from claude's stdout, decodes each via
+// decodeFrame (see events.go), and streams normalized runtime.Events.
+// The containment handle's Done() channel supplies the terminal event
+// so consumers learn WHY the turn ended (natural exit, memory_limit,
+// requested close, etc.) rather than only that it did.
+func (r *Runtime) fanoutTurn(sessionID, turnID string, handle containment.Handle, stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
 		select {
 		case <-r.stopFan:
 			return
-		case r.stream <- runtime.Event{
-			Timestamp: time.Now(),
-			Kind:      runtime.KindBackend, // TODO: parse JSONL and map to KindText/KindToolCall/etc.
-			SessionID: sessionID,
-			TurnID:    turnID,
-			Payload:   scanner.Bytes(),
-		}:
+		case r.stream <- decodeFrame(scanner.Bytes(), sessionID, turnID):
 		}
 	}
-	err := cmd.Wait()
+	// Wait for containment to report the terminal event.
+	ev, ok := <-handle.Done()
 	kind := runtime.KindTurnDone
-	var payload any
-	if err != nil {
+	var payload any = ev
+	if !ok {
 		kind = runtime.KindError
-		payload = err.Error()
+		payload = "handle closed without terminal event"
+	} else {
+		switch ev.Reason {
+		case containment.ReasonExited:
+			// natural exit — but non-zero exit code should surface as error
+			if ev.ExitCode != 0 {
+				kind = runtime.KindError
+			}
+		case containment.ReasonMemoryLimit, containment.ReasonCPULimit,
+			containment.ReasonRequested, containment.ReasonStartFailed,
+			containment.ReasonUnknown:
+			kind = runtime.KindError
+		}
 	}
 	select {
 	case <-r.stopFan:
@@ -295,6 +327,7 @@ func (r *Runtime) fanoutTurn(sessionID, turnID string, cmd *exec.Cmd, stdout io.
 type session struct {
 	id, persona, projectDir, wdOverride string
 	currentCmd                          *exec.Cmd
+	currentHandle                       containment.Handle
 }
 
 func (s *session) ID() string      { return s.id }
