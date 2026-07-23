@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -163,6 +165,17 @@ func TestStartupRefusalsAreSanitizedAndReaped(t *testing.T) {
 	}
 }
 
+func TestThreadParamsToollessReadOnly(t *testing.T) {
+	p := threadParams(ThreadOptions{WorkingDirectory: "/tmp/project", Model: "gpt-5.6-sol", ReadOnly: true, Toolless: true})
+	if p["sandbox"] != "read-only" || p["model"] != "gpt-5.6-sol" {
+		t.Fatalf("unsafe thread params: %#v", p)
+	}
+	tools, ok := p["tools"].([]any)
+	if !ok || len(tools) != 0 {
+		t.Fatalf("tools were not disabled: %#v", p["tools"])
+	}
+}
+
 func TestStartupDeniesRequestsAndDrainsStderr(t *testing.T) {
 	for _, scenario := range []string{"approval", "user-input", "stderr"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -208,6 +221,40 @@ func TestCloseKillsIgnoredShutdown(t *testing.T) {
 	case <-a.waitDone:
 	default:
 		t.Fatal("child was not reaped")
+	}
+}
+
+func TestProcessGroupHandleTerminatesAndReapsChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group signals differ on windows")
+	}
+	a, _, err := Factory{}.Start(context.Background(), fakeOptions(t, "ignore-close"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := a.ProcessGroupHandle()
+	if h == nil {
+		t.Fatal("missing process-group handle")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	err = h.GracefulTerminate(ctx)
+	cancel()
+	if err != nil {
+		if killErr := h.ForceKill(context.Background()); killErr != nil {
+			t.Fatal(killErr)
+		}
+	}
+	if err := h.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProcessGroupHandleReportsContainmentCleanupFailure(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	a := &Adapter{waitDone: done, shutdown: time.Millisecond, containmentErr: errors.New("contained descendants remain")}
+	if err := a.ProcessGroupHandle().Wait(context.Background()); ErrorCode(err) != CleanupFailed {
+		t.Fatalf("wait error code = %q, want %q (err=%v)", ErrorCode(err), CleanupFailed, err)
 	}
 }
 
@@ -385,5 +432,117 @@ func TestResolveApprovalPreCancelledLeavesCorrelationPending(t *testing.T) {
 	line, err := bufio.NewReader(serverRead).ReadString('\n')
 	if err != nil || !strings.Contains(line, `"decision":"cancel"`) {
 		t.Fatalf("wire retry = %q, %v", line, err)
+	}
+}
+
+func TestCredentialFreeEnvironmentHasNoProviderCredentialHome(t *testing.T) {
+	t.Setenv("CODEX_HOME", "/secret/provider-home")
+	t.Setenv("HOME", "/secret/home")
+	for _, entry := range controlledEnvironment(map[string]string{"CODEX_HOME": "/secret/override", "SOL_TOKEN": "secret"}, true, "") {
+		if strings.HasPrefix(entry, "CODEX_HOME=") || strings.HasPrefix(entry, "HOME=") || strings.HasPrefix(entry, "SOL_TOKEN=") {
+			t.Fatalf("credential-bearing environment leaked: %q", entry)
+		}
+	}
+}
+
+func TestCredentialFreeEnvironmentAllowsOnlyExplicitTransportCodexHome(t *testing.T) {
+	t.Setenv("CODEX_HOME", "/secret/provider-home")
+	t.Setenv("HOME", "/secret/home")
+	const isolated = "/tmp/shipmates-transport-auth"
+	var got map[string]string = make(map[string]string)
+	for _, entry := range controlledEnvironment(map[string]string{"CODEX_HOME": "/secret/override", "SOL_TOKEN": "secret"}, true, isolated) {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["CODEX_HOME"] != isolated {
+		t.Fatalf("CODEX_HOME = %q, want isolated transport home", got["CODEX_HOME"])
+	}
+	if _, ok := got["HOME"]; ok {
+		t.Fatal("ambient HOME leaked")
+	}
+	if _, ok := got["SOL_TOKEN"]; ok {
+		t.Fatal("provider token leaked")
+	}
+}
+
+func TestContainedExecutableResolvesNativeCodexPackage(t *testing.T) {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("native Codex containment mapping is Linux-only")
+	}
+	root := t.TempDir()
+	script := filepath.Join(root, "node_modules", "@openai", "codex", "bin", "codex.js")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	packageName, target := "codex-linux-x64", "x86_64-unknown-linux-musl"
+	if runtime.GOARCH == "arm64" {
+		packageName, target = "codex-linux-arm64", "aarch64-unknown-linux-musl"
+	}
+	native := filepath.Join(root, "node_modules", "@openai", packageName, "vendor", target, "bin", "codex")
+	if err := os.MkdirAll(filepath.Dir(native), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(native, append([]byte("\x7fELF"), make([]byte, 64)...), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := containedExecutable(script)
+	if err != nil || got != native {
+		t.Fatalf("contained executable = %q, %v; want %q", got, err, native)
+	}
+}
+
+func TestContainedRealCodexTransport(t *testing.T) {
+	if os.Getenv("SHIPMATES_REAL_CONTAINMENT_TEST") != "1" {
+		t.Skip("set SHIPMATES_REAL_CONTAINMENT_TEST=1 inside a delegated Linux scope")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	wrapper, err := exec.LookPath("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper, err = filepath.EvalSymlinks(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native, err := containedExecutable(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := exec.Command(native, "--version")
+	probe.Env = controlledEnvironment(nil, true, filepath.Join(home, ".codex"))
+	var probeStderr bytes.Buffer
+	probe.Stderr = &probeStderr
+	contained, err := StartContainedWithHelperCurrent("/usr/libexec/shipmates/shipmates-cgroup-launcher", probe, "native-probe")
+	if err != nil {
+		t.Fatalf("native containment: %v; helper stderr: %q", err, probeStderr.String())
+	}
+	_ = probe.Wait()
+	if err := contained.Close(); err != nil {
+		t.Fatalf("native containment cleanup: %v", err)
+	}
+	adapter, _, err := (Factory{}).Start(ctx, StartOptions{
+		WorkingDirectory:            t.TempDir(),
+		CredentialFree:              true,
+		TransportCodexHome:          filepath.Join(home, ".codex"),
+		RequireExecutionContainment: true,
+		ExecutionID:                 "real-codex-probe",
+		// Empty configuration must resolve to the unified installer's helper.
+		PreExecHelper: "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Close(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

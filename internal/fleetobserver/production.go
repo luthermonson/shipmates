@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/fleetcommandermailbox"
 	"github.com/luthermonson/shipmates/internal/fleetidentity"
 	"github.com/luthermonson/shipmates/internal/fleetinterrupt"
 	"github.com/luthermonson/shipmates/internal/fleetobserve"
@@ -31,6 +32,7 @@ type ProductionConfig struct {
 	InterruptSubjectAdmissionWindow                      time.Duration
 	InterruptShipAdmissionWindow                         time.Duration
 	InterruptTargetAdmissionWindow                       time.Duration
+	CommanderMailboxRoot                                 string
 }
 
 func (p *Production) Handler() http.Handler {
@@ -119,7 +121,14 @@ func OpenProduction(c ProductionConfig) (*Production, error) {
 	if err != nil {
 		return nil, err
 	}
-	t, err := fleettunnel.NewServer(fleettunnel.ServerConfig{FleetID: c.FleetID, ServiceIdentity: c.ServiceIdentity, HandshakeTTL: 30 * time.Second, LeaseDuration: time.Minute, IOTimeout: 10 * time.Second, Clock: c.TunnelClock, Random: c.Random}, r, p)
+	var commander fleettunnel.CommanderMailbox
+	if c.CommanderMailboxRoot != "" {
+		commander, err = fleetcommandermailbox.OpenDirectory(c.CommanderMailboxRoot, c.FleetID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	t, err := fleettunnel.NewServer(fleettunnel.ServerConfig{FleetID: c.FleetID, ServiceIdentity: c.ServiceIdentity, HandshakeTTL: 30 * time.Second, LeaseDuration: time.Minute, IOTimeout: 10 * time.Second, Clock: c.TunnelClock, Random: c.Random, CommanderMailbox: commander}, r, p)
 	if err != nil {
 		return nil, err
 	}

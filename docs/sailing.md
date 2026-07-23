@@ -45,11 +45,195 @@ The skipper never launches Sail from its managed Codex turn. `/sail` is a local
 TUI command dispatched by the host process, avoiding unsupported nested Codex
 sessions.
 
+## Skipper-first recovery and optional auto-captain
+
+Sail is the authority for execution. The human operator remains Captain and
+must approve the original plan before dispatch; Skipper plans, presents status,
+and returns control to the Captain. An optional auto-captain stage is an
+advisory Sol turn that helps classify a bounded blocker. Sol cannot approve or
+edit a plan, complete a task, mutate predecessor state or Beads, dispatch a
+successor, lower acceptance criteria, issue credentials, or widen scope.
+
+Enable it explicitly in `shipmates.yaml`. Sail snapshots the configured
+Skipper persona and applies the fixed `gpt-5.6-sol` model override; no `sol`
+persona is required. The
+continuation envelope is optional but recommended when unattended bounded
+recovery is wanted:
+
+```yaml
+recovery:
+  autoCaptain: true
+  continuationEnvelope:
+    enabled: true
+    maxAttempts: 2
+    maxAssessments: 1
+    expiresAt: "<future RFC3339 timestamp>"
+    allowedReasons:
+      - ordinary_failure
+      - uncertainty
+      - stale_continuity
+      - contradictory_evidence
+      - exhausted_tiers
+      - managed_environment_mismatch
+```
+
+The configuration is strict. `maxAttempts` and `maxAssessments` are each
+bounded to 1–8, the expiry must be in the future, and reason codes are
+allowlisted. `autoCaptain: true` without an envelope enables the per-blocker
+deduplication contract but does not create an unbounded retry budget. Sail
+refuses to start the stage if `sol` is not installed. Keep the expiry short and
+choose only reasons covered by the original approval.
+
+Normal task execution still consumes the approved model/effort ladder in order.
+For example, a retry-safe task configured with Luna/Terra tiers exhausts those
+ordinary retries before Sail asks Sol once about the resulting blocker. If Sol
+is also listed as a task model, that Sol crew tier runs as an ordinary task
+retry before the separate advisory stage; auto-captain is never a replacement
+task or a completion signal. A Sol advisory turn is fresh, uses the fixed
+`gpt-5.6-sol`/high configuration, receives only a bounded recovery request, and
+runs with read-only Codex sandbox mode.
+
+Recovery reason codes are stable machine values:
+`ordinary_failure`, `uncertainty`, `stale_continuity`,
+`contradictory_evidence`, `exhausted_tiers`,
+`managed_environment_mismatch`, `physical_access_unavailable`,
+`human_credential_required`, and `captain_decision_required`. The blocker
+fingerprint is derived from plan/task provenance, the task contract, reason,
+attempt/tier facts, and redacted evidence digests. Raw prompts, paths,
+credentials, private IDs, backend payloads, and failure text are not journal
+fields. The same stable fingerprint receives at most one Sol assessment until
+evidence materially changes; a dispatch crash before the assessment is durable
+may safely retry it.
+
+The recovery journal is append-only bounded JSONL under
+`.shipmates/recovery/<plan-hash-prefix>.jsonl`. Blocker, assessment,
+attestation, and accepted-action records are sequence-numbered and synced
+before acknowledgement. Malformed, duplicate, oversized, world-accessible, or
+symlinked journals fail closed. Evidence is retained as redacted source/code/
+digest references. Host or CI results must be independently verified and
+referenced by the Captain or an authorized release process; this recovery path
+does not cryptographically attest external artifacts and Sol responses never
+count as external proof.
+
+The possible outcomes have different authority implications:
+
+- `resume` or `continue`: Sail may reset the affected task to pending and
+  continue within the already approved plan and bounded envelope. Use ordinary
+  resume for a restart or safe retry; completed tasks remain complete.
+- A pre-authorized successor is an already-written, separately Captain-
+  approved plan. Run it only by naming the exact predecessor plan and state;
+  Sail validates immutable hashes, task/closure fingerprints, and completion
+  evidence before publishing successor state. Auto-captain cannot create or
+  approve this successor.
+- `amendment_required`: Sail records `needs_input`, leaves the proposal inert,
+  and returns the planning UI to Captain-Skipper chat. The Captain must review
+  and approve any amended plan before `/sail` or a successor command can run.
+- `stop`: verified physical access, human-only credential/consent, or another
+  genuinely human-only boundary remains. Sail stops with one concise question;
+  ordinary failure, uncertainty, exhausted tiers, stale continuity,
+  contradictory evidence, and recoverable environment mismatch are not
+  human-only by themselves.
+
+Safe operational examples use placeholders only:
+
+```bash
+# Inspect and validate the Captain-approved plan without dispatching.
+shipmates sail --plan .shipmates/voyage.json --dry-run
+
+# Resume persisted running work after a process restart.
+shipmates sail --plan .shipmates/voyage.json
+
+# Retry failed, blocked, or needs-input tasks only after reviewing state.
+shipmates sail --plan .shipmates/voyage.json --retry-failed
+
+# Preview, then execute, an explicitly approved successor amendment.
+shipmates sail --dry-run --plan .shipmates/successor.json \
+  --predecessor-plan .shipmates/original.json \
+  --predecessor-state .shipmates/voyages/<original-hash>.json
+shipmates sail --plan .shipmates/successor.json \
+  --predecessor-plan .shipmates/original.json \
+  --predecessor-state .shipmates/voyages/<original-hash>.json
+```
+
+Do not put credentials or raw external evidence in a plan, prompt, Bead note,
+or command argument. Use protected external stores and sanitized evidence
+references. A task retry starts from its task-scoped contract and persisted
+state; it does not delete persona memory. The Sol recovery request itself is
+always a fresh advisory turn. Existing crew continuity is otherwise governed
+by the normal managed-session configuration and stale-session checks; the
+recovery contract does not promise arbitrary thread replacement.
+
+The plan sidebar and Sail output show `AUTO-CAPTAIN STATE`, the Sol model,
+`authority: Sail, not Sol`, successor/predecessor hashes, blocker reason,
+short fingerprint, assessment count, recommendation, evidence digest, and
+whether an amendment still needs Captain approval. Beads-enabled voyages show
+opaque task Bead IDs. Sail creates and links task Beads before dispatch,
+updates lifecycle status, and preserves inherited Bead IDs in successor
+provenance; predecessor plans, states, and Beads remain read-only. On restart,
+running tasks return to pending, completed tasks are not rerun, and recovery
+journal sequence/count state is restored before a new assessment is eligible.
+
 The plan sidebar joins the approved plan with its matching persisted voyage
-state. Completed voyages mark the objective and acceptance criteria `PASS` and
-show each job as completed. Beads-enabled voyages also show each task's opaque
-Bead ID. Use Page Up/Page Down to move through long plans;
+state. Completed voyages show each job as completed, while acceptance is
+rendered only from the separate verdict described below. Beads-enabled voyages
+also show each task's opaque Bead ID. Use Page Up/Page Down to move through long plans;
 Home and End jump to the beginning and end of the sidebar.
+
+## M2 local Fleet Commander delegation
+
+M2 is the ship-local implementation of the frozen [M1 wire
+contract](contracts/fleet-commander-m1.md); it is not Fleet transport. It is
+disabled unless `recovery.commanderDelegation.enabled` is true and the local
+policy names the expected Fleet, protocol version, bounded offer lifetime, and
+permitted Commander Ed25519 public keys. Fleet enrollment, tunnel credentials,
+and a future bidirectional substream do not enable this policy.
+
+When a local integration supplies a signed `fleet.delegation-envelope.v1`, the
+processor performs this ordered lifecycle:
+
+1. Parse closed JSON, reject duplicate/trailing/unknown fields, verify the
+   configured issuer and the frozen JCS/domain-separated Ed25519 signature.
+2. Bind Fleet, ship, voyage-plan, task-contract, state, task, blocker, mode,
+   response schema, expiry, and one-assessment budget to the already validated
+   local recovery case. Any mismatch is rejected before Sol.
+3. Under an owner-only lock, append `accepted` and `assessment_started` to the
+   plan-hash journal. The expiry is checked again at this durable transition;
+   concurrent processors cannot reserve a second turn.
+4. Run one fresh pinned `gpt-5.6-sol` Skipper snapshot with an empty temporary
+   `CODEX_HOME`, no inherited credentials, a read-only/tool-less overlay, and
+   only bounded `recovery.RequestV1` JSON. Sol receives no envelope references,
+   prompts, paths, commands, or raw evidence.
+5. Sail validates the bounded `recovery.ResponseV1` and exact blocker
+   fingerprint. A valid advisory is recorded as
+   `locally_accepted_under_existing_policy`; it is accepted advice, never
+   executed work or Fleet authority.
+6. Append one redacted terminal decision provenance record. It contains bounded
+   digests, enums, policy/model/Skipper provenance, and a provenance digest;
+   never raw Sol output, credentials, private IDs, paths, or artifact payloads.
+
+The journal is `.shipmates/delegations/<full-voyage-plan-sha256>.jsonl`, with a
+matching private lock file. It is append-only, capped at 4 MiB/256 records,
+owner-only, no-follow, and isolated from `.shipmates/recovery/`. A malformed,
+oversized, duplicate, symlinked, or permission-widened journal fails closed.
+After restart, `assessment_started` is indeterminate and is never rerun;
+identical completed delivery replays the retained redacted outcome, while the
+same delegation ID with a different digest is an `id_conflict`. Revocation or
+expiry before assessment yields no Sol turn; revocation after start is terminal
+and non-authorizing.
+
+There is intentionally no public M2 command or diagnostic endpoint. Operators
+diagnose through normal Sail output and the protected journal path; bounded
+codes include `opt_in_disabled`, `provenance_mismatch`, `expired`,
+`issuer_revoked`, `revoked`, `response_invalid`, `restart_after_assessment`,
+and `id_conflict`. To disable or roll back M2, set `enabled: false`, stop
+starting new local delegation processing, and preserve the journal for
+investigation. Existing records do not authorize work after disablement.
+
+M2 does not add Fleet transport, a listener, a CLI/API, remote start or
+approval, planning, answers, steer/interrupt, Beads/voyage mutation,
+derivative activation, shell/terminal, file or artifact transfer, web UI, or
+Playwright history. M3 may add the separately reviewed transport and mailbox
+composition; it must retain M1 schemas and M2's local validation boundary.
 
 ## Beads integration
 
@@ -171,6 +355,21 @@ symlink, or ambiguous path fails closed. Use `--dry-run` with the same flags to
 inspect inheritance without publishing or dispatching.
 
 ## Display
+
+### Acceptance verdicts
+
+Task completion is not voyage acceptance. A plan may designate one
+`acceptance_gate_task`; only that task may emit the exact closed
+`SHIPMATES_ACCEPTANCE_V1: {"verdict":"pass"|"no_go","evidence":[...]}`
+marker. The verdict is persisted separately from task evidence and Beads.
+Malformed, conflicting, unsupported, or unauthorized markers fail closed.
+
+Voyages written before the verdict field existed remain readable. A completed
+legacy voyage, or a verdict-aware voyage with `unset`, displays acceptance
+unknown; it is never rendered as PASS. `no_go` displays completed work with
+acceptance failed, while only an explicit valid `pass` verdict displays
+acceptance criteria passed. The verdict timestamp and bounded evidence
+references are append-only state provenance and do not alter task lineage.
 
 Interactive terminals receive stable persona colors, task-state marks, and
 bounded final summaries. Color is presentation only: logs and

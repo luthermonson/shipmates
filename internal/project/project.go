@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/luthermonson/shipmates/internal/recovery"
 	"gopkg.in/yaml.v3"
 )
 
@@ -106,6 +107,23 @@ func PidFile() string          { return filepath.Join(SessionsDir(), "server.pid
 func LogFile() string          { return filepath.Join(SessionsDir(), "server.log") }
 func ControlTokenFile() string { return filepath.Join(SessionsDir(), "server.control-token") }
 func ServerRecordFile() string { return filepath.Join(SessionsDir(), "server.json") }
+
+// DelegationJournalPathAt returns the isolated M1 journal path for one exact
+// voyage plan hash. It performs no filesystem writes and rejects path aliases
+// or non-digest plan identifiers before constructing the path.
+func DelegationJournalPathAt(root, planHash string) (string, error) {
+	if len(planHash) != 64 {
+		return "", errors.New("invalid delegation plan hash")
+	}
+	if _, err := hex.DecodeString(planHash); err != nil {
+		return "", errors.New("invalid delegation plan hash")
+	}
+	canonical, err := CanonicalRoot(root)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(canonical, Dir, "delegations", planHash+".jsonl"), nil
+}
 
 // CanonicalRoot returns the single filesystem identity used for project-scoped
 // coordination metadata and request authentication.
@@ -369,6 +387,7 @@ type Config struct {
 	RoutingOptions RoutingOptions          `yaml:"routingOptions"`
 	RoutingOnBoot  bool                    `yaml:"routingOnBoot"`
 	Fleet          FleetConfig             `yaml:"fleet"`
+	Recovery       recovery.Config         `yaml:"recovery"`
 	Crew           map[string]CrewOverride `yaml:"crew"`
 }
 
@@ -447,6 +466,9 @@ func LoadConfigAt(root string) (*Config, error) {
 	dec := yaml.NewDecoder(strings.NewReader(string(b)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := c.Recovery.Validate(); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &c, nil

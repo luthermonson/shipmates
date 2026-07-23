@@ -3,6 +3,15 @@
 Shipmates has one project configuration file and a deliberately small set of
 managed state directories. Paths are resolved from the canonical project root.
 
+## Runtime assets
+
+The optional system runtime is installed offline with `sudo shipmates install`.
+Its fixed manifest, platform fallback, immutable layout, dry-run/report/
+uninstall behavior, and retained state are documented in
+[Installer and platform contract](installer-platforms.md). This is separate
+from project configuration: it does not read `shipmates.yaml` for credentials,
+does not contact Fleet, and does not start M3 qualification.
+
 ## `shipmates.yaml`
 
 A typical configuration:
@@ -59,6 +68,57 @@ backend or arbitrary process command.
 `crew`
 : Map of installed persona names to optional Codex launch overrides. Supported
   child fields are `model` and `effort`.
+
+`recovery`
+: Optional bounded Sail recovery configuration. Set `autoCaptain: true` only
+  when an advisory Sol assessment is wanted. Sail uses the configured
+  installed Skipper persona with a fixed model override; no `sol` persona is
+  required. `continuationEnvelope` can bound attempts and Sol assessments,
+  require a future expiry, and allowlist the stable blocker reason codes. Sol
+  remains advisory; it never approves plans, changes criteria, or mutates
+  voyage/Beads state. See [Skipper-first recovery](sailing.md#skipper-first-recovery-and-optional-auto-captain).
+
+`derivativeEnvelope`
+: Optional Captain-approved ceiling for machine-approved recovery derivatives.
+  Sail accepts only finite task mechanics and frozen successor templates within
+  this envelope; publication is atomic and material or human-only changes still
+  return to the Captain.
+
+`recovery.commanderDelegation`
+: Optional, disabled-by-default M1 ship-local policy. When enabled, it names
+  one exact Fleet, protocol version `1`, a maximum offer lifetime of at most ten
+  minutes, and permitted Commander Ed25519 issuer IDs/public keys. It permits
+  only one local read-only recovery assessment; it does not enable Fleet
+  transport, remote work, plan changes, Beads operations, or existing recovery
+  journal writes. M1 state is isolated under
+  `.shipmates/delegations/<voyage-plan-hash>.jsonl` and is never stored in this
+  committed configuration file beyond the local policy settings.
+
+The M2 local policy is opt-in independently of Fleet enrollment. A complete
+example uses placeholders, not a private key:
+
+```yaml
+recovery:
+  commanderDelegation:
+    enabled: true
+    fleetId: "<fleet-id>"
+    protocolVersion: 1
+    maxOfferSeconds: 600
+    permittedIssuers:
+      - keyId: "<commander-key-id>"
+        publicKey: "<32-byte-ed25519-public-key-base64url-without-padding>"
+        revoked: false
+```
+
+Keep this file owner-readable and protect the project directory. `enabled:
+false` (or an absent block) is the rollback switch. Public keys are trust
+anchors, not credentials; rotate by adding the replacement issuer and marking
+the old issuer `revoked: true`, then remove the old key after retained journal
+records are no longer needed. Configuration validation rejects unknown fields,
+invalid key lengths, duplicate key IDs, a non-`1` protocol, lifetimes above ten
+minutes, and more than 32 issuers. There is no M2 CLI or network listener:
+the local Sail integration supplies the signed envelope and exact approved
+voyage/task/recovery case to the internal processor.
 
 `routing`
 : Name of the active embedded routing convention. `github` composes the shipped

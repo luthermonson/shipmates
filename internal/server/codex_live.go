@@ -205,6 +205,14 @@ func (s *Server) handleCodexAttach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	attached, err := s.liveSessions.AttachController(persona, req.SessionID, req.After)
+	if err != nil && livesession.ErrorCode(err) == livesession.AlreadyOpen {
+		// The first attach may have raced the lease deadline. Recheck expiry
+		// once under the Manager clock; a live controller remains authoritative
+		// and no retry is attempted.
+		if reclaimed, reclaimErr := s.liveSessions.ReclaimExpiredController(persona, req.SessionID); reclaimErr == nil && reclaimed {
+			attached, err = s.liveSessions.AttachController(persona, req.SessionID, req.After)
+		}
+	}
 	if err != nil {
 		writeLiveError(w, err)
 		return

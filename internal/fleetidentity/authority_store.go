@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -46,14 +47,23 @@ type durableOperator struct {
 	Issued, Expires, RevokeAt    time.Time
 	PreviousID                   string
 }
+type durableCommander struct {
+	Credential                durableCredential `json:"credential"`
+	Subject, FleetID          string
+	Generation                uint64
+	Ships                     []string
+	Issued, Expires, RevokeAt time.Time
+	PreviousID                string
+}
 type durableAuthority struct {
-	Schema    int               `json:"schema"`
-	FleetID   string            `json:"fleet_id"`
-	Artifacts []durableArtifact `json:"artifacts"`
-	Ships     []durableShip     `json:"ships"`
-	Observers []durableObserver `json:"observers"`
-	Operators []durableOperator `json:"operators"`
-	TxnOrder  []string          `json:"txn_order"`
+	Schema     int                `json:"schema"`
+	FleetID    string             `json:"fleet_id"`
+	Artifacts  []durableArtifact  `json:"artifacts"`
+	Ships      []durableShip      `json:"ships"`
+	Observers  []durableObserver  `json:"observers"`
+	Operators  []durableOperator  `json:"operators"`
+	Commanders []durableCommander `json:"commanders,omitempty"`
+	TxnOrder   []string           `json:"txn_order"`
 }
 
 func dc(c credential) durableCredential {
@@ -91,16 +101,25 @@ func (r *Registry) durableLocked() durableAuthority {
 		x := operatorRecord(o)
 		d.Operators = append(d.Operators, durableOperator{dc(o.credential), x.SubjectID, x.FleetID, x.Capability, x.CredentialGeneration, x.ShipIDs, x.IssuedAt, x.ExpiresAt, o.revokeAt, o.previousID})
 	}
+	for _, o := range r.commanders {
+		ids := make([]string, 0, len(o.ships))
+		for id := range o.ships {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		d.Commanders = append(d.Commanders, durableCommander{dc(o.credential), o.subject, o.fleetID, o.generation, ids, o.issued, o.expires, o.revokeAt, o.previousID})
+	}
 	return d
 }
 func (r *Registry) restoreLocked(d durableAuthority) error {
-	if d.Schema != authoritySchema || d.FleetID != r.fleetID || len(d.Artifacts) > maxArtifacts || len(d.Ships) > maxShips || len(d.Observers) > maxObservers || len(d.Operators) > maxOperators || len(d.TxnOrder) > maxTxnResults {
+	if d.Schema != authoritySchema || d.FleetID != r.fleetID || len(d.Artifacts) > maxArtifacts || len(d.Ships) > maxShips || len(d.Observers) > maxObservers || len(d.Operators) > maxOperators || len(d.Commanders) > maxOperators || len(d.TxnOrder) > maxTxnResults {
 		return storageError()
 	}
 	r.artifacts = map[string]*artifact{}
 	r.ships = map[string]*ship{}
 	r.observers = map[string]*observer{}
 	r.operators = map[string]*operatorCredential{}
+	r.commanders = map[string]*commanderCredential{}
 	r.txnOrder = append([]string(nil), d.TxnOrder...)
 	for _, x := range d.Artifacts {
 		b, e := base64.RawURLEncoding.DecodeString(x.Verifier)
@@ -159,6 +178,20 @@ func (r *Registry) restoreLocked(d durableAuthority) error {
 			return storageError()
 		}
 		r.operators[c.id] = &operatorCredential{credential: c, subject: x.Subject, fleetID: x.FleetID, capability: x.Capability, generation: x.Generation, ships: ships, issued: x.Issued, expires: x.Expires, revokeAt: x.RevokeAt, previousID: x.PreviousID}
+	}
+	for _, x := range d.Commanders {
+		c, e := credentialFrom(x.Credential)
+		if e != nil || !opaqueID.MatchString(x.Subject) || x.FleetID != r.fleetID || x.Generation == 0 || len(x.Ships) == 0 || !x.Issued.Before(x.Expires) || r.commanders[c.id] != nil {
+			return storageError()
+		}
+		ships := map[string]struct{}{}
+		for _, id := range x.Ships {
+			if !opaqueID.MatchString(id) {
+				return storageError()
+			}
+			ships[id] = struct{}{}
+		}
+		r.commanders[c.id] = &commanderCredential{credential: c, subject: x.Subject, fleetID: x.FleetID, generation: x.Generation, ships: ships, issued: x.Issued, expires: x.Expires, revokeAt: x.RevokeAt, previousID: x.PreviousID}
 	}
 	return nil
 }

@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/luthermonson/shipmates/internal/codexapp"
+	"github.com/luthermonson/shipmates/internal/dashboard"
 	"github.com/luthermonson/shipmates/internal/livesession"
 	"github.com/luthermonson/shipmates/internal/project"
+	"github.com/luthermonson/shipmates/internal/recovery"
 	"github.com/luthermonson/shipmates/internal/voyage"
 	"github.com/urfave/cli/v3"
 )
@@ -73,6 +75,24 @@ func TestSailHeaderAdvertisesCancellationControl(t *testing.T) {
 	got := out.String()
 	if !strings.Contains(got, "CONTROL") || !strings.Contains(got, "Ctrl+C") || !strings.Contains(got, "preserves resumable state") {
 		t.Fatalf("header controls = %q", got)
+	}
+}
+
+func TestSailRecoveryDisplayIsBoundedPlainAndInert(t *testing.T) {
+	var out bytes.Buffer
+	display := newSailDisplay(&out, false)
+	display.RecoveryConfig(true)
+	display.Lineage(&voyage.State{Lineage: &voyage.Lineage{PredecessorPlanHash: strings.Repeat("b", 64)}}, strings.Repeat("c", 64))
+	task := voyage.Task{ID: "recover", Persona: "backend", Summary: "recover safely"}
+	display.Recovery(task, 1, recovery.ResponseV1{Decision: recovery.DecisionAmendmentRequired, Reason: recovery.ReasonCaptainDecisionRequired, Fingerprint: strings.Repeat("a", 64)}, "captain_decision_required", "sensitive raw detail must not be rendered", "rejected: amendment inert; Captain approval required")
+	got := out.String()
+	for _, want := range []string{"AUTO-CAPTAIN STATE  enabled", "Sol=gpt-5.6-sol", "derivatives=bounded-envelope-only", "successor=cccccccccccc", "predecessor=bbbbbbbbbbbb", "model=gpt-5.6-sol", "enabled=yes", "blocker=captain_decision_required", "attempts=2", "fingerprint=aaaaaaaaaaaa", "recommendation=amendment_required", "rejected: amendment inert", "safe-options=retry/resume-or-stop", "approval=required for amendment"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("recovery display missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "sensitive raw detail") || strings.Contains(got, "\x1b[") {
+		t.Fatalf("recovery display leaked detail/color: %q", got)
 	}
 }
 
@@ -244,10 +264,246 @@ func TestVoyageSidebarShowsCompletedObjectiveAndAcceptance(t *testing.T) {
 	for _, section := range sidebar.Sections {
 		text += " " + strings.Join(section.Items, " ")
 	}
-	for _, want := range []string{"COMPLETED", "PASS - Deliver the report", "PASS - Report is fact-checked", "[completed] work"} {
+	for _, want := range []string{"COMPLETED - acceptance unknown", "[completed] work"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("sidebar missing %q: %s", want, text)
 		}
+	}
+	for _, forbidden := range []string{"PASS - Deliver the report", "PASS - Report is fact-checked"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("legacy sidebar unexpectedly contains %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestVoyageSidebarShowsExplicitAcceptancePass(t *testing.T) {
+	plan := voyage.Plan{Version: 1, Title: "pass", Objective: "Deliver the report", AcceptanceCriteria: []string{"Report is fact-checked"}, AcceptanceGateTask: "gate", Approved: true, Tasks: []voyage.Task{{ID: "gate", Persona: "backend", Summary: "gate", Prompt: "gate"}}}
+	root := sailTestProject(t, plan)
+	t.Chdir(root)
+	canonical, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := voyage.Hash(canonical)
+	state := voyage.NewState(&plan, hash)
+	entry := state.Tasks["gate"]
+	entry.Status = voyage.Completed
+	state.Tasks["gate"] = entry
+	state.Acceptance = &voyage.AcceptanceVerdict{Status: voyage.AcceptancePass, RecordedAt: time.Now().UTC(), EvidenceRefs: []string{"evidence:gate"}}
+	if err := voyage.SaveState(filepath.Join(root, ".shipmates", "voyages", hash[:16]+".json"), state); err != nil {
+		t.Fatal(err)
+	}
+	sidebar := voyageSidebar(filepath.Join(root, ".shipmates", "voyage.json"))
+	if !strings.Contains(sidebar.Status, "COMPLETED - acceptance criteria passed") {
+		t.Fatalf("status = %q", sidebar.Status)
+	}
+	var sectionText []string
+	for _, section := range sidebar.Sections {
+		sectionText = append(sectionText, section.Items...)
+	}
+	text := strings.Join(sectionText, " ")
+	if !strings.Contains(text, "PASS - Deliver the report") || !strings.Contains(text, "PASS - Report is fact-checked") {
+		t.Fatalf("pass projection missing: %s", text)
+	}
+}
+
+func TestVoyageSidebarCompletedM3NoGoFixture(t *testing.T) {
+	plan := voyage.Plan{Version: 1, Title: "M3 completion", Objective: "Prove one bounded Commander lifecycle", AcceptanceCriteria: []string{"M7 remains healthy", "Commander lifecycle is verified"}, AcceptanceGateTask: "gate", Approved: true, Tasks: []voyage.Task{{ID: "gate", Persona: "backend", Summary: "record final M3 verdict", Prompt: "record the completed M3 NO-GO report"}}}
+	root := sailTestProject(t, plan)
+	t.Chdir(root)
+	canonical, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := voyage.Hash(canonical)
+	state := voyage.NewState(&plan, hash)
+	entry := state.Tasks["gate"]
+	entry.Status = voyage.Completed
+	state.Tasks["gate"] = entry
+	state.Acceptance = &voyage.AcceptanceVerdict{Status: voyage.AcceptanceNoGo, RecordedAt: time.Now().UTC(), EvidenceRefs: []string{"report:fleet-beta/m3-no-go"}}
+	if err := voyage.SaveState(filepath.Join(root, ".shipmates", "voyages", hash[:16]+".json"), state); err != nil {
+		t.Fatal(err)
+	}
+	sidebar := voyageSidebar(filepath.Join(root, ".shipmates", "voyage.json"))
+	if !strings.Contains(sidebar.Status, "COMPLETED - acceptance failed") {
+		t.Fatalf("status = %q", sidebar.Status)
+	}
+	for _, section := range sidebar.Sections {
+		for _, item := range section.Items {
+			if strings.Contains(item, "PASS -") {
+				t.Fatalf("no-go sidebar passed: %q", item)
+			}
+		}
+	}
+}
+
+func TestPlanTUIAcceptanceVerdictIntegrationIsTruthful(t *testing.T) {
+	tests := []struct {
+		name    string
+		verdict *voyage.AcceptanceVerdict
+		legacy  bool
+		want    []string
+		forbid  []string
+	}{
+		{name: "no-go", verdict: &voyage.AcceptanceVerdict{Status: voyage.AcceptanceNoGo, RecordedAt: time.Unix(10, 0).UTC(), EvidenceRefs: []string{"host:[31mNO-GO[0m"}}, want: []string{"NO-GO -", "COMPLETED - acceptance failed"}, forbid: []string{"COMPLETED - acceptance criteria passed", "PASS -"}},
+		{name: "pass", verdict: &voyage.AcceptanceVerdict{Status: voyage.AcceptancePass, RecordedAt: time.Unix(10, 0).UTC(), EvidenceRefs: []string{"report:pass"}}, want: []string{"PASS -", "COMPLETED - acceptance criteria passed"}},
+		{name: "unset", verdict: nil, want: []string{"COMPLETED - acceptance unknown"}, forbid: []string{"PASS -", "NO-GO -"}},
+		{name: "legacy", legacy: true, want: []string{"COMPLETED - acceptance unknown"}, forbid: []string{"PASS -", "NO-GO -"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := voyage.Plan{Version: 1, Title: "acceptance fixture", Objective: "Verify bounded completion", AcceptanceCriteria: []string{"Criteria " + strings.Repeat("x", 180)}, AcceptanceGateTask: "gate", Approved: true, Tasks: []voyage.Task{{ID: "gate", Persona: "backend", Summary: "final gate", Prompt: "record verdict"}}}
+			root := sailTestProject(t, plan)
+			t.Chdir(root)
+			canonical, err := json.Marshal(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hash := voyage.Hash(canonical)
+			state := voyage.NewState(&plan, hash)
+			entry := state.Tasks["gate"]
+			entry.Status = voyage.Completed
+			state.Tasks["gate"] = entry
+			if tt.verdict != nil {
+				state.Acceptance = tt.verdict
+			}
+			statePath := filepath.Join(root, ".shipmates", "voyages", hash[:16]+".json")
+			if tt.legacy {
+				if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				legacy := voyage.State{Version: 1, PlanHash: hash, Title: plan.Title, StartedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(2, 0).UTC(), Tasks: state.Tasks}
+				if err := os.WriteFile(statePath, mustJSON(legacy), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := voyage.SaveState(statePath, state); err != nil {
+				t.Fatal(err)
+			}
+			sidebar := voyageSidebar(filepath.Join(root, ".shipmates", "voyage.json"))
+			model := &dashboard.Model{Persona: "skipper", State: livesession.Idle, Controller: true, Connected: true, Sidebar: sidebar}
+			wide := strings.Join(dashboard.Render(model, dashboard.Size{Width: 140, Height: 80}).Lines, "\n")
+			for _, want := range tt.want {
+				if !strings.Contains(wide, want) {
+					t.Fatalf("wide screen missing %q:\n%s", want, wide)
+				}
+			}
+			for _, forbidden := range tt.forbid {
+				if strings.Contains(wide, forbidden) {
+					t.Fatalf("wide screen contains contradictory %q:\n%s", forbidden, wide)
+				}
+			}
+			if strings.Contains(wide, "\x1b") {
+				t.Fatal("semantic plain renderer emitted ANSI")
+			}
+			for _, line := range strings.Split(wide, "\n") {
+				if len([]rune(line)) > 140 {
+					t.Fatalf("wide line exceeds bound: %q", line)
+				}
+			}
+			narrow := strings.Join(dashboard.Render(model, dashboard.Size{Width: 56, Height: 8}).Lines, "\n")
+			if strings.Contains(narrow, "COMPLETED - acceptance criteria passed") || strings.Contains(narrow, "PASS -") {
+				t.Fatalf("narrow fallback surfaced success: %s", narrow)
+			}
+			model.SidebarScroll = 1 << 30
+			scrolled := strings.Join(dashboard.Render(model, dashboard.Size{Width: 140, Height: 12}).Lines, "\n")
+			for _, line := range strings.Split(scrolled, "\n") {
+				if len([]rune(line)) > 140 {
+					t.Fatalf("scrolled line exceeds bound: %q", line)
+				}
+			}
+		})
+	}
+}
+
+func TestPlanRuntimeReloadRefreshesPersistedNoGoSidebar(t *testing.T) {
+	plan := voyage.Plan{Version: 1, Title: "reload", Objective: "Reload truthfully", AcceptanceCriteria: []string{"Hostile evidence \u001b[31mnever executes\u001b[0m"}, AcceptanceGateTask: "gate", Approved: true, Tasks: []voyage.Task{{ID: "gate", Persona: "backend", Summary: "gate", Prompt: "gate"}}}
+	root := sailTestProject(t, plan)
+	t.Chdir(root)
+	planPath := filepath.Join(root, ".shipmates", "voyage.json")
+	writeState := func(status voyage.AcceptanceStatus) {
+		_, canonical, err := voyage.Load(planPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := voyage.Hash(canonical)
+		state := voyage.NewState(&plan, hash)
+		entry := state.Tasks["gate"]
+		entry.Status = voyage.Completed
+		state.Tasks["gate"] = entry
+		if status != voyage.AcceptanceUnset {
+			state.Acceptance = &voyage.AcceptanceVerdict{Status: status, RecordedAt: time.Unix(5, 0).UTC(), EvidenceRefs: []string{"reload:bounded"}}
+		}
+		if err := voyage.SaveState(filepath.Join(root, ".shipmates", "voyages", hash[:16]+".json"), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeState(voyage.AcceptancePass)
+	model := &dashboard.Model{Persona: "skipper", State: livesession.Idle, Controller: true, Connected: true}
+	refreshPlanSidebar(model, planPath)
+	first := strings.Join(dashboard.Render(model, dashboard.Size{Width: 140, Height: 40}).Lines, "\n")
+	if !strings.Contains(first, "acceptance criteria passed") {
+		t.Fatalf("initial reload missing pass: %s", first)
+	}
+	writeState(voyage.AcceptanceNoGo)
+	refreshPlanSidebar(model, planPath)
+	reloaded := strings.Join(dashboard.Render(model, dashboard.Size{Width: 140, Height: 40}).Lines, "\n")
+	if !strings.Contains(reloaded, "NO-GO -") || !strings.Contains(reloaded, "acceptance failed") || strings.Contains(reloaded, "acceptance criteria passed") || strings.Contains(reloaded, "PASS -") {
+		t.Fatalf("reloaded no-go screen is stale or contradictory: %s", reloaded)
+	}
+	refreshPlanSidebar(model, planPath)
+	if got := strings.Join(dashboard.Render(model, dashboard.Size{Width: 56, Height: 8}).Lines, "\n"); strings.Contains(got, "acceptance criteria passed") || strings.Contains(got, "PASS -") {
+		t.Fatalf("narrow reload surfaced stale success: %s", got)
+	}
+}
+
+func TestPlanRuntimeRejectsMismatchedOrMalformedAcceptanceAsUnknown(t *testing.T) {
+	plan := voyage.Plan{Version: 1, Title: "binding", Objective: "Bounded objective", AcceptanceCriteria: []string{"Bounded criterion"}, AcceptanceGateTask: "gate", Approved: true, Tasks: []voyage.Task{{ID: "gate", Persona: "backend", Summary: "gate", Prompt: "gate"}}}
+	root := sailTestProject(t, plan)
+	t.Chdir(root)
+	planPath := filepath.Join(root, ".shipmates", "voyage.json")
+	loadedPlan, planBytes, err := voyage.Load(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := voyage.Hash(planBytes)
+	state := voyage.NewState(loadedPlan, hash)
+	entry := state.Tasks["gate"]
+	entry.Status = voyage.Completed
+	state.Tasks["gate"] = entry
+	state.Acceptance = &voyage.AcceptanceVerdict{Status: voyage.AcceptancePass, RecordedAt: time.Unix(8, 0).UTC(), EvidenceRefs: []string{"binding:pass"}}
+	statePath := filepath.Join(root, ".shipmates", "voyages", hash[:16]+".json")
+	if err := voyage.SaveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	model := &dashboard.Model{Persona: "skipper", State: livesession.Idle, Controller: true, Connected: true}
+	refreshPlanSidebar(model, planPath)
+	pass := strings.Join(dashboard.Render(model, dashboard.Size{Width: 140, Height: 30}).Lines, "\n")
+	if !strings.Contains(pass, "acceptance criteria passed") {
+		t.Fatalf("valid pass missing: %s", pass)
+	}
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badBinding := bytes.Replace(raw, []byte(state.GlobalFingerprint), []byte(strings.Repeat("f", 64)), 1)
+	if bytes.Equal(raw, badBinding) {
+		t.Fatal("test did not change binding")
+	}
+	if err := os.WriteFile(statePath, badBinding, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refreshPlanSidebar(model, planPath)
+	mismatch := strings.Join(dashboard.Render(model, dashboard.Size{Width: 140, Height: 30}).Lines, "\n")
+	if !strings.Contains(mismatch, "acceptance unknown") || strings.Contains(mismatch, "PASS -") || strings.Contains(mismatch, "acceptance criteria passed") {
+		t.Fatalf("mismatched binding was not unknown: %s", mismatch)
+	}
+	if err := os.WriteFile(statePath, []byte("{malformed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refreshPlanSidebar(model, planPath)
+	malformed := strings.Join(dashboard.Render(model, dashboard.Size{Width: 140, Height: 30}).Lines, "\n")
+	if !strings.Contains(malformed, "acceptance unknown") || strings.Contains(malformed, "PASS -") {
+		t.Fatalf("malformed state was not unknown: %s", malformed)
 	}
 }
 

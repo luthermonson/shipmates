@@ -13,6 +13,27 @@ Delegation writes normalized progress to stderr and the final persona response
 to stdout. Shipmates invokes Codex directly with argument arrays; persona input
 is never evaluated by a shell.
 
+## Runtime installation
+
+### `sudo shipmates install [--dry-run] [--json] [--uninstall] [--profile ubuntu-rojo-localhost]`
+
+Installs the offline, embedded, manifest-verified Shipmates runtime assets at
+fixed system paths. The command requires root and accepts no positional
+arguments or destination/source/service/credential overrides.
+
+`--dry-run` reports platform composition without changing files. `--json`
+prints one bounded `shipmates.install.report.v1` report. `--uninstall` requires
+a proven inactive service state, refuses unknown/active state without stopping
+anything, removes only matching Shipmates-owned release/current assets, and
+retains both recovery journals, credentials, authority, and state. Drifted
+objects are reported as incomplete. `--profile ubuntu-rojo-localhost` is a
+typed optional hardened-layout plan; it never provisions secrets, starts a
+unit, contacts Fleet, or runs qualification.
+
+Installation is idempotent for the verified release and refuses drift,
+symlinks, unsafe parents, active-unit conflicts, and partial asset changes.
+See [Installer and platform contract](installer-platforms.md).
+
 ## Project lifecycle
 
 ### `shipmates init [--crew <names>]`
@@ -111,6 +132,9 @@ displays the order, `--max-concurrent` bounds parallel crew turns,
 Codex. Exact command arguments may contain sensitive values, so verbose mode is
 explicit. `--no-color` disables persona colors. State persists beneath
 `.shipmates/voyages/`. See [Sailing projects](sailing.md).
+The Skipper-first recovery contract, optional `recovery.autoCaptain` stage,
+lineage flags, reason codes, and restart semantics are documented in
+[Sailing projects](sailing.md#skipper-first-recovery-and-optional-auto-captain).
 
 ### `shipmates plan [--fresh] [--plain]`
 

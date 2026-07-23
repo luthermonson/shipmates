@@ -1,0 +1,36 @@
+{
+  "schema":"fleet.commander-m1.vectors.v1",
+  "canonicalization":"RFC 8785 JCS; reject duplicate keys before canonicalization; signed fields exclude signature",
+  "trusted_issuer":{"key_id":"cmdkey_0123456789ab","ed25519_public_key_base64url":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo","local_policy_version":1},
+  "positive":[
+    {"name":"valid-offer-and-one-assessment","fixture":"valid-offer.json","expect":{"envelope":"accept","envelope_digest":"838796163412b44d5a3822edf117c20edcca04eedd9d6dd8b97a5aa9bcb6cd93","receipt":"accepted","sol_turns":1,"decision":"advised"}},
+    {"name":"identical-reconnect-replay","fixture":"valid-offer.json","precondition":"accepted_then_reconnect","expect":{"receipt":"duplicate","sol_turns":0,"replay":"byte_identical"}},
+    {"name":"valid-local-advisory-is-not-execution","fixture":"valid-offer.json","precondition":"sol_returns_resume","expect":{"decision":"advised","sail_state":"locally_accepted_under_existing_policy","task_mutations":0,"bead_mutations":0}},
+    {"name":"two-ship-isolation","fixture":"valid-offer.json","precondition":"same_offer_presented_to_distinct_configured_ship","expect":{"ship_a":"accepted","ship_b":"provenance_mismatch","ship_a_sol_turns":1,"ship_b_sol_turns":0}}
+  ],
+  "negative":[
+    {"name":"duplicate-json-key","mutation":"duplicate issuer_key_id","expect":{"receipt":"rejected","reason":"invalid","sol_turns":0}},
+    {"name":"signature-over-different-jcs","mutation":"change task_id after signing","expect":{"receipt":"rejected","reason":"invalid","sol_turns":0}},
+    {"name":"wrong-audience","mutation":"replace ship_id","expect":{"receipt":"rejected","reason":"provenance_mismatch","sol_turns":0}},
+    {"name":"expired","mutation":"expires_at before local clock","expect":{"receipt":"expired","reason":"expired","sol_turns":0}},
+    {"name":"different-digest-same-id","mutation":"reuse delegation_id with different valid envelope","expect":{"receipt":"rejected","reason":"id_conflict","sol_turns":0}},
+    {"name":"unmatched-local-provenance","mutation":"replace blocker_fingerprint","expect":{"receipt":"rejected","reason":"provenance_mismatch","sol_turns":0}},
+    {"name":"forbidden-prompt-field","mutation":"add prompt","expect":{"receipt":"rejected","reason":"invalid","sol_turns":0}},
+    {"name":"forbidden-wrapper-command-field","mutation":"add body.command","expect":{"receipt":"rejected","reason":"invalid","sol_turns":0}},
+    {"name":"mismatched-result-reason-code","mutation":"receipt result accepted with reason_code invalid","expect":{"receipt":"rejected","reason":"invalid","sol_turns":0}},
+    {"name":"privacy-canary-in-opaque-reference","mutation":"replace reference digest with a canary-shaped hex value","expect":{"sol_request_contains_reference":false,"reference_dereferences":0,"decision_contains_reference":false,"sol_turns":1}},
+    {"name":"revoked-before-start","precondition":"accept_then_revoke_issuer","expect":{"decision":"revoked","sol_turns":0}},
+    {"name":"restart-after-start","precondition":"persist_assessment_started_then_restart","expect":{"decision":"indeterminate","reason":"restart_after_assessment","sol_turns":0}},
+    {"name":"backpressure","precondition":"16_live_unacked_offers","expect":{"receipt":"rejected","reason":"backpressure","sol_turns":0}},
+    {"name":"expiry-after-accept-before-start","precondition":"accepted_then_clock_reaches_envelope_expiry_before_assessment_started","expect":{"decision":"expired","sol_turns":0}},
+    {"name":"opaque-reference-is-never-sol-input","fixture":"valid-offer.json","precondition":"reference_digest_is_present","expect":{"sol_request_contains_reference":false,"reference_dereferences":0,"tool_selections":0}},
+    {"name":"offline-no-authority","precondition":"fleet_unreachable_before_offer_delivery","expect":{"receipt":"not_sent","local_assessment":"not_started","sol_turns":0,"reconnect_replay":"required"}},
+    {"name":"supersession-is-not-an-m1-operation","mutation":"add supersedes_delegation_id or cancel operation","expect":{"receipt":"rejected","reason":"invalid","sol_turns":0}},
+    {"name":"downgrade-capability","precondition":"peer_advertises_m7_only_or_wrong_m1_version","expect":{"m1_stream":"refused","m7_observation":"unchanged","sol_turns":0}},
+    {"name":"unknown-message-type","mutation":"body.type=delegation.answer.v1","expect":{"receipt":"rejected","reason":"invalid","sol_turns":0}},
+    {"name":"unknown-schema-version","mutation":"schema=fleet.commander-message.v2","expect":{"receipt":"rejected","reason":"invalid","sol_turns":0}},
+    {"name":"oversized-envelope-or-message","mutation":"add payload beyond the schema byte bound","expect":{"receipt":"rejected","reason":"invalid","sol_turns":0}},
+    {"name":"duplicate-assessment-is-atomic","precondition":"two concurrent deliveries of one accepted delegation","expect":{"accepted_receipts":1,"sol_turns":1,"final_decisions":1,"second":"duplicate-or-replay"}},
+    {"name":"reconnect-generation-binding","precondition":"reconnect_with_new_connection_generation_and_replayed_offer","expect":{"receipt":"duplicate","sol_turns":0,"application_idempotency":"preserved","sequence_space":"new-generation"}}
+  ]
+}

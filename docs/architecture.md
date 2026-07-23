@@ -127,6 +127,18 @@ Remote operations apply only to a turn that already exists. Fleet has no
 generic command proxy and no authority to start work, approve requests, mutate
 a graph, transfer files, or control a terminal.
 
+### M2 local Commander delegation seam
+
+The M2 seam sits beside, not inside, the Fleet transport plane. A local
+processor consumes one Commander-signed M1 envelope supplied by a future
+composition layer, validates it against the exact approved local recovery
+snapshot, reserves one assessment, calls a fresh read-only/tool-less Sol
+adviser, lets Sail validate the response, and appends redacted provenance to
+`.shipmates/delegations/<voyage-plan-sha256>.jsonl`. Its only state-changing
+entry point is internal; there is no M2 listener, route, CLI registration,
+outbound connection, Fleet credential use, work executor, Beads writer, or
+voyage mutator. M3 owns the separately authorized transport composition.
+
 ## Lifecycle and shutdown
 
 The CLI discovers the exact project server from authenticated state. `server

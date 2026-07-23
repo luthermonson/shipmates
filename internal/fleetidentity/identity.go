@@ -17,14 +17,15 @@ import (
 )
 
 const (
-	ObserveCapability       = "fleet.observe.v1"
-	SteerTurnCapability     = "fleet.steer.turn.v1"
-	InterruptTurnCapability = "fleet.interrupt.turn.v1"
-	maxArtifacts            = 256
-	maxShips                = 4096
-	maxObservers            = 4096
-	maxOperators            = 4096
-	maxTxnResults           = 256
+	ObserveCapability           = "fleet.observe.v1"
+	SteerTurnCapability         = "fleet.steer.turn.v1"
+	InterruptTurnCapability     = "fleet.interrupt.turn.v1"
+	CommanderDelegateCapability = "fleet.commander.delegate.v1"
+	maxArtifacts                = 256
+	maxShips                    = 4096
+	maxObservers                = 4096
+	maxOperators                = 4096
+	maxTxnResults               = 256
 )
 
 var opaqueID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{15,95}$`)
@@ -98,6 +99,26 @@ type OperatorCredentialRecord struct {
 }
 type IssuedOperatorCredential struct {
 	Record OperatorCredentialRecord
+	Secret string
+}
+
+// CommanderPrincipal is a separate capability family. It is intentionally
+// not an OperatorPrincipal so observe/steer/interrupt authorization cannot be
+// inherited by mailbox callers.
+type CommanderPrincipal struct {
+	FleetID, SubjectID, CredentialID, Capability string
+	CredentialGeneration                         uint64
+	ShipIDs                                      []string
+}
+type CommanderCredentialRecord struct {
+	CredentialID, SubjectID, FleetID, Capability string
+	CredentialGeneration                         uint64
+	ShipIDs                                      []string
+	IssuedAt, ExpiresAt                          time.Time
+	Revoked                                      bool
+}
+type IssuedCommanderCredential struct {
+	Record CommanderCredentialRecord
 	Secret string
 }
 
@@ -242,21 +263,30 @@ type operatorCredential struct {
 	revokeAt                     time.Time
 	previousID                   string
 }
+type commanderCredential struct {
+	credential
+	subject, fleetID          string
+	generation                uint64
+	ships                     map[string]struct{}
+	issued, expires, revokeAt time.Time
+	previousID                string
+}
 
 // Registry is the Fleet-owned, concurrency-safe identity state machine. A
 // persistence adapter can snapshot it later; no online connection state lives
 // here. Returned secrets are available only on their issuing call.
 type Registry struct {
-	mu        sync.Mutex
-	fleetID   string
-	clock     Clock
-	random    io.Reader
-	artifacts map[string]*artifact
-	ships     map[string]*ship
-	observers map[string]*observer
-	operators map[string]*operatorCredential
-	txnOrder  []string
-	storeDir  string
+	mu         sync.Mutex
+	fleetID    string
+	clock      Clock
+	random     io.Reader
+	artifacts  map[string]*artifact
+	ships      map[string]*ship
+	observers  map[string]*observer
+	operators  map[string]*operatorCredential
+	commanders map[string]*commanderCredential
+	txnOrder   []string
+	storeDir   string
 }
 
 func NewRegistry(fleetID string, clock Clock, random io.Reader) (*Registry, error) {
@@ -269,7 +299,7 @@ func NewRegistry(fleetID string, clock Clock, random io.Reader) (*Registry, erro
 	if random == nil {
 		random = rand.Reader
 	}
-	return &Registry{fleetID: fleetID, clock: clock, random: random, artifacts: map[string]*artifact{}, ships: map[string]*ship{}, observers: map[string]*observer{}, operators: map[string]*operatorCredential{}}, nil
+	return &Registry{fleetID: fleetID, clock: clock, random: random, artifacts: map[string]*artifact{}, ships: map[string]*ship{}, observers: map[string]*observer{}, operators: map[string]*operatorCredential{}, commanders: map[string]*commanderCredential{}}, nil
 }
 
 // OpenRegistry opens (or creates) the Fleet-owned persistent authority store.
@@ -738,6 +768,185 @@ func validOperatorCapability(c string) bool {
 	return c == SteerTurnCapability || c == InterruptTurnCapability
 }
 
+func commanderRecord(o *commanderCredential) CommanderCredentialRecord {
+	ids := make([]string, 0, len(o.ships))
+	for id := range o.ships {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return CommanderCredentialRecord{o.id, o.subject, o.fleetID, CommanderDelegateCapability, o.generation, ids, o.issued, o.expires, o.revoked}
+}
+
+// IssueCommander creates the separate fleet.commander.delegate.v1 principal.
+// Its allowlist is exact and its secret is returned only at issuance.
+func (r *Registry) IssueCommander(subjectID string, shipIDs []string, ttl time.Duration) (IssuedCommanderCredential, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	before := r.durableLocked()
+	if err := r.expireAndCommitLocked(before); err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	if !opaqueID.MatchString(subjectID) || !validTTL(ttl) || len(shipIDs) == 0 || len(r.commanders) >= maxOperators {
+		return IssuedCommanderCredential{}, fail(InvalidInput)
+	}
+	allowed := map[string]struct{}{}
+	for _, id := range shipIDs {
+		if !opaqueID.MatchString(id) || r.ships[id] == nil {
+			return IssuedCommanderCredential{}, fail(InvalidInput)
+		}
+		if _, exists := allowed[id]; exists {
+			return IssuedCommanderCredential{}, fail(Conflict)
+		}
+		allowed[id] = struct{}{}
+	}
+	id, err := r.randomValue("cdc_", 18)
+	if err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	secret, err := r.randomValue("cds_", 32)
+	if err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	now := r.clock.Now()
+	o := &commanderCredential{credential: credential{id: id, verifier: verifier(secret)}, subject: subjectID, fleetID: r.fleetID, generation: 1, ships: allowed, issued: now, expires: now.Add(ttl)}
+	r.commanders[id] = o
+	if err := r.commitLocked(before); err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	return IssuedCommanderCredential{Record: commanderRecord(o), Secret: secret}, nil
+}
+
+func (r *Registry) RotateCommander(credentialID string, generation uint64, overlap, ttl time.Duration) (IssuedCommanderCredential, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	before := r.durableLocked()
+	if err := r.expireAndCommitLocked(before); err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	old := r.commanders[credentialID]
+	if old == nil || old.revoked || old.generation != generation || generation == ^uint64(0) || overlap <= 0 || overlap > 5*time.Minute || !validTTL(ttl) {
+		return IssuedCommanderCredential{}, fail(Conflict)
+	}
+	for _, o := range r.commanders {
+		if o.subject == old.subject && o.generation > old.generation && !o.revoked {
+			return IssuedCommanderCredential{}, fail(Conflict)
+		}
+	}
+	id, err := r.randomValue("cdc_", 18)
+	if err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	secret, err := r.randomValue("cds_", 32)
+	if err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	now := r.clock.Now()
+	old.revokeAt = now.Add(overlap)
+	ships := map[string]struct{}{}
+	for id := range old.ships {
+		ships[id] = struct{}{}
+	}
+	next := &commanderCredential{credential: credential{id: id, verifier: verifier(secret)}, subject: old.subject, fleetID: old.fleetID, generation: generation + 1, ships: ships, issued: now, expires: now.Add(ttl), previousID: old.id}
+	r.commanders[id] = next
+	if err := r.commitLocked(before); err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	return IssuedCommanderCredential{Record: commanderRecord(next), Secret: secret}, nil
+}
+
+func (r *Registry) CommitCommanderRotation(credentialID string, generation uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	before := r.durableLocked()
+	n := r.commanders[credentialID]
+	if n == nil || n.revoked || n.generation != generation || generation < 2 {
+		return fail(NotFound)
+	}
+	old := r.commanders[n.previousID]
+	if old == nil || old.subject != n.subject || old.generation+1 != generation || old.revoked {
+		return fail(Conflict)
+	}
+	old.revoked = true
+	old.revokeAt = time.Time{}
+	return r.commitLocked(before)
+}
+
+func (r *Registry) AuthenticateCommander(credentialID, secret, fleetID, shipID string) (CommanderPrincipal, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	before := r.durableLocked()
+	if err := r.expireAndCommitLocked(before); err != nil {
+		return CommanderPrincipal{}, err
+	}
+	o := r.commanders[credentialID]
+	if o == nil || o.revoked || o.fleetID != fleetID || fleetID != r.fleetID || !r.clock.Now().Before(o.expires) || !verifies(secret, o.verifier) {
+		return CommanderPrincipal{}, fail(Unauthorized)
+	}
+	if _, ok := o.ships[shipID]; !ok {
+		return CommanderPrincipal{}, fail(Unauthorized)
+	}
+	x := commanderRecord(o)
+	return CommanderPrincipal{x.FleetID, x.SubjectID, x.CredentialID, x.Capability, x.CredentialGeneration, x.ShipIDs}, nil
+}
+
+func (r *Registry) AuthenticateCommanderCredential(credentialID, secret string) (CommanderPrincipal, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	before := r.durableLocked()
+	if err := r.expireAndCommitLocked(before); err != nil {
+		return CommanderPrincipal{}, err
+	}
+	o := r.commanders[credentialID]
+	if o == nil || o.revoked || !r.clock.Now().Before(o.expires) || !verifies(secret, o.verifier) {
+		return CommanderPrincipal{}, fail(Unauthorized)
+	}
+	x := commanderRecord(o)
+	return CommanderPrincipal{x.FleetID, x.SubjectID, x.CredentialID, x.Capability, x.CredentialGeneration, x.ShipIDs}, nil
+}
+
+func (r *Registry) InspectCommander(credentialID string, generation uint64) (CommanderCredentialRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	before := r.durableLocked()
+	if err := r.expireAndCommitLocked(before); err != nil {
+		return CommanderCredentialRecord{}, err
+	}
+	o := r.commanders[credentialID]
+	if o == nil || o.generation != generation {
+		return CommanderCredentialRecord{}, fail(NotFound)
+	}
+	return commanderRecord(o), nil
+}
+func (r *Registry) RevokeCommanderCredential(credentialID string, generation uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	before := r.durableLocked()
+	o := r.commanders[credentialID]
+	if o == nil || o.generation != generation {
+		return fail(NotFound)
+	}
+	o.revoked = true
+	o.revokeAt = time.Time{}
+	return r.commitLocked(before)
+}
+func (r *Registry) RevokeCommanderSubject(subjectID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	before := r.durableLocked()
+	found := false
+	for _, o := range r.commanders {
+		if o.subject == subjectID {
+			o.revoked = true
+			o.revokeAt = time.Time{}
+			found = true
+		}
+	}
+	if !found {
+		return fail(NotFound)
+	}
+	return r.commitLocked(before)
+}
+
 func (r *Registry) InspectOperator(credentialID string, generation uint64) (OperatorCredentialRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -799,6 +1008,13 @@ func (r *Registry) expireLocked() bool {
 		}
 	}
 	for _, o := range r.operators {
+		if !o.revoked && (!now.Before(o.expires) || (!o.revokeAt.IsZero() && !now.Before(o.revokeAt))) {
+			o.revoked = true
+			o.revokeAt = time.Time{}
+			changed = true
+		}
+	}
+	for _, o := range r.commanders {
 		if !o.revoked && (!now.Before(o.expires) || (!o.revokeAt.IsZero() && !now.Before(o.revokeAt))) {
 			o.revoked = true
 			o.revokeAt = time.Time{}

@@ -1,0 +1,19 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"decision-provenance.schema.json",
+  "title":"fleet.delegation-decision.v1",
+  "type":"object","additionalProperties":false,
+  "required":["schema","record_id","delegation_id","envelope_digest","voyage_plan_hash","task_contract_hash","state_hash","blocker_fingerprint","local_policy_version","skipper_artifact_digest","skipper_artifact_version","effective_model","recovery_schema","created_at","lifecycle","reason_code","references","result","sail_state"],
+  "properties":{
+    "schema":{"const":"fleet.delegation-decision.v1"},"record_id":{"$ref":"#/$defs/id"},"delegation_id":{"$ref":"#/$defs/id"},"envelope_digest":{"$ref":"#/$defs/digest"},"voyage_plan_hash":{"$ref":"#/$defs/digest"},"task_contract_hash":{"$ref":"#/$defs/digest"},"state_hash":{"$ref":"#/$defs/digest"},"blocker_fingerprint":{"$ref":"#/$defs/digest"},
+    "local_policy_version":{"type":"integer","minimum":1,"maximum":255},"skipper_artifact_digest":{"$ref":"#/$defs/digest"},"skipper_artifact_version":{"type":"integer","minimum":1,"maximum":8},"effective_model":{"const":"gpt-5.6-sol"},"recovery_schema":{"const":"recovery.response.v1"},"created_at":{"$ref":"#/$defs/time"},"lifecycle":{"enum":["advised","rejected","expired","revoked","indeterminate"]},"reason_code":{"enum":["advised","response_invalid","restart_after_assessment","revoked_after_start","expired","revoked"]},"references":{"type":"array","maxItems":16,"items":{"$ref":"#/$defs/reference"}},"result":{"enum":["resume","continue","amendment_required","stop","none"]},"sail_state":{"enum":["not_evaluated","advisory_rejected","locally_accepted_under_existing_policy"]}
+  },
+  "allOf":[
+    {"if":{"properties":{"lifecycle":{"const":"advised"}},"required":["lifecycle"]},"then":{"properties":{"reason_code":{"const":"advised"},"result":{"enum":["resume","continue","amendment_required","stop"]}}},"else":{"properties":{"result":{"const":"none"},"sail_state":{"const":"not_evaluated"}}}},
+    {"if":{"properties":{"lifecycle":{"const":"rejected"}},"required":["lifecycle"]},"then":{"properties":{"reason_code":{"const":"response_invalid"}}}},
+    {"if":{"properties":{"lifecycle":{"const":"expired"}},"required":["lifecycle"]},"then":{"properties":{"reason_code":{"const":"expired"}}}},
+    {"if":{"properties":{"lifecycle":{"const":"revoked"}},"required":["lifecycle"]},"then":{"properties":{"reason_code":{"enum":["revoked","revoked_after_start"]}}}},
+    {"if":{"properties":{"lifecycle":{"const":"indeterminate"}},"required":["lifecycle"]},"then":{"properties":{"reason_code":{"const":"restart_after_assessment"}}}}
+  ],
+  "$defs":{"id":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{15,95}$","maxLength":96},"digest":{"type":"string","pattern":"^[a-f0-9]{64}$","maxLength":64},"time":{"type":"string","pattern":"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$","maxLength":24},"reference":{"type":"object","additionalProperties":false,"required":["kind","digest"],"properties":{"kind":{"type":"string","enum":["recovery_evidence_ref","evidence_certificate_ref"]},"digest":{"$ref":"#/$defs/digest"}}}}
+}

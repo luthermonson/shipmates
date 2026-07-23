@@ -204,6 +204,9 @@ type StartOptions struct {
 	Images                []turninput.ImageDescriptorV1
 	Config                *project.PersonaConfig
 	ExposeActivityDetails bool
+	ReadOnly              bool
+	Toolless              bool
+	DeveloperInstructions string
 }
 
 // StartIdleOptions establishes an owned thread without sending model input.
@@ -212,6 +215,9 @@ type StartIdleOptions struct {
 	Fresh                 bool
 	Config                *project.PersonaConfig
 	ExposeActivityDetails bool
+	ReadOnly              bool
+	Toolless              bool
+	DeveloperInstructions string
 }
 
 type Snapshot struct {
@@ -317,6 +323,28 @@ func (m *Manager) AttachController(persona, sessionID string, after uint64) (Att
 	return Attach{Snapshot: s.snapshotLocked(), ControllerID: id, ControllerLeaseGeneration: s.controllerLeaseGeneration, OldestAvailable: f.OldestAvailable, NextSequence: f.NextSequence, HistoryDropped: f.HistoryDropped, Events: f.Events, LeaseTimeoutMS: m.leaseDuration.Milliseconds(), PendingApproval: s.approvalCardLocked(now)}, nil
 }
 
+// ReclaimExpiredController performs only the authoritative expiry transition
+// needed by a bounded attach retry. It never revokes a live lease, allocates a
+// replacement generation, or changes session/turn state.
+func (m *Manager) ReclaimExpiredController(persona, sessionID string) (bool, error) {
+	s, err := m.Session(persona)
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sessionID != "" && sessionID != s.sessionID {
+		return false, failure(StaleTarget)
+	}
+	if s.controllerID == "" || m.now().Before(s.controllerExpires) {
+		return false, nil
+	}
+	s.cancelApprovalLocked("lease_expired", false)
+	s.controllerID = ""
+	s.controllerExpires = time.Time{}
+	return true, nil
+}
+
 func (m *Manager) HeartbeatController(persona, sessionID, controllerID string) error {
 	s, err := m.Session(persona)
 	if err != nil {
@@ -393,7 +421,7 @@ func (m *Manager) StartLive(ctx context.Context, opts StartOptions) (*Session, e
 	if opts.Prompt == "" {
 		return nil, failure(Internal)
 	}
-	s, err := m.StartIdle(ctx, StartIdleOptions{Persona: opts.Persona, Fresh: opts.Fresh, Config: opts.Config, ExposeActivityDetails: opts.ExposeActivityDetails})
+	s, err := m.StartIdle(ctx, StartIdleOptions{Persona: opts.Persona, Fresh: opts.Fresh, Config: opts.Config, ExposeActivityDetails: opts.ExposeActivityDetails, ReadOnly: opts.ReadOnly, Toolless: opts.Toolless, DeveloperInstructions: opts.DeveloperInstructions})
 	if err != nil {
 		return nil, err
 	}
@@ -435,12 +463,20 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 			return nil, err
 		}
 	}
-	instructions, err := project.CodexPersonaInstructionsAt(root, opts.Persona)
-	if err != nil {
-		return nil, err
+	var err error
+	instructions := opts.DeveloperInstructions
+	if instructions == "" {
+		instructions, err = project.CodexPersonaInstructionsAt(root, opts.Persona)
+		if err != nil {
+			return nil, err
+		}
 	}
 	cwd := root
-	fingerprint := project.SHA([]byte(project.CodexAppServerBackend + "\x00" + cfg.Fingerprint() + "\x00" + instructions + "\x00" + cwd + "\x00workspace-write\x00never"))
+	sandbox := "workspace-write"
+	if opts.ReadOnly {
+		sandbox = "read-only"
+	}
+	fingerprint := project.SHA([]byte(project.CodexAppServerBackend + "\x00" + cfg.Fingerprint() + "\x00" + instructions + "\x00" + cwd + "\x00" + sandbox + "\x00never"))
 
 	m.mu.Lock()
 	if current := m.sessions[opts.Persona]; current != nil {
@@ -507,7 +543,7 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 	s.mu.Lock()
 	s.adapter = a
 	s.mu.Unlock()
-	topts := codexapp.ThreadOptions{WorkingDirectory: cwd, DeveloperInstructions: instructions, Model: cfg.Model}
+	topts := codexapp.ThreadOptions{WorkingDirectory: cwd, DeveloperInstructions: instructions, Model: cfg.Model, ReadOnly: opts.ReadOnly, Toolless: opts.Toolless}
 	var thread codexapp.Thread
 	if resume {
 		thread, err = a.ResumeThread(ctx, marker.ThreadID, topts)
@@ -903,16 +939,20 @@ func (m *Manager) Session(persona string) (*Session, error) {
 	}
 	return s, nil
 }
-func (m *Manager) ShutdownAll(ctx context.Context) {
+func (m *Manager) ShutdownAll(ctx context.Context) error {
 	m.mu.Lock()
 	list := make([]*Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		list = append(list, s)
 	}
 	m.mu.Unlock()
+	var first error
 	for _, s := range list {
-		_ = s.Shutdown(ctx)
+		if err := s.Shutdown(ctx); err != nil && first == nil {
+			first = err
+		}
 	}
+	return first
 }
 
 func (m *Manager) Tell(ctx context.Context, persona, sid, tid, turn, text string) (ControlResult, error) {
@@ -1255,6 +1295,20 @@ func (s *Session) Snapshot() Snapshot {
 }
 
 func (s *Session) Done() <-chan struct{} { return s.done }
+
+// ProcessGroupHandle returns the real child-process-group cleanup seam for
+// bounded local supervisors. It exposes no process identity or protocol data.
+func (s *Session) ProcessGroupHandle() codexapp.ProcessGroupHandle {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.adapter == nil {
+		return nil
+	}
+	return s.adapter.ProcessGroupHandle()
+}
 
 // ResolveTarget is the internal identity gate future control operations must
 // cross. It never redirects a stale session/thread/turn tuple to a newer owner.

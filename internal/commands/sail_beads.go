@@ -15,6 +15,32 @@ type sailBeads struct {
 	records map[string]string
 }
 
+// ensureDerivativeTask creates only newly approved successor work. Existing
+// and inherited Beads are never reopened, reassigned, or recreated.
+func (b *sailBeads) ensureDerivativeTask(ctx context.Context, task voyage.Task, hash string, state *voyage.State, statePath string) error {
+	if b == nil || b.client == nil || state.Tasks[task.ID].BeadID != "" {
+		return nil
+	}
+	description := fmt.Sprintf("Shipmates voyage derivative: %s\nPersona: %s\n\n%s", task.Summary, task.Persona, task.Prompt)
+	id, err := b.client.CreateTask(ctx, beads.Task{Title: task.Summary, Description: description, Assignee: task.Persona, ExternalRef: "shipmates:derivative:" + hash[:16] + ":" + task.ID, Labels: []string{"shipmates", "voyage", "derivative", task.Persona}})
+	if err != nil {
+		return err
+	}
+	entry := state.Tasks[task.ID]
+	entry.BeadID = id
+	state.Tasks[task.ID] = entry
+	for _, dependency := range task.DependsOn {
+		if depID := state.Tasks[dependency].BeadID; depID != "" {
+			if err := b.client.AddDependency(ctx, id, depID); err != nil {
+				return err
+			}
+		}
+	}
+	entry.BeadDependenciesLinked = true
+	state.Tasks[task.ID] = entry
+	return voyage.SaveState(statePath, state)
+}
+
 func prepareSailBeads(ctx context.Context, plan *voyage.Plan, state *voyage.State, hash, statePath string) (*sailBeads, error) {
 	if !beads.Workspace(".") {
 		return nil, nil

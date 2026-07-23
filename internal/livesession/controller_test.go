@@ -39,6 +39,62 @@ func TestControllerLeaseExpiryUsesInjectedMonotonicTime(t *testing.T) {
 	}
 }
 
+func TestReclaimExpiredControllerIsSingleBoundedTransition(t *testing.T) {
+	m, _ := controllerTestManager()
+	now := time.Unix(100, 0)
+	m.now = func() time.Time { return now }
+	m.leaseDuration = 10 * time.Second
+	m.newControllerID = func() (string, error) { return "expired-controller", nil }
+	first, err := m.AttachController("backend", "session", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Second)
+	claimed, err := m.ReclaimExpiredController("backend", first.SessionID)
+	if err != nil || !claimed {
+		t.Fatalf("reclaim=%v err=%v", claimed, err)
+	}
+	claimed, err = m.ReclaimExpiredController("backend", first.SessionID)
+	if err != nil || claimed {
+		t.Fatalf("repeated reclaim=%v err=%v", claimed, err)
+	}
+	m.newControllerID = func() (string, error) { return "replacement-controller", nil }
+	replacement, err := m.AttachController("backend", first.SessionID, 0)
+	if err != nil || replacement.ControllerID != "replacement-controller" || replacement.ControllerLeaseGeneration != first.ControllerLeaseGeneration+1 {
+		t.Fatalf("replacement=%+v err=%v", replacement, err)
+	}
+}
+
+func TestReclaimLiveConcurrentAndStaleControllerBoundaries(t *testing.T) {
+	m, _ := controllerTestManager()
+	now := time.Unix(200, 0)
+	m.now = func() time.Time { return now }
+	m.leaseDuration = time.Hour
+	first, err := m.AttachController("backend", "session", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed, err := m.ReclaimExpiredController("backend", first.SessionID); err != nil || reclaimed {
+		t.Fatalf("live reclaim=%v err=%v", reclaimed, err)
+	}
+	if _, err := m.AttachController("backend", first.SessionID, 0); ErrorCode(err) != AlreadyOpen {
+		t.Fatalf("live attach error=%v", err)
+	}
+	if reclaimed, err := m.ReclaimExpiredController("backend", "other-session"); ErrorCode(err) != StaleTarget || reclaimed {
+		t.Fatalf("stale reclaim=%v err=%v", reclaimed, err)
+	}
+	// Concurrent rechecks cannot both reclaim or create a replacement.
+	now = now.Add(time.Hour)
+	results := make(chan bool, 2)
+	for i := 0; i < 2; i++ {
+		go func() { reclaimed, _ := m.ReclaimExpiredController("backend", first.SessionID); results <- reclaimed }()
+	}
+	a, b := <-results, <-results
+	if a == b {
+		t.Fatalf("concurrent reclaim results=%v,%v, want exactly one", a, b)
+	}
+}
+
 // Kept local to avoid coupling these authority tests to a subprocess fixture.
 func structAdapterOptions() (z codexapp.StartOptions) { return }
 

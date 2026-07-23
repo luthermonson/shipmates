@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/codexapp"
 	"github.com/luthermonson/shipmates/internal/fleetidentity"
 	"github.com/luthermonson/shipmates/internal/fleetobserve"
 	"github.com/luthermonson/shipmates/internal/fleetsteer"
@@ -208,8 +209,25 @@ func runShipObserveReadyWithClock(ctx context.Context, root, identityDir string,
 	if err != nil {
 		return err
 	}
+	config, err := project.LoadConfigAt(root)
+	if err != nil {
+		return err
+	}
+	identity, err := fleetidentity.LoadShipState(identityDir)
+	if err != nil {
+		return err
+	}
+	commander, err := makeCommanderStep(root, *config, identity)
+	if err != nil {
+		return err
+	}
+	if commander != nil && !codexapp.DetectExecutionCapabilities(config.Recovery.CommanderDelegation.PreExecHelper).AssessmentEnabled() {
+		// Capability negotiation must not advertise an M3 assessment stream
+		// when placement prerequisites are absent; M7 remains unchanged.
+		commander = nil
+	}
 	updates := make(chan []fleetobserve.LocalPersonaState, 1)
-	_, _, err = fleettunnel.RunProductionLocalConnectedUpdates(ctx, root, identityDir, states, fleettunnel.Resume{}, nil, updates, func(c context.Context, id fleetidentity.ShipState, g uint64) (func(), error) {
+	_, _, err = fleettunnel.RunProductionLocalConnectedUpdatesCommander(ctx, root, identityDir, states, fleettunnel.Resume{}, nil, updates, func(c context.Context, id fleetidentity.ShipState, g uint64) (func(), error) {
 		ep, e := fleetsteer.NewProductionShipEndpoint(id.FleetID, id.ShipID, steerEpoch, g, fleetsteer.ShipEndpointConfig{InterruptClock: interruptClock}, control)
 		if e != nil {
 			return nil, e
@@ -257,7 +275,7 @@ func runShipObserveReadyWithClock(ctx context.Context, root, identityDir string,
 			close(ready)
 		}
 		return func() { close(stop); ep.InvalidateTargets(); cancel(); <-done }, nil
-	})
+	}, commander)
 	return err
 }
 

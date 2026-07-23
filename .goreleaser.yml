@@ -29,6 +29,9 @@ archives:
     files:
       - README.md
       - LICENSE
+      - docs/installer-platforms.md
+      - docs/security.md
+      - docs/cli-reference.md
 
 checksum:
   name_template: checksums.txt

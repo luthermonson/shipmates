@@ -41,6 +41,56 @@ type TaskState struct {
 	Inherited              *InheritedTask `json:"inherited,omitempty"`
 }
 
+type AcceptanceStatus string
+
+const (
+	AcceptanceUnset AcceptanceStatus = "unset"
+	AcceptancePass  AcceptanceStatus = "pass"
+	AcceptanceNoGo  AcceptanceStatus = "no_go"
+)
+
+const MaxAcceptanceEvidence = 8
+
+// AcceptanceVerdict is authoritative voyage-level acceptance. It is
+// deliberately separate from task completion and Beads evidence.
+type AcceptanceVerdict struct {
+	Status            AcceptanceStatus `json:"status"`
+	RecordedAt        time.Time        `json:"recorded_at,omitempty"`
+	EvidenceRefs      []string         `json:"evidence_refs,omitempty"`
+	PlanHash          string           `json:"plan_hash,omitempty"`
+	GlobalFingerprint string           `json:"global_fingerprint,omitempty"`
+}
+
+func (v AcceptanceVerdict) Validate() error {
+	if v.Status != AcceptanceUnset && v.Status != AcceptancePass && v.Status != AcceptanceNoGo {
+		return errors.New("invalid acceptance verdict")
+	}
+	if len(v.EvidenceRefs) > MaxAcceptanceEvidence {
+		return errors.New("acceptance evidence exceeds bound")
+	}
+	for _, ref := range v.EvidenceRefs {
+		if strings.TrimSpace(ref) == "" || len(ref) > 512 || strings.ContainsAny(ref, "\r\n") {
+			return errors.New("invalid acceptance evidence reference")
+		}
+	}
+	if v.Status == AcceptanceUnset {
+		if !v.RecordedAt.IsZero() || len(v.EvidenceRefs) != 0 {
+			return errors.New("unset acceptance verdict has provenance")
+		}
+		return nil
+	}
+	if v.PlanHash != "" && len(v.PlanHash) != 64 {
+		return errors.New("invalid acceptance plan binding")
+	}
+	if v.GlobalFingerprint != "" && len(v.GlobalFingerprint) != 64 {
+		return errors.New("invalid acceptance fingerprint binding")
+	}
+	if v.RecordedAt.IsZero() || len(v.EvidenceRefs) == 0 {
+		return errors.New("acceptance verdict requires timestamp and evidence")
+	}
+	return nil
+}
+
 // InheritedTask preserves the original completion evidence and opaque Bead
 // while making the predecessor revision visible in successor status.
 type InheritedTask struct {
@@ -69,6 +119,7 @@ type State struct {
 	UpdatedAt         time.Time            `json:"updated_at"`
 	GlobalFingerprint string               `json:"global_fingerprint,omitempty"`
 	Lineage           *Lineage             `json:"lineage,omitempty"`
+	Acceptance        *AcceptanceVerdict   `json:"acceptance,omitempty"`
 	Tasks             map[string]TaskState `json:"tasks"`
 }
 
@@ -128,6 +179,21 @@ func loadState(path string, plan *Plan, hash string, recoverRunning bool) (*Stat
 			return nil, errors.New("voyage state has invalid lineage")
 		}
 	}
+	// Version 1 predates authoritative acceptance.  Do not let a hand-edited
+	// legacy record acquire a verdict merely because the current decoder knows
+	// the new field; ApplyAcceptanceOutput performs the explicit v1 -> v2
+	// migration when the approved gate emits a valid marker.
+	if state.Version == 1 && state.Acceptance != nil {
+		return nil, errors.New("legacy voyage state cannot contain acceptance verdict")
+	}
+	if state.Acceptance != nil && state.Version != 1 {
+		if err := state.Acceptance.Validate(); err != nil {
+			return nil, err
+		}
+		if state.Version == StateVersion && state.Acceptance.Status != AcceptanceUnset && (state.Acceptance.PlanHash == "" || state.Acceptance.GlobalFingerprint == "" || state.Acceptance.PlanHash != state.PlanHash || state.Acceptance.GlobalFingerprint != state.GlobalFingerprint) {
+			return nil, errors.New("acceptance verdict is not bound to this voyage state")
+		}
+	}
 	if len(state.Tasks) != len(plan.Tasks) {
 		return nil, errors.New("voyage state task set does not match approved plan")
 	}
@@ -182,6 +248,28 @@ func validateInherited(in *InheritedTask) error {
 }
 
 func SaveState(path string, state *State) error {
+	if state == nil {
+		return errors.New("nil voyage state")
+	}
+	if state.Acceptance != nil && state.Acceptance.Status != AcceptanceUnset {
+		// Programmatic state builders receive the same canonical binding as the
+		// closed marker path before bytes are persisted. A hand-edited JSON file
+		// cannot acquire this binding because LoadState validates exact identity.
+		if state.Acceptance.PlanHash == "" {
+			state.Acceptance.PlanHash = state.PlanHash
+		}
+		if state.Acceptance.GlobalFingerprint == "" {
+			state.Acceptance.GlobalFingerprint = state.GlobalFingerprint
+		}
+	}
+	if state.Acceptance != nil && state.Version != 1 {
+		if err := state.Acceptance.Validate(); err != nil {
+			return err
+		}
+		if state.Version == StateVersion && state.Acceptance.Status != AcceptanceUnset && (state.Acceptance.PlanHash != state.PlanHash || state.Acceptance.GlobalFingerprint != state.GlobalFingerprint) {
+			return errors.New("acceptance verdict is not bound to this voyage state")
+		}
+	}
 	state.UpdatedAt = time.Now().UTC()
 	b, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

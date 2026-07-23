@@ -3,6 +3,17 @@
 This guide covers normal Linux operation, verification, service lifecycle,
 recovery, upgrades, and Fleet deployment.
 
+## Packaged runtime installation
+
+For released Linux binaries, the single offline runtime entry point is
+`sudo shipmates install`. Use `--dry-run --json` to inspect the fixed manifest
+and platform composition before changing files. The installer is idempotent,
+refuses drift, never starts a unit or qualification, and retains its journal,
+credentials, authority, and state when `--uninstall` removes Shipmates-owned
+release assets. Limited WSL and non-systemd containers retain ordinary
+Shipmates operation when hardened containment is unavailable. See
+[Installer and platform contract](installer-platforms.md).
+
 ## Daily workflow
 
 For a whole-project outcome, begin with the skipper and sail only after reviewing

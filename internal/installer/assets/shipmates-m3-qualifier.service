@@ -1,0 +1,21 @@
+[Unit]
+Description=Shipmates M3 qualifier (disabled until Captain starts it)
+
+[Service]
+User=shipmates
+Group=shipmates
+Delegate=yes
+NoNewPrivileges=yes
+ExecStart=/usr/libexec/shipmates/shipmates-m3-qualifier-run
+LoadCredential=ship.json:/etc/shipmates/m3-qualifier/credentials/ship.json
+LoadCredential=commander.json:/etc/shipmates/m3-qualifier/credentials/commander.json
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+TimeoutStartSec=10s
+TimeoutStopSec=10s
+MemoryMax=512M
+TasksMax=256

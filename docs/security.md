@@ -35,6 +35,23 @@ commit boundary when possible.
 Memory is user-owned durable content. Ordinary removal preserves it; `--purge`
 is the explicit destructive boundary.
 
+## Offline runtime installer
+
+`sudo shipmates install` is a closed, offline, manifest-verified operation. It
+accepts no destination, source, command, service-manager, credential, or Fleet
+endpoint override; it performs no internal sudo, network access, credential
+read, service start, or qualification. It stages fixed regular assets,
+verifies byte digests and modes, fsyncs before activation, refuses drift and
+unsafe parents, and retains the install journal/state across uninstall.
+
+Capability detection selects the hardened systemd/M3 asset composition only
+when systemd, delegated cgroup v2, pidfd, the pinned launcher, and the required
+filesystem conditions are visible. Limited WSL, non-systemd containers, read-
+only roots, user namespaces, and missing delegation retain ordinary Shipmates
+operation rather than weakening containment. The optional profile is a plan,
+not a credential or authority grant. Production M3 remains NO-GO until the
+separately authorized unrestricted host qualifier passes.
+
 ## Exact-turn authority
 
 Steer, interrupt, and approval bind to an exact persona, project session, Codex
@@ -97,6 +114,25 @@ local turn identifiers remain on the ship.
 
 Fleet cannot start work, answer approvals, upload files, open terminals,
 broadcast, mutate graphs, or run generic commands.
+
+### M2 local delegation boundary
+
+The local Commander policy is disabled by default and accepts only configured
+Ed25519 trust anchors for one exact Fleet and protocol version. It verifies the
+closed M1 envelope before binding it to the locally approved voyage, task,
+recovery request, and blocker fingerprint. Expiry is checked both at decode and
+at the locked durable reservation; revocation before or after assessment is
+fail-closed and never grants authority.
+
+The isolated owner-only delegation journal is append-only, bounded, no-follow,
+and separate from ordinary recovery state. It records only opaque digests,
+fixed lifecycle/reason codes, policy and Skipper provenance, and a
+domain-separated provenance digest. A fresh empty Codex home, no inherited
+credentials, and an immutable read-only/tool-less overlay constrain the single
+Sol advisory. Sail remains the only execution authority: an accepted advisory
+does not execute work, modify a plan, write Beads, or establish Fleet
+authority. M2 has no transport, listener, public command/API, or remote
+credential path; M3 must introduce those as a new reviewed boundary.
 
 ## Secrets
 

@@ -18,6 +18,13 @@ var version = "dev"
 func main() {
 	cat := catalog.New(catalogFS)
 
+	public := commands.PublicCommands(cat)
+	// The Linux runtime installer is a root-level distribution command. Keep it
+	// out of the historical PublicCommands tree so its frozen product-command
+	// inventory remains stable for project/persona operations.
+	if runtime := commands.RuntimeInstall(); runtime != nil {
+		public = append([]*cli.Command{runtime}, public...)
+	}
 	cmd := &cli.Command{
 		Name:    "shipmates",
 		Usage:   "subagents that remember — assemble AI personas with persistent project memory",
@@ -33,7 +40,7 @@ func main() {
 			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 			return ctx, nil
 		},
-		Commands: commands.PublicCommands(cat),
+		Commands: public,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

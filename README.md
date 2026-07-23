@@ -19,7 +19,17 @@ WSL setup and native Windows/macOS support are outside this repository.
 
 For a released Linux binary, download the appropriate asset from the
 [latest release](https://github.com/luthermonson/shipmates/releases/latest),
-place `shipmates` on `PATH`, then:
+verify its published checksum, place `shipmates` on `PATH`, and install the
+optional Shipmates-owned runtime assets offline:
+
+```bash
+sudo shipmates install --dry-run --json
+sudo shipmates install
+```
+
+The installer does not start a service, install credentials, contact Fleet, or
+run qualification. It selects ordinary-operation fallback when hardened Linux
+capabilities are unavailable. Then initialize the project:
 
 ```bash
 cd your-project
@@ -35,6 +45,10 @@ cd your-project
 shipmates init --crew quartermaster,skipper,security,tester
 shipmates ask security "Review the current diff and report the highest-risk issue."
 ```
+
+The source installer script remains a development bootstrap for the project
+binary. It is not the M3 runtime installer; released operators use
+`sudo shipmates install`.
 
 Authenticate Codex before the first delegation:
 
@@ -104,6 +118,7 @@ terminals, or run generic commands.
 ## Documentation map
 
 - [Getting started](docs/getting-started.md) — installation and first delegation
+- [Installer and platform contract](docs/installer-platforms.md) — offline runtime installation, fallback, packaging, and M3 boundaries
 - [CLI reference](docs/cli-reference.md) — commands and flags
 - [Sailing projects](docs/sailing.md) — plan, approval, execution, and Beads
 - [Configuration and state](docs/configuration.md) — project files and generated state

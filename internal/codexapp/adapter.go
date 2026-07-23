@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,10 +26,20 @@ import (
 const (
 	defaultMaxFrame = 8 << 20
 	defaultStderr   = 64 << 10
+	// DefaultPreExecHelper is the immutable destination owned by the unified
+	// installer. An empty project override selects this path.
+	DefaultPreExecHelper = "/usr/libexec/shipmates/shipmates-cgroup-launcher"
 	// ManagedSessionEnvironment marks commands launched by a Shipmates-owned
 	// Codex session so orchestration commands cannot recursively launch crews.
 	ManagedSessionEnvironment = "SHIPMATES_MANAGED_SESSION"
 )
+
+func effectivePreExecHelper(configured string) string {
+	if strings.TrimSpace(configured) == "" {
+		return DefaultPreExecHelper
+	}
+	return configured
+}
 
 // Code is a stable, sanitized adapter failure code.
 type Code string
@@ -97,28 +108,41 @@ type StartOptions struct {
 	MaxStderrBytes   int
 	MinVersion       string
 	MaxVersion       string
+	// CredentialFree omits CODEX_HOME so an advisory child cannot inherit
+	// reusable Codex credentials from the caller.
+	CredentialFree bool
+	// TransportCodexHome supplies an explicitly provisioned, isolated Codex
+	// home to the trusted app-server transport. It is honored only with
+	// CredentialFree and does not restore HOME or ambient provider variables.
+	TransportCodexHome          string
+	RequireExecutionContainment bool
+	ExecutionID                 string
+	PreExecHelper               string
 }
 
 type Factory struct{}
 
 type Adapter struct {
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	mu        sync.Mutex
-	nextID    int64
-	pending   map[int64]pendingCall
-	done      chan struct{}
-	waitDone  chan struct{}
-	terminal  error
-	closing   bool
-	closeOnce sync.Once
-	shutdown  time.Duration
-	maxFrame  int
-	events    chan Event
-	policyMu  sync.RWMutex
-	policies  map[turnKey]*policy.Snapshot
-	approvals map[string]pendingApproval
+	cmd            *exec.Cmd
+	pidfd          int
+	containment    *ExecutionContainment
+	containmentErr error
+	stdin          io.WriteCloser
+	stdout         io.ReadCloser
+	mu             sync.Mutex
+	nextID         int64
+	pending        map[int64]pendingCall
+	done           chan struct{}
+	waitDone       chan struct{}
+	terminal       error
+	closing        bool
+	closeOnce      sync.Once
+	shutdown       time.Duration
+	maxFrame       int
+	events         chan Event
+	policyMu       sync.RWMutex
+	policies       map[turnKey]*policy.Snapshot
+	approvals      map[string]pendingApproval
 }
 
 type pendingApproval struct {
@@ -146,6 +170,8 @@ type ThreadOptions struct {
 	WorkingDirectory      string
 	DeveloperInstructions string
 	Model                 string
+	ReadOnly              bool
+	Toolless              bool
 }
 
 type TurnInput struct {
@@ -266,9 +292,17 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 	if st, statErr := os.Stat(path); statErr != nil || !st.Mode().IsRegular() {
 		return nil, Capabilities{}, failure(Internal)
 	}
+	if opts.RequireExecutionContainment {
+		opts.PreExecHelper = effectivePreExecHelper(opts.PreExecHelper)
+		path, err = containedExecutable(path)
+		if err != nil {
+			return nil, Capabilities{}, failure(Internal)
+		}
+	}
 	cmd := exec.Command(path, argv[1:]...)
+	configureProcessGroup(cmd)
 	cmd.Dir = opts.WorkingDirectory
-	cmd.Env = controlledEnvironment(opts.Environment)
+	cmd.Env = controlledEnvironment(opts.Environment, opts.CredentialFree, opts.TransportCodexHome)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, Capabilities{}, failure(Internal)
@@ -281,10 +315,29 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 	if err != nil {
 		return nil, Capabilities{}, failure(Internal)
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, Capabilities{}, failure(Internal)
+	var containment *ExecutionContainment
+	var pidfd int
+	if opts.RequireExecutionContainment {
+		if opts.ExecutionID == "" {
+			return nil, Capabilities{}, failure(Internal)
+		}
+		containment, err = StartContainedWithHelperCurrent(opts.PreExecHelper, cmd, opts.ExecutionID)
+		if err != nil {
+			return nil, Capabilities{}, failure(Internal)
+		}
+		pidfd = containment.fd
+	} else {
+		if err := cmd.Start(); err != nil {
+			return nil, Capabilities{}, failure(Internal)
+		}
+		pidfd, err = openProcessIdentity(cmd.Process.Pid)
+		if err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return nil, Capabilities{}, failure(Internal)
+		}
 	}
-	a := &Adapter{cmd: cmd, stdin: stdin, stdout: stdout, nextID: 1, pending: make(map[int64]pendingCall), done: make(chan struct{}), waitDone: make(chan struct{}), shutdown: opts.ShutdownTimeout, maxFrame: opts.MaxFrameBytes, events: make(chan Event, 256), policies: make(map[turnKey]*policy.Snapshot), approvals: make(map[string]pendingApproval)}
+	a := &Adapter{cmd: cmd, pidfd: pidfd, containment: containment, stdin: stdin, stdout: stdout, nextID: 1, pending: make(map[int64]pendingCall), done: make(chan struct{}), waitDone: make(chan struct{}), shutdown: opts.ShutdownTimeout, maxFrame: opts.MaxFrameBytes, events: make(chan Event, 256), policies: make(map[turnKey]*policy.Snapshot), approvals: make(map[string]pendingApproval)}
 	go drainBounded(stderr, opts.MaxStderrBytes)
 	go a.wait()
 	go a.readLoop()
@@ -325,8 +378,110 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 	return a, caps, nil
 }
 
-func controlledEnvironment(extra map[string]string) []string {
-	allow := map[string]bool{"PATH": true, "HOME": true, "CODEX_HOME": true, "TMPDIR": true, "TMP": true, "TEMP": true, "SYSTEMROOT": true, "WINDIR": true}
+func containedExecutable(path string) (string, error) {
+	if filepath.Base(path) != "codex.js" {
+		return path, nil
+	}
+	var packageName, target string
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "linux/amd64":
+		packageName, target = "codex-linux-x64", "x86_64-unknown-linux-musl"
+	case "linux/arm64":
+		packageName, target = "codex-linux-arm64", "aarch64-unknown-linux-musl"
+	default:
+		return "", errors.New("contained Codex native binary is unsupported on this platform")
+	}
+	packageRoot := filepath.Dir(filepath.Dir(path))
+	candidates := []string{
+		filepath.Join(filepath.Dir(packageRoot), packageName, "vendor", target, "bin", "codex"),
+		filepath.Join(packageRoot, "vendor", target, "bin", "codex"),
+	}
+	for _, candidate := range candidates {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		f, err := os.Open(resolved)
+		if err != nil {
+			continue
+		}
+		var magic [4]byte
+		_, readErr := io.ReadFull(f, magic[:])
+		_ = f.Close()
+		if readErr == nil && string(magic[:]) == "\x7fELF" {
+			return resolved, nil
+		}
+	}
+	return "", errors.New("contained Codex native binary is unavailable")
+}
+
+// ProcessGroupHandle is the narrow production cleanup seam used by bounded
+// advisory workers. It exposes no command, prompt, PID, or protocol data.
+type ProcessGroupHandle interface {
+	GracefulTerminate(context.Context) error
+	ForceKill(context.Context) error
+	Wait(context.Context) error
+}
+
+type processGroupHandle struct{ adapter *Adapter }
+
+func (a *Adapter) ProcessGroupHandle() ProcessGroupHandle {
+	if a == nil {
+		return nil
+	}
+	return &processGroupHandle{adapter: a}
+}
+
+func (h *processGroupHandle) GracefulTerminate(ctx context.Context) error {
+	if h == nil || h.adapter == nil || h.adapter.pidfd <= 0 {
+		return failure(Internal)
+	}
+	if err := signalProcessIdentity(h.adapter.pidfd, false); err != nil {
+		return failure(CleanupFailed)
+	}
+	if !waitProcess(ctx, h.adapter.waitDone, h.adapter.shutdown) {
+		return failure(CleanupFailed)
+	}
+	if h.adapter.containmentErr != nil {
+		return failure(CleanupFailed)
+	}
+	return nil
+}
+
+func (h *processGroupHandle) ForceKill(ctx context.Context) error {
+	if h == nil || h.adapter == nil || h.adapter.pidfd <= 0 {
+		return failure(Internal)
+	}
+	if h.adapter.containment != nil {
+		if err := h.adapter.containment.killCgroup(); err != nil {
+			return failure(CleanupFailed)
+		}
+	}
+	if err := signalProcessIdentity(h.adapter.pidfd, true); err != nil {
+		return failure(CleanupFailed)
+	}
+	return h.Wait(ctx)
+}
+
+func (h *processGroupHandle) Wait(ctx context.Context) error {
+	if h == nil || h.adapter == nil {
+		return failure(Internal)
+	}
+	if !waitProcess(ctx, h.adapter.waitDone, h.adapter.shutdown) {
+		return failure(CleanupFailed)
+	}
+	if h.adapter.containmentErr != nil {
+		return failure(CleanupFailed)
+	}
+	return nil
+}
+
+func controlledEnvironment(extra map[string]string, credentialFree bool, transportCodexHome string) []string {
+	allow := map[string]bool{"PATH": true, "HOME": !credentialFree, "CODEX_HOME": !credentialFree, "TMPDIR": true, "TMP": true, "TEMP": true, "SYSTEMROOT": true, "WINDIR": true}
 	values := map[string]string{}
 	for _, item := range os.Environ() {
 		k, v, ok := strings.Cut(item, "=")
@@ -335,9 +490,19 @@ func controlledEnvironment(extra map[string]string) []string {
 		}
 	}
 	for k, v := range extra {
+		if credentialFree {
+			switch k {
+			case "PATH", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "WINDIR":
+			default:
+				continue
+			}
+		}
 		if !strings.ContainsAny(k, "=\x00") && !strings.ContainsRune(v, 0) {
 			values[k] = v
 		}
+	}
+	if credentialFree && transportCodexHome != "" && filepath.IsAbs(transportCodexHome) && !strings.ContainsRune(transportCodexHome, 0) {
+		values["CODEX_HOME"] = filepath.Clean(transportCodexHome)
 	}
 	values[ManagedSessionEnvironment] = "1"
 	out := make([]string, 0, len(values))
@@ -352,7 +517,15 @@ func drainBounded(r io.Reader, limit int) {
 	_, _ = io.Copy(io.Discard, r)
 }
 
-func (a *Adapter) wait() { _ = a.cmd.Wait(); close(a.waitDone) }
+func (a *Adapter) wait() {
+	_ = a.cmd.Wait()
+	if a.containment != nil {
+		a.containmentErr = a.containment.Close()
+	} else if a.pidfd > 0 {
+		_ = closeProcessIdentity(a.pidfd)
+	}
+	close(a.waitDone)
+}
 
 func (a *Adapter) readLoop() {
 	defer close(a.done)
@@ -476,12 +649,19 @@ func (a *Adapter) ResumeThread(ctx context.Context, threadID string, opts Thread
 }
 
 func threadParams(opts ThreadOptions) map[string]any {
+	sandbox := "workspace-write"
+	if opts.ReadOnly {
+		sandbox = "read-only"
+	}
 	params := map[string]any{
 		"cwd": opts.WorkingDirectory, "approvalPolicy": "never",
-		"sandbox": "workspace-write", "developerInstructions": opts.DeveloperInstructions,
+		"sandbox": sandbox, "developerInstructions": opts.DeveloperInstructions,
 	}
 	if opts.Model != "" {
 		params["model"] = opts.Model
+	}
+	if opts.Toolless {
+		params["tools"] = []any{}
 	}
 	return params
 }
@@ -885,14 +1065,32 @@ func (a *Adapter) fail(err error) {
 func (a *Adapter) Close(ctx context.Context) error {
 	a.closeOnce.Do(func() { a.mu.Lock(); a.closing = true; _ = a.stdin.Close(); a.mu.Unlock() })
 	if waitProcess(ctx, a.waitDone, a.shutdown) {
+		if a.containmentErr != nil {
+			return failure(CleanupFailed)
+		}
 		return nil
 	}
-	_ = a.cmd.Process.Signal(os.Interrupt)
+	h := a.ProcessGroupHandle()
+	if h != nil {
+		_ = h.GracefulTerminate(ctx)
+	} else {
+		_ = a.cmd.Process.Signal(os.Interrupt)
+	}
 	if waitProcess(ctx, a.waitDone, a.shutdown) {
+		if a.containmentErr != nil {
+			return failure(CleanupFailed)
+		}
 		return nil
 	}
-	_ = a.cmd.Process.Kill()
+	if h != nil {
+		_ = h.ForceKill(context.Background())
+	} else {
+		_ = a.cmd.Process.Kill()
+	}
 	if waitProcess(context.Background(), a.waitDone, a.shutdown) {
+		if a.containmentErr != nil {
+			return failure(CleanupFailed)
+		}
 		return nil
 	}
 	return failure(CleanupFailed)

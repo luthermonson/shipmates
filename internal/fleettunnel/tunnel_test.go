@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/fleetcommander"
 	"github.com/luthermonson/shipmates/internal/fleetidentity"
 	"github.com/luthermonson/shipmates/internal/fleetobserve"
 )
@@ -90,6 +91,64 @@ func serverFor(t *testing.T, r *fleetidentity.Registry, p *fleetobserve.Projecti
 }
 func status(string) WireSnapshot {
 	return WireSnapshot{Personas: []WirePersonaState{{Slot: 0, Session: fleetobserve.SessionIdle, Turn: fleetobserve.TurnNone, Activity: fleetobserve.ActivityIdle}}}
+}
+
+type schedulerMailbox struct{}
+
+func (schedulerMailbox) PullCommander(string, uint64) (*fleetcommander.Message, error) {
+	return nil, nil
+}
+func (schedulerMailbox) AckCommander(string, uint64) error                         { return nil }
+func (schedulerMailbox) IngestCommanderEvent(string, fleetcommander.Message) error { return nil }
+
+type countingCommanderStep struct {
+	mu     sync.Mutex
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (s *countingCommanderStep) Step(context.Context) error {
+	s.mu.Lock()
+	s.calls++
+	calls := s.calls
+	s.mu.Unlock()
+	if calls >= 2 && s.cancel != nil {
+		s.cancel()
+	}
+	return nil
+}
+
+func (s *countingCommanderStep) Calls() int { s.mu.Lock(); defer s.mu.Unlock(); return s.calls }
+
+func TestRunProjectedFairlySchedulesCommanderAfterInitialSnapshot(t *testing.T) {
+	r, p, en, c := fixture(t)
+	s, err := NewServer(ServerConfig{FleetID: en.FleetID, ServiceIdentity: "fleet-service", HandshakeTTL: 30 * time.Second, LeaseDuration: time.Minute, IOTimeout: time.Second, Clock: c, Random: bytes.NewReader(bytes.Repeat([]byte{21}, 64)), CommanderMailbox: schedulerMailbox{}}, r, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	step := &countingCommanderStep{cancel: cancel}
+	client, err := NewClient(ClientConfig{FleetID: en.FleetID, ServiceIdentity: "fleet-service", CredentialID: en.Credential.CredentialID, Secret: en.Credential.Secret, ShipID: en.ShipID, IOTimeout: time.Second, Clock: c, Connected: func(context.Context, uint64) (func(), error) { return func() {}, nil }, CommanderStep: func(context.Context, Channel, uint64) (CommanderStep, error) { return step, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := make(chan []fleetobserve.LocalPersonaState, 1)
+	updates <- []fleetobserve.LocalPersonaState{{Session: fleetobserve.SessionWorking, Turn: fleetobserve.TurnActive, Activity: fleetobserve.ActivityOther}}
+	close(updates)
+	cl, sv := pair()
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- s.Serve(ctx, sv) }()
+	_, _, runErr := client.runProjected(ctx, cl, status(en.ShipID), Resume{}, nil, updates, func(next []fleetobserve.LocalPersonaState) (WireSnapshot, error) {
+		return WireSnapshot{Personas: []WirePersonaState{{Slot: 0, Session: next[0].Session, Turn: next[0].Turn, Activity: next[0].Activity}}}, nil
+	})
+	if runErr == nil || step.Calls() < 2 {
+		t.Fatalf("run=%v commander_calls=%d", runErr, step.Calls())
+	}
+	if got := p.Snapshot().Ships[0].Personas[0].Turn; got != fleetobserve.TurnActive {
+		t.Fatalf("M7 update starved; turn=%q", got)
+	}
+	<-serverDone
 }
 
 func TestDeterministicOutboundHandshakeSnapshotEventAndClose(t *testing.T) {

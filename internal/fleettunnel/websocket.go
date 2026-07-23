@@ -2,6 +2,11 @@ package fleettunnel
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -9,9 +14,111 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/luthermonson/shipmates/internal/fleetconfig"
 	"github.com/luthermonson/shipmates/internal/fleetidentity"
 	"github.com/luthermonson/shipmates/internal/fleetobserve"
 )
+
+// BuildQualifierTLSConfig binds the administrator-loaded trust identity to
+// the TLS connection. The SPKI pin is checked in addition to normal hostname,
+// chain, and certificate validity verification.
+func BuildQualifierTLSConfig(loaded fleetconfig.Loaded) (*tls.Config, error) {
+	if err := loaded.Config.Validate(); err != nil {
+		return nil, errors.New("qualifier_config_invalid")
+	}
+	pool := x509.NewCertPool()
+	if ok := pool.AppendCertsFromPEM(loaded.Trust); !ok {
+		return nil, errors.New("qualifier_trust_invalid")
+	}
+	pin, err := hex.DecodeString(loaded.Config.SPKISHA256)
+	if err != nil || len(pin) != sha256.Size {
+		return nil, errors.New("qualifier_spki_invalid")
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		RootCAs:    pool,
+		ServerName: loaded.Config.TLSServerName,
+		NextProtos: []string{"http/1.1"},
+		VerifyConnection: func(state tls.ConnectionState) error {
+			if len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
+				return errors.New("qualifier_certificate_unverified")
+			}
+			sum := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+			if !equalBytes(sum[:], pin) {
+				return errors.New("qualifier_spki_mismatch")
+			}
+			return nil
+		},
+	}, nil
+}
+
+func equalBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var v byte
+	for i := range a {
+		v |= a[i] ^ b[i]
+	}
+	return v == 0
+}
+
+// QualifyHandshake consumes the same production Client handshake with a
+// caller-provided channel. Tests use this seam without listeners; production
+// callers use QualifyProduction below.
+func QualifyHandshake(ctx context.Context, loaded fleetconfig.Loaded, ch Channel) error {
+	var result error
+	result = (&loaded).UseForShipProof(func(fleetID, shipID, credentialID string, secret []byte) error {
+		client, err := NewClient(ClientConfig{FleetID: fleetID, ServiceIdentity: loaded.Config.Service, CredentialID: credentialID, Secret: string(secret), ShipID: shipID, IOTimeout: 10 * time.Second})
+		if err != nil {
+			return errors.New("qualifier_client_invalid")
+		}
+		_, err = client.Qualify(ctx, ch)
+		if err != nil {
+			return errors.New("qualifier_handshake_failed")
+		}
+		return nil
+	})
+	return result
+}
+
+// QualifyProfile requires the protected ship and Commander scope records in
+// addition to the public config/trust/ship-proof binding.
+func QualifyProfile(ctx context.Context, profile fleetconfig.Profile) error {
+	if profile.Ship.FleetID != profile.Config.FleetID || profile.Ship.ShipID != profile.Config.ShipID || profile.Commander.FleetID != profile.Config.FleetID || profile.Commander.ShipID != profile.Config.ShipID || profile.Commander.Capability != fleetidentity.CommanderDelegateCapability {
+		return errors.New("qualifier_profile_mismatch")
+	}
+	return QualifyProduction(ctx, profile.Loaded)
+}
+
+// QualifyProduction uses the real protected binding, TLS dialer, WebSocket
+// transport, and Client handshake. It never enters M7/M3 lifecycle work.
+func QualifyProduction(ctx context.Context, loaded fleetconfig.Loaded) error {
+	tlsConfig, err := BuildQualifierTLSConfig(loaded)
+	if err != nil {
+		return err
+	}
+	u, err := url.Parse(loaded.Config.FleetURL)
+	if err != nil || u.Scheme != "wss" || u.Path != "/api/fleet/v1/tunnel" || u.RawQuery != "" || u.Fragment != "" || u.Hostname() != loaded.Config.FleetDNS {
+		return errors.New("qualifier_endpoint_invalid")
+	}
+	dialer := websocket.Dialer{TLSClientConfig: tlsConfig, HandshakeTimeout: 10 * time.Second, EnableCompression: false}
+	return (&loaded).UseForShipProof(func(fleetID, shipID, credentialID string, secret []byte) error {
+		conn, _, dialErr := dialer.DialContext(ctx, u.String(), nil)
+		if dialErr != nil {
+			return errors.New("qualifier_tls_or_endpoint_failed")
+		}
+		defer conn.Close()
+		client, clientErr := NewClient(ClientConfig{FleetID: fleetID, ServiceIdentity: loaded.Config.Service, CredentialID: credentialID, Secret: string(secret), ShipID: shipID, IOTimeout: 10 * time.Second})
+		if clientErr != nil {
+			return errors.New("qualifier_client_invalid")
+		}
+		if _, clientErr = client.Qualify(ctx, &websocketChannel{c: conn, peer: loaded.Config.Service}); clientErr != nil {
+			return errors.New("qualifier_handshake_failed")
+		}
+		return nil
+	})
+}
 
 // WebSocketHandler adapts the single authenticated ship tunnel endpoint to the
 // transport-neutral server. TLS is owned by the enclosing production server;
@@ -44,6 +151,18 @@ func RunProductionLocalConnected(ctx context.Context, projectRoot, identityDir s
 }
 
 func RunProductionLocalConnectedUpdates(ctx context.Context, projectRoot, identityDir string, states []fleetobserve.LocalPersonaState, resume Resume, events []fleetobserve.LocalEvent, updates <-chan []fleetobserve.LocalPersonaState, connected func(context.Context, fleetidentity.ShipState, uint64) (func(), error)) (string, uint64, error) {
+	return runProductionLocalConnectedUpdates(ctx, projectRoot, identityDir, states, resume, events, updates, connected, nil)
+}
+
+// RunProductionLocalConnectedUpdatesCommander is the additive production
+// outbound seam for the negotiated M3 carrier. The callback runs only after
+// the existing M7 authentication and capability acceptance; it cannot create
+// a listener or alter M7 observation frames.
+func RunProductionLocalConnectedUpdatesCommander(ctx context.Context, projectRoot, identityDir string, states []fleetobserve.LocalPersonaState, resume Resume, events []fleetobserve.LocalEvent, updates <-chan []fleetobserve.LocalPersonaState, connected func(context.Context, fleetidentity.ShipState, uint64) (func(), error), commander func(context.Context, Channel, uint64) (CommanderStep, error)) (string, uint64, error) {
+	return runProductionLocalConnectedUpdates(ctx, projectRoot, identityDir, states, resume, events, updates, connected, commander)
+}
+
+func runProductionLocalConnectedUpdates(ctx context.Context, projectRoot, identityDir string, states []fleetobserve.LocalPersonaState, resume Resume, events []fleetobserve.LocalEvent, updates <-chan []fleetobserve.LocalPersonaState, connected func(context.Context, fleetidentity.ShipState, uint64) (func(), error), commander func(context.Context, Channel, uint64) (CommanderStep, error)) (string, uint64, error) {
 	identity, err := fleetidentity.LoadShipState(identityDir)
 	if err != nil {
 		return "", 0, err
@@ -72,7 +191,7 @@ func RunProductionLocalConnectedUpdates(ctx context.Context, projectRoot, identi
 	if connected != nil {
 		hook = func(c context.Context, g uint64) (func(), error) { return connected(c, identity, g) }
 	}
-	client, err := NewClient(ClientConfig{FleetID: identity.FleetID, ServiceIdentity: identity.FleetServiceIdentity, CredentialID: identity.CredentialID, Secret: identity.CredentialSecret, ShipID: identity.ShipID, IOTimeout: 10 * time.Second, Connected: hook})
+	client, err := NewClient(ClientConfig{FleetID: identity.FleetID, ServiceIdentity: identity.FleetServiceIdentity, CredentialID: identity.CredentialID, Secret: identity.CredentialSecret, ShipID: identity.ShipID, IOTimeout: 10 * time.Second, Connected: hook, CommanderStep: commander})
 	if err != nil {
 		_ = conn.Close()
 		return "", 0, err

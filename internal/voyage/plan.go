@@ -28,19 +28,101 @@ type Plan struct {
 	Risks              []string `json:"risks,omitempty"`
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"`
 	OpenDecisions      []string `json:"open_decisions,omitempty"`
-	Approved           bool     `json:"approved"`
-	Tasks              []Task   `json:"tasks"`
+	// AcceptanceGateTask is the sole task authorized to publish the explicit
+	// final acceptance marker. Empty preserves legacy plans, whose acceptance
+	// remains unknown rather than implicitly passing.
+	AcceptanceGateTask string `json:"acceptance_gate_task,omitempty"`
+	Approved           bool   `json:"approved"`
+	Tasks              []Task `json:"tasks"`
 }
 
 type Task struct {
-	ID        string   `json:"id"`
-	Persona   string   `json:"persona"`
-	Summary   string   `json:"summary"`
-	Prompt    string   `json:"prompt"`
-	DependsOn []string `json:"depends_on"`
-	Models    []string `json:"models,omitempty"`
-	Efforts   []string `json:"efforts,omitempty"`
-	RetrySafe bool     `json:"retry_safe,omitempty"`
+	ID        string        `json:"id"`
+	Persona   string        `json:"persona"`
+	Summary   string        `json:"summary"`
+	Prompt    string        `json:"prompt"`
+	DependsOn []string      `json:"depends_on"`
+	Models    []string      `json:"models,omitempty"`
+	Efforts   []string      `json:"efforts,omitempty"`
+	RetrySafe bool          `json:"retry_safe,omitempty"`
+	Recovery  *RecoveryTask `json:"recovery,omitempty"`
+}
+
+// RecoveryTask is an opt-in, immutable contract for future structured Sail
+// recovery. A nil value preserves the legacy process-error execution model.
+type RecoveryTask struct {
+	Enabled                  bool                 `json:"enabled"`
+	MaxAttempts              uint8                `json:"max_attempts"`
+	MaxInfrastructureRetries uint8                `json:"max_infrastructure_retries"`
+	MaxTokens                uint32               `json:"max_tokens"`
+	Models                   []string             `json:"models"`
+	Efforts                  []string             `json:"efforts"`
+	CorrectiveTemplates      []CorrectiveTemplate `json:"corrective_templates"`
+	ApprovedCriterionIDs     []string             `json:"approved_criterion_ids"`
+}
+
+type CorrectiveTemplate struct {
+	ID                  string   `json:"id"`
+	Summary             string   `json:"summary"`
+	Prompt              string   `json:"prompt"`
+	VerificationSummary string   `json:"verification_summary"`
+	VerificationPrompt  string   `json:"verification_prompt"`
+	CriterionIDs        []string `json:"criterion_ids"`
+	RetrySafe           bool     `json:"retry_safe"`
+}
+
+func (r *RecoveryTask) Validate() error {
+	if r == nil {
+		return nil
+	}
+	if !r.Enabled {
+		return errors.New("recovery contract must be explicitly enabled or omitted")
+	}
+	if r.MaxAttempts == 0 || r.MaxAttempts > 8 || r.MaxInfrastructureRetries > 8 || r.MaxTokens == 0 || r.MaxTokens > 1<<20 {
+		return errors.New("recovery contract budget is out of bounds")
+	}
+	if len(r.Models) == 0 || len(r.Models) > 4 || len(r.Efforts) == 0 || len(r.Efforts) > 4 || len(r.CorrectiveTemplates) > 8 {
+		return errors.New("recovery contract tiers or templates are out of bounds")
+	}
+	if r.MaxAttempts > uint8(len(r.Models)*len(r.Efforts)) {
+		return errors.New("recovery contract attempts exceed closed tier ladder")
+	}
+	for i, model := range r.Models {
+		if strings.TrimSpace(model) == "" || len(model) > 128 || (i > 0 && r.Models[i-1] == model) {
+			return errors.New("recovery contract has invalid model tier")
+		}
+	}
+	last := -1
+	for _, effort := range r.Efforts {
+		rank := map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}[effort]
+		if rank == 0 && effort != "low" {
+			return errors.New("recovery contract has invalid effort tier")
+		}
+		if _, ok := map[string]bool{"low": true, "medium": true, "high": true, "xhigh": true, "max": true}[effort]; !ok || rank < last {
+			return errors.New("recovery contract effort ladder is invalid")
+		}
+		last = rank
+	}
+	seen := map[string]bool{}
+	criteria := map[string]bool{}
+	for _, id := range r.ApprovedCriterionIDs {
+		if !taskIDPattern.MatchString(id) || criteria[id] {
+			return errors.New("invalid approved criterion id")
+		}
+		criteria[id] = true
+	}
+	for _, template := range r.CorrectiveTemplates {
+		if !taskIDPattern.MatchString(template.ID) || seen[template.ID] || strings.TrimSpace(template.Summary) == "" || strings.TrimSpace(template.Prompt) == "" || strings.TrimSpace(template.VerificationSummary) == "" || strings.TrimSpace(template.VerificationPrompt) == "" || len(template.Prompt) > 64<<10 || len(template.VerificationPrompt) > 64<<10 || !template.RetrySafe {
+			return errors.New("invalid corrective template")
+		}
+		for _, criterion := range template.CriterionIDs {
+			if !criteria[criterion] {
+				return errors.New("corrective template criterion is not approved")
+			}
+		}
+		seen[template.ID] = true
+	}
+	return nil
 }
 
 func Load(path string) (*Plan, []byte, error) {
@@ -113,6 +195,9 @@ func (p *Plan) validate(requireApproval bool) error {
 	if len(p.Tasks) == 0 || len(p.Tasks) > 128 {
 		return errors.New("voyage must contain 1 to 128 tasks")
 	}
+	if p.AcceptanceGateTask != "" && !taskIDPattern.MatchString(p.AcceptanceGateTask) {
+		return errors.New("invalid acceptance gate task")
+	}
 	byID := make(map[string]Task, len(p.Tasks))
 	for _, task := range p.Tasks {
 		if !taskIDPattern.MatchString(task.ID) {
@@ -132,6 +217,9 @@ func (p *Plan) validate(requireApproval bool) error {
 		}
 		if task.TierCount() > 1 && !task.RetrySafe {
 			return fmt.Errorf("task %q needs retry_safe for progressive escalation", task.ID)
+		}
+		if err := task.Recovery.Validate(); err != nil {
+			return fmt.Errorf("task %q recovery contract: %w", task.ID, err)
 		}
 		for _, model := range task.Models {
 			if strings.TrimSpace(model) == "" || len(model) > 128 {
@@ -161,6 +249,11 @@ func (p *Plan) validate(requireApproval bool) error {
 			lastEffort = rank
 		}
 		byID[task.ID] = task
+	}
+	if p.AcceptanceGateTask != "" {
+		if _, ok := byID[p.AcceptanceGateTask]; !ok {
+			return errors.New("acceptance gate task is not in the plan")
+		}
 	}
 	for _, task := range p.Tasks {
 		seen := map[string]bool{}
@@ -235,13 +328,20 @@ func Hash(canonical []byte) string {
 // intentionally includes ordered dependencies and every dispatch/escalation
 // field; task IDs alone are never an inheritance key.
 func TaskFingerprint(t Task) string {
-	return hashCanonical(struct {
+	legacy := struct {
 		ID, Persona, Summary, Prompt string
 		DependsOn                    []string
 		Models                       []string
 		Efforts                      []string
 		RetrySafe                    bool
-	}{t.ID, t.Persona, t.Summary, t.Prompt, t.DependsOn, t.Models, t.Efforts, t.RetrySafe})
+	}{t.ID, t.Persona, t.Summary, t.Prompt, t.DependsOn, t.Models, t.Efforts, t.RetrySafe}
+	if t.Recovery == nil {
+		return hashCanonical(legacy)
+	}
+	return hashCanonical(struct {
+		Legacy   any
+		Recovery *RecoveryTask
+	}{legacy, t.Recovery})
 }
 
 // GlobalFingerprint conservatively covers plan fields whose change can alter
@@ -254,7 +354,8 @@ func GlobalFingerprint(p *Plan) string {
 		BlastArea, Risks   []string
 		AcceptanceCriteria []string
 		OpenDecisions      []string
-	}{p.Version, p.Title, p.Objective, p.Scope, p.NonGoals, p.BlastArea, p.Risks, p.AcceptanceCriteria, p.OpenDecisions})
+		AcceptanceGateTask string
+	}{p.Version, p.Title, p.Objective, p.Scope, p.NonGoals, p.BlastArea, p.Risks, p.AcceptanceCriteria, p.OpenDecisions, p.AcceptanceGateTask})
 }
 
 // TaskFingerprints returns local and dependency-closure fingerprints in a

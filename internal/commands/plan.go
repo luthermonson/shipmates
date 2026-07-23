@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/luthermonson/shipmates/internal/livesession"
 	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
+	"github.com/luthermonson/shipmates/internal/recovery"
 	"github.com/luthermonson/shipmates/internal/voyage"
 	"github.com/urfave/cli/v3"
 )
@@ -151,7 +153,7 @@ func runPlanningRoom(ctx context.Context, skipper string, fresh, plain bool, ret
 	retryFailed := false
 	verboseSail := false
 	var consultation planningConsult
-	refresh := func() { model.Sidebar = voyageSidebar(defaultVoyagePlan) }
+	refresh := func() { refreshPlanSidebar(model, defaultVoyagePlan) }
 	hook := func(hookCtx context.Context, input dashboard.ParsedInput) (bool, bool, error) {
 		if consultation.Active() && (input.Kind == dashboard.ParsedMessage || input.Kind == dashboard.ParsedConsult || input.Kind == dashboard.ParsedSail) {
 			model.Notice("Architect consultation in progress; /quit and /interrupt remain available")
@@ -232,6 +234,13 @@ func runPlanningRoom(ctx context.Context, skipper string, fresh, plain bool, ret
 	editor := dashboard.NewNativeEditor(os.Stdin, os.Stdout)
 	err = dashboard.ActionLoopWithHooksAndSync(ctx, editor, dashboard.NativeSize(os.Stdout), dashboard.NativeRenderer(os.Stdout, plain, editor), model, conn, refresh, hook, syncHook)
 	return sailRequested, retryFailed, verboseSail, err
+}
+
+// refreshPlanSidebar is the host-side reload boundary used before every Plan
+// redraw. It deliberately re-reads both plan and persisted state through
+// voyageSidebar instead of retaining a prior acceptance projection.
+func refreshPlanSidebar(model *dashboard.Model, path string) {
+	model.Sidebar = voyageSidebar(path)
 }
 
 type planningConsultResult struct {
@@ -372,16 +381,22 @@ func voyageSidebar(path string) *dashboard.Sidebar {
 	if err != nil {
 		return &dashboard.Sidebar{Title: "VOYAGE PLAN", Status: "Draft unavailable: " + boundedSailText(err.Error(), 96), Sections: []dashboard.SidebarSection{{Heading: "Next", Items: []string{"Describe the outcome to the Skipper"}}}}
 	}
+	hash := voyage.Hash(canonical)
 	status := "DRAFT - Captain approval required"
 	if p.Approved {
 		status = "APPROVED - /sail when ready"
 	}
 	var state *voyage.State
+	var stateLoadErr error
 	statePath := filepath.Join(project.Dir, "voyages", voyage.Hash(canonical)[:16]+".json")
 	if _, statErr := os.Stat(statePath); statErr == nil {
-		state, _ = voyage.LoadState(statePath, p, voyage.Hash(canonical))
+		state, stateLoadErr = voyage.LoadState(statePath, p, voyage.Hash(canonical))
 	}
 	completed := state != nil && len(state.Tasks) == len(p.Tasks)
+	acceptanceStatus := voyage.AcceptanceUnset
+	if state != nil && state.Acceptance != nil {
+		acceptanceStatus = state.Acceptance.Status
+	}
 	failed, active := false, false
 	if state != nil {
 		for _, entry := range state.Tasks {
@@ -398,12 +413,25 @@ func voyageSidebar(path string) *dashboard.Sidebar {
 	}
 	objective := p.Objective
 	if completed {
-		status = "COMPLETED - acceptance criteria passed"
-		objective = "PASS - " + objective
+		switch acceptanceStatus {
+		case voyage.AcceptancePass:
+			status = "COMPLETED - acceptance criteria passed"
+			objective = "PASS - " + objective
+		case voyage.AcceptanceNoGo:
+			status = "COMPLETED - acceptance failed"
+			objective = "NO-GO - " + objective
+		default:
+			status = "COMPLETED - acceptance unknown"
+		}
 	} else if active {
 		status = "SAILING - crew tasks active"
 	} else if failed {
 		status = "INCOMPLETE - review blockers with Skipper"
+	} else if p.Approved && (state == nil || stateLoadErr != nil) {
+		// A missing, legacy, malformed, stale, or mismatched persisted state
+		// cannot prove acceptance. Keep the plan actionable, but make unknown
+		// explicit rather than allowing a cached or inferred success notice.
+		status = "APPROVED - acceptance unknown"
 	}
 	sections := []dashboard.SidebarSection{{Heading: "Objective", Items: []string{objective}}}
 	appendSection := func(name string, values []string) {
@@ -416,9 +444,13 @@ func voyageSidebar(path string) *dashboard.Sidebar {
 	appendSection("Blast area", p.BlastArea)
 	appendSection("Risks", p.Risks)
 	acceptance := append([]string(nil), p.AcceptanceCriteria...)
-	if completed {
+	if completed && acceptanceStatus == voyage.AcceptancePass {
 		for i := range acceptance {
 			acceptance[i] = "PASS - " + acceptance[i]
+		}
+	} else if completed && acceptanceStatus == voyage.AcceptanceNoGo {
+		for i := range acceptance {
+			acceptance[i] = "NO-GO - " + acceptance[i]
 		}
 	}
 	appendSection("Acceptance", acceptance)
@@ -438,5 +470,252 @@ func voyageSidebar(path string) *dashboard.Sidebar {
 		jobs = append(jobs, fmt.Sprintf("[%s] %s [%s]%s %s", taskStatus, task.ID, task.Persona, bead, task.Summary))
 	}
 	appendSection("Jobs", jobs)
+	if recovery := recoverySidebar(hash, p, state); len(recovery) > 0 {
+		sections = append(sections, dashboard.SidebarSection{Heading: "Auto-captain recovery (advisory)", Items: recovery})
+	}
+	if structured := structuredRecoverySidebar(hash, p); len(structured) > 0 {
+		sections = append(sections, dashboard.SidebarSection{Heading: "Structured Sail recovery", Items: structured})
+	}
 	return &dashboard.Sidebar{Title: p.Title, Status: status, Sections: sections}
+}
+
+type structuredAttemptDisplay struct {
+	ID, Model, Effort, TaskFingerprint, ResultHash             string
+	Outcome                                                    recovery.CrewOutcome
+	Reason                                                     recovery.CrewReason
+	Tokens                                                     recovery.TokenUsage
+	EvidenceCount                                              uint8
+	Verifier                                                   recovery.VerifierStatus
+	NextModel, NextEffort, To, Action, Cause                   string
+	Infrastructure                                             uint8
+	Corrective, CorrectiveBead, Verification, VerificationBead string
+}
+
+// structuredRecoverySidebar is a bounded projection of the append-only
+// semantic ledger. It never renders prompts, summaries, paths, or raw records.
+func structuredRecoverySidebar(planHash string, p *voyage.Plan) []string {
+	if p == nil {
+		return nil
+	}
+	items := make([]string, 0, 12)
+	for _, task := range p.Tasks {
+		if task.Recovery == nil || !task.Recovery.Enabled {
+			continue
+		}
+		ledger, err := recovery.OpenAttemptLedger(structuredLedgerPath(planHash, task))
+		if err != nil || len(ledger.Records) == 0 {
+			continue
+		}
+		attempts := make([]*structuredAttemptDisplay, 0, 8)
+		byID := make(map[string]*structuredAttemptDisplay)
+		for _, record := range ledger.Records {
+			if len(attempts) >= 8 && record.Kind == "reservation" {
+				continue
+			}
+			entry := byID[record.AttemptID]
+			switch record.Kind {
+			case "reservation":
+				var value recovery.AttemptReservation
+				if json.Unmarshal(record.Payload, &value) != nil {
+					continue
+				}
+				entry = &structuredAttemptDisplay{ID: value.AttemptID, Model: value.Model, Effort: value.Effort, TaskFingerprint: value.TaskFingerprint, Tokens: value.Tokens}
+				byID[record.AttemptID] = entry
+				attempts = append(attempts, entry)
+			case "result":
+				var value recovery.ResultRecord
+				if json.Unmarshal(record.Payload, &value) != nil {
+					continue
+				}
+				if entry == nil {
+					entry = &structuredAttemptDisplay{ID: record.AttemptID}
+					byID[record.AttemptID] = entry
+					attempts = append(attempts, entry)
+				}
+				entry.ResultHash, entry.Model, entry.Effort = value.ResultHash, value.Model, value.Effort
+				entry.Outcome, entry.Reason, entry.TaskFingerprint = value.Outcome, value.Reason, value.TaskFingerprint
+				entry.Tokens, entry.EvidenceCount, entry.Verifier = value.Tokens, value.EvidenceCount, value.VerifierStatus
+				entry.Corrective = value.CorrectiveTemplateID
+			case "transition":
+				var value recovery.TransitionRecord
+				if json.Unmarshal(record.Payload, &value) != nil {
+					continue
+				}
+				if entry == nil {
+					continue
+				}
+				entry.To, entry.Action = value.Transition.To, string(value.Transition.Action)
+				entry.NextModel, entry.NextEffort = value.Transition.NextModel, value.Transition.NextEffort
+				entry.Cause = string(entry.Reason)
+			case "infrastructure_retry":
+				if entry == nil {
+					continue
+				}
+				entry.Infrastructure++
+			case "corrective_successor":
+				var value recovery.CorrectiveSuccessor
+				if json.Unmarshal(record.Payload, &value) != nil || entry == nil {
+					continue
+				}
+				entry.Corrective, entry.CorrectiveBead = value.Task.ID, value.TaskBeadID
+				entry.Verification, entry.VerificationBead = value.VerificationTask.ID, value.VerificationBeadID
+			}
+		}
+		for _, entry := range attempts {
+			if entry.Model == "" {
+				entry.Model = "unknown"
+			}
+			if entry.Effort == "" {
+				entry.Effort = "unknown"
+			}
+			remaining := uint32(0)
+			if entry.Tokens.Reserved >= entry.Tokens.Used {
+				remaining = entry.Tokens.Reserved - entry.Tokens.Used
+			}
+			next := "none"
+			if entry.NextModel != "" {
+				next = safeSidebar(entry.NextModel, 32) + "/" + safeSidebar(entry.NextEffort, 16)
+			}
+			line := fmt.Sprintf("%s: slot=crew-result | current=%s/%s | next=%s | budget=%d reserved,%d used,%d remaining | outcome=%s | reason=%s", task.ID, safeSidebar(entry.Model, 64), safeSidebar(entry.Effort, 16), next, entry.Tokens.Reserved, entry.Tokens.Used, remaining, safeSidebar(stringOrUnknown(entry.Outcome), 32), safeSidebar(stringOrUnknown(entry.Reason), 40))
+			if entry.EvidenceCount > 0 || entry.ResultHash != "" {
+				line += " | evidence=" + shortHash(entry.ResultHash)
+			}
+			if entry.TaskFingerprint != "" {
+				line += " | fingerprint=" + shortHash(entry.TaskFingerprint)
+			}
+			if entry.Infrastructure > 0 {
+				line += fmt.Sprintf(" | infrastructure retries=%d", entry.Infrastructure)
+			}
+			if entry.NextModel != "" {
+				line += " | transition=" + safeSidebar(entry.Model, 32) + "/" + safeSidebar(entry.Effort, 16) + " -> " + safeSidebar(entry.NextModel, 32) + "/" + safeSidebar(entry.NextEffort, 16) + " cause=" + safeSidebar(entry.Cause, 32)
+			}
+			if entry.To == "needs_input" {
+				line += " | pause=Captain input required | Sol=advisory only"
+			}
+			if entry.Verifier == recovery.VerifierNoGo {
+				line += " | verifier=NO-GO"
+			}
+			if entry.Corrective != "" {
+				line += " | successor=" + safeSidebar(entry.Corrective, 32) + " bead=" + safeSidebar(entry.CorrectiveBead, 24) + " follow-up=" + safeSidebar(entry.Verification, 32) + " bead=" + safeSidebar(entry.VerificationBead, 24)
+			}
+			if entry.To != "" {
+				line += " | state=" + safeSidebar(entry.To, 32)
+			}
+			items = append(items, line)
+		}
+	}
+	return items
+}
+
+func stringOrUnknown[T ~string](value T) string {
+	if value == "" {
+		return "unknown"
+	}
+	return string(value)
+}
+
+type recoveryDisplayRecord struct {
+	Kind        string `json:"kind"`
+	Fingerprint string `json:"blocker_fingerprint"`
+	Reason      string `json:"reason"`
+	Decision    string `json:"decision"`
+	Action      string `json:"action"`
+	Evidence    []struct {
+		Source string `json:"source"`
+		Digest string `json:"digest"`
+	} `json:"evidence"`
+}
+
+// recoverySidebar is deliberately a presentation-only projection. It reads
+// only bounded, already persisted recovery records and never exposes a
+// proposal as an executable control.
+func recoverySidebar(planHash string, p *voyage.Plan, state *voyage.State) []string {
+	items := []string{"feature: " + boolWord(recoveryEnabled()) + " | Sol model: gpt-5.6-sol | authority: Sail, not Sol"}
+	items = append(items, "machine-approved derivatives: bounded envelope only | Captain approval required for material amendments")
+	if state != nil {
+		items = append(items, "successor: "+shortHash(planHash))
+		if state.Lineage != nil {
+			items = append(items, "predecessor: "+shortHash(state.Lineage.PredecessorPlanHash))
+		}
+	}
+	records := readRecoveryDisplayRecords(planHash)
+	assessments := 0
+	for _, record := range records {
+		if record.Kind != "assessment" && record.Kind != "blocker" {
+			continue
+		}
+		if record.Kind == "assessment" {
+			assessments++
+		}
+		fp := shortHash(record.Fingerprint)
+		if record.Kind == "blocker" {
+			items = append(items, "blocker: "+safeSidebar(record.Reason, 64)+" | fingerprint: "+fp)
+			for _, evidence := range record.Evidence {
+				items = append(items, "evidence: "+safeSidebar(evidence.Source, 32)+"#"+shortHash(evidence.Digest))
+			}
+		} else {
+			decision := safeSidebar(record.Decision, 32)
+			if decision == "resume" || decision == "continue" {
+				items = append(items, "recommendation: "+decision+" | accepted action: bounded retry/resume")
+			} else if decision == "amendment_required" {
+				items = append(items, "recommendation: amendment required | accepted action: none | material change requires Captain approval")
+			} else {
+				items = append(items, "recommendation: "+decision+" | accepted action: none")
+			}
+		}
+	}
+	if assessments > 0 {
+		items = append(items, fmt.Sprintf("attempts assessed: %d", assessments))
+	}
+	_ = p // retain the plan in this presentation seam for future bounded fields
+	return items
+}
+
+func recoveryEnabled() bool {
+	cfg, err := project.LoadConfig()
+	return err == nil && cfg.Recovery.AutoCaptain
+}
+
+func readRecoveryDisplayRecords(planHash string) []recoveryDisplayRecord {
+	b, err := os.ReadFile(filepath.Join(project.Dir, "recovery", planHash[:16]+".jsonl"))
+	if err != nil || len(b) > 4<<20 {
+		return nil
+	}
+	lines := strings.Split(string(b), "\n")
+	if len(lines) > 129 {
+		lines = lines[len(lines)-129:]
+	}
+	out := make([]recoveryDisplayRecord, 0, 8)
+	for _, line := range lines {
+		var record recoveryDisplayRecord
+		if strings.TrimSpace(line) == "" || json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		if record.Kind == "blocker" || record.Kind == "assessment" {
+			out = append(out, record)
+		}
+		if len(out) >= 8 {
+			out = out[len(out)-8:]
+		}
+	}
+	return out
+}
+
+func shortHash(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 12 {
+		return value[:12]
+	}
+	if value == "" {
+		return "—"
+	}
+	return value
+}
+
+func safeSidebar(value string, limit int) string { return boundedSailText(value, limit) }
+func boolWord(value bool) string {
+	if value {
+		return "enabled"
+	}
+	return "disabled"
 }

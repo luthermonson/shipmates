@@ -52,6 +52,10 @@ func fleetServeObserverWithConfig(production fleetobserver.ProductionConfig) *cl
 		production.FleetEpoch = c.String("fleet-epoch")
 		production.SteerEpoch = c.Uint64("steer-epoch")
 		production.ServiceIdentity = c.String("service-identity")
+		// The Fleet mailbox is an additive per-ship durable partition beneath the
+		// authority store. Ships remain opt-in; enabling the store here only
+		// advertises the negotiated M3 capability to authenticated ships.
+		production.CommanderMailboxRoot = production.AuthorityStore
 		production.InterruptTargetLifetime = c.Duration("interrupt-target-lifetime")
 		production.InterruptObservationFreshness = c.Duration("interrupt-observation-freshness")
 		production.InterruptSubjectAdmissionWindow = c.Duration("interrupt-subject-admission-window")

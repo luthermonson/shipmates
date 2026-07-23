@@ -1,0 +1,26 @@
+{
+  "schema":"fleet.commander-m3.vectors.v1","canonicalization":"RFC 8785 JCS; M3 digest uses literal ASCII backslash-zero domain separator; inner M1 envelope bytes and digest are unchanged",
+  "positive":[
+    {"name":"one-instruction-one-m2-assessment","expect":{"instruction":"accepted_to_fleet_mailbox","ship_inbox":"durable_before_ack","m2_calls":1,"progress_carrier":"ship.event.v1","progress":["received","accepted"],"completed_carrier":"ship.event.v1","completed":"advised","work_mutations":0}},
+    {"name":"valid-ship-event-carrier","fixture":"valid-ship-event.json","expect":{"carrier":"accept","direction":"ship_to_fleet","transport_ack_only":true}},
+    {"name":"reconnect-replay","precondition":"delivery_ack_lost_after_ship_inbox_commit","expect":{"m2_calls":0,"fleet_delivery":"byte_identical_replay","completed_replayed":true}},
+    {"name":"two-ship-isolation","precondition":"same_commander_submits_one_ship_a_instruction","expect":{"ship_a":"delivered","ship_b":"no_inventory_or_delivery"}}
+  ],
+  "negative":[
+    {"name":"instruction-cannot-add-prompt","mutation":"add body.prompt","expect":{"fleet_admission":"reject","m2_calls":0}},
+    {"name":"instruction-envelope-digest-mismatch","mutation":"change envelope after digest","expect":{"ship":"reject","m2_calls":0}},
+    {"name":"wrong-capability","precondition":"observe_or_steer_principal_submits_instruction","expect":{"fleet_admission":"reject","ship_delivery":false}},
+    {"name":"expired-offline","precondition":"ship_offline_until_envelope_expiry","expect":{"fleet_state":"expired","m2_calls":0}},
+    {"name":"semantic-supersession-forbidden","mutation":"add supersedes_instruction_id","expect":{"fleet_admission":"reject","m2_calls":0}},
+    {"name":"backpressure","precondition":"16_live_fleet_to_ship_rows","expect":{"fleet_admission":"backpressure","m2_calls":0}},
+    {"name":"revocation-before-delivery","precondition":"commander_capability_revoked_before_pull","expect":{"fleet_delivery":false,"m2_calls":0}},
+    {"name":"connection-supersession-is-not-business-supersession","precondition":"new_m7_generation_after_delivery","expect":{"mailbox_replay":true,"m2_calls":0}},
+    {"name":"unknown-carrier-or-message","mutation":"type=commander.answer.v1","expect":{"connection":"protocol_refusal","m7_observation":"unchanged"}},
+    {"name":"completed-is-redacted","mutation":"include_prompt_path_private_id_or_raw_sol_text","expect":{"ship_outbox":"reject","fleet_projection":"absent"}},
+    {"name":"pull-is-body-free","mutation":"ship.pull.v1 with message","expect":{"connection":"protocol_refusal","m2_calls":0}},
+    {"name":"ack-is-body-free","mutation":"mailbox.ack.v1 with captain.completed.v1 message","expect":{"connection":"protocol_refusal","completed_delivery":false}},
+    {"name":"delivery-is-instruction-only","mutation":"fleet.delivery.v1 with captain.progress.v1 message","expect":{"connection":"protocol_refusal","fleet_event_ingest":false}},
+    {"name":"ship-event-is-projection-only","mutation":"ship.event.v1 with commander.instruction.v1 message","expect":{"connection":"protocol_refusal","m2_calls":0}},
+    {"name":"every-carrier-has-both-cursors","mutation":"omit fleet_to_ship_ack or ship_to_fleet_ack","expect":{"connection":"protocol_refusal"}}
+  ]
+}
