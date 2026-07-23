@@ -223,27 +223,6 @@ func (r *Runtime) ResolveApproval(context.Context, runtime.ApprovalResponse, run
 	return false, &runtime.ErrUnsupported{Runtime: "claude", Feature: "ResolveApproval (Phase 4 hook plumbing)"}
 }
 
-// InstallPersona writes .claude/agents/<name>.md for the requested persona.
-// TODO(phase 4): render from PersonaSpec once the canonical catalog format
-// exists; today the branch's catalog code handles this on the codex side
-// and the shipmates commands own the claude side.
-func (r *Runtime) InstallPersona(context.Context, string, runtime.PersonaSpec) error {
-	return &runtime.ErrUnsupported{Runtime: "claude", Feature: "InstallPersona (Phase 4)"}
-}
-
-// UninstallPersona removes .claude/agents/<name>.md. See InstallPersona
-// TODO — same deferral applies.
-func (r *Runtime) UninstallPersona(context.Context, string, string) error {
-	return &runtime.ErrUnsupported{Runtime: "claude", Feature: "UninstallPersona (Phase 4)"}
-}
-
-// InstallMemoryHook writes the SessionStart hook block into
-// .claude/settings.json so the persona reads .shipmates/memory/<persona>/
-// on session start. TODO(phase 4): actually implement.
-func (r *Runtime) InstallMemoryHook(context.Context, string) error {
-	return &runtime.ErrUnsupported{Runtime: "claude", Feature: "InstallMemoryHook (Phase 4)"}
-}
-
 // Close implements runtime.Runtime.
 func (r *Runtime) Close(context.Context) error {
 	r.stopped.Do(func() { close(r.stopFan) })

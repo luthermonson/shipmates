@@ -131,28 +131,6 @@ func (r *Runtime) ResolveApproval(ctx context.Context, resp runtime.ApprovalResp
 	}, codexDecision)
 }
 
-// InstallPersona writes .codex/agents/<name>.md for the requested persona.
-// TODO(phase 4): pull persona shape from PersonaSpec once the canonical
-// catalog format lands. For now the branch's existing
-// installer/catalog code owns persona provisioning; this method is a
-// forward-looking hook.
-func (r *Runtime) InstallPersona(context.Context, string, runtime.PersonaSpec) error {
-	return &runtime.ErrUnsupported{Runtime: "codex", Feature: "InstallPersona (Phase 4)"}
-}
-
-// UninstallPersona removes .codex/agents/<name>.md. See InstallPersona
-// TODO — same deferral applies.
-func (r *Runtime) UninstallPersona(context.Context, string, string) error {
-	return &runtime.ErrUnsupported{Runtime: "codex", Feature: "UninstallPersona (Phase 4)"}
-}
-
-// InstallMemoryHook wires the codex session-start memory injection. The
-// mechanism is codex-specific and not yet plumbed through the wrapper.
-// TODO(phase 4): mirror what claude does with SessionStart hooks.
-func (r *Runtime) InstallMemoryHook(context.Context, string) error {
-	return &runtime.ErrUnsupported{Runtime: "codex", Feature: "InstallMemoryHook (Phase 4)"}
-}
-
 // Close implements runtime.Runtime.
 func (r *Runtime) Close(ctx context.Context) error {
 	r.stopped.Do(func() { close(r.stopFan) })
