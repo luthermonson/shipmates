@@ -16,9 +16,9 @@ func TestParseCPUTime(t *testing.T) {
 		{"1-01:02:03.00", 90123.0, true},
 		{"", 0, false},
 		{"garbage", 0, false},
-		{"xx:10.0", 0, false},       // bad minutes must be an error, not 0.0
-		{"aa:bb:10.0", 0, false},    // bad hours must be an error
-		{"1:02:zz.0", 0, false},     // bad seconds must be an error
+		{"xx:10.0", 0, false},    // bad minutes must be an error, not 0.0
+		{"aa:bb:10.0", 0, false}, // bad hours must be an error
+		{"1:02:zz.0", 0, false},  // bad seconds must be an error
 		{"nope-01:02:03.0", 0, false},
 	} {
 		got, err := parseCPUTime(tc.in)

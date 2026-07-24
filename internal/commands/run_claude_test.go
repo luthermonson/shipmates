@@ -39,9 +39,9 @@ func newFakeRuntime(script []runtime.Event) *fakeRuntime {
 	}
 }
 
-func (f *fakeRuntime) Name() string                     { return f.name }
-func (f *fakeRuntime) Capabilities() runtime.Caps       { return runtime.Caps{Streaming: true} }
-func (f *fakeRuntime) Events() <-chan runtime.Event     { return f.events }
+func (f *fakeRuntime) Name() string                               { return f.name }
+func (f *fakeRuntime) Capabilities() runtime.Caps                 { return runtime.Caps{Streaming: true} }
+func (f *fakeRuntime) Events() <-chan runtime.Event               { return f.events }
 func (f *fakeRuntime) CloseSession(context.Context, string) error { return nil }
 
 func (f *fakeRuntime) StartSession(_ context.Context, spec runtime.SessionSpec) (runtime.Session, error) {

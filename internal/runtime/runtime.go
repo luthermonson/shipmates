@@ -166,14 +166,14 @@ type Event struct {
 type Kind string
 
 const (
-	KindText            Kind = "text"
-	KindToolCall        Kind = "tool_call"
-	KindToolResult      Kind = "tool_result"
-	KindApprovalNeeded  Kind = "approval_needed"
-	KindTurnDone        Kind = "turn_done"
-	KindSessionClosed   Kind = "session_closed"
-	KindError           Kind = "error"
-	KindBackend         Kind = "backend" // runtime-specific escape hatch
+	KindText           Kind = "text"
+	KindToolCall       Kind = "tool_call"
+	KindToolResult     Kind = "tool_result"
+	KindApprovalNeeded Kind = "approval_needed"
+	KindTurnDone       Kind = "turn_done"
+	KindSessionClosed  Kind = "session_closed"
+	KindError          Kind = "error"
+	KindBackend        Kind = "backend" // runtime-specific escape hatch
 )
 
 // ApprovalResponse carries a runtime's approval request through shipmates so

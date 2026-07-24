@@ -144,7 +144,7 @@ type processMemoryCounters struct {
 }
 
 var (
-	psapi                   = windows.NewLazySystemDLL("psapi.dll")
+	psapi                    = windows.NewLazySystemDLL("psapi.dll")
 	procGetProcessMemoryInfo = psapi.NewProc("GetProcessMemoryInfo")
 )
 

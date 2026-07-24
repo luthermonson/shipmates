@@ -134,9 +134,9 @@ func (h *handle) pollLoop() {
 				} else if rss > h.limits.MaxRSSBytes {
 					_ = killTree(h.cmd, true)
 					h.emit(containment.Event{
-						Reason:  containment.ReasonMemoryLimit,
-						Detail:  fmt.Sprintf("RSS %d bytes exceeded limit %d", rss, h.limits.MaxRSSBytes),
-						At:      time.Now(),
+						Reason:   containment.ReasonMemoryLimit,
+						Detail:   fmt.Sprintf("RSS %d bytes exceeded limit %d", rss, h.limits.MaxRSSBytes),
+						At:       time.Now(),
 						ExitCode: -1,
 					})
 					return
@@ -151,9 +151,9 @@ func (h *handle) pollLoop() {
 					if cpu > h.limits.MaxCPUSeconds {
 						_ = killTree(h.cmd, true)
 						h.emit(containment.Event{
-							Reason:  containment.ReasonCPULimit,
-							Detail:  fmt.Sprintf("CPU %.2fs exceeded limit %.2fs", cpu, h.limits.MaxCPUSeconds),
-							At:      time.Now(),
+							Reason:   containment.ReasonCPULimit,
+							Detail:   fmt.Sprintf("CPU %.2fs exceeded limit %.2fs", cpu, h.limits.MaxCPUSeconds),
+							At:       time.Now(),
 							ExitCode: -1,
 						})
 						return
