@@ -16,6 +16,7 @@ package factory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/luthermonson/shipmates/internal/codexapp"
@@ -105,7 +106,10 @@ func containmentFor(c config.Containment) (containment.Watcher, containment.Limi
 		return none.New(), containment.Limits{}, nil
 	case "cgroup":
 		// TODO: land the cgroup Watcher adapter as a separate commit. For
-		// now degrade gracefully rather than fail hard.
+		// now degrade gracefully rather than fail hard — but say so, since
+		// the operator asked for kernel-enforced containment and is getting
+		// the polling watchdog instead.
+		slog.Warn("containment mode cgroup requested; cgroup adapter not yet implemented, degrading to watchdog")
 		return watchdog.New(), limits, nil
 	default:
 		return nil, containment.Limits{}, fmt.Errorf("factory: unknown containment mode %q", c.Mode)
