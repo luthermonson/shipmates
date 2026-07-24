@@ -475,7 +475,7 @@ func openDirNoFollow(path string, allowCurrentOwner bool) (int, error) {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return -1, errors.New("unsafe protected directory")
 	}
-	fd, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open("/", dirOpenFlags, 0)
 	if err != nil {
 		return -1, err
 	}
@@ -484,7 +484,7 @@ func openDirNoFollow(path string, allowCurrentOwner bool) (int, error) {
 			_ = unix.Close(fd)
 			return -1, errors.New("unsafe protected directory")
 		}
-		next, openErr := unix.Openat(fd, part, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		next, openErr := unix.Openat(fd, part, dirOpenFlags, 0)
 		if openErr != nil {
 			_ = unix.Close(fd)
 			return -1, openErr
