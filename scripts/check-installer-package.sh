@@ -25,7 +25,7 @@ test -x internal/installer/payloads/linux_amd64/shipmates-cgroup-launcher
 test -x internal/installer/payloads/linux_arm64/shipmates-m3-qualifier-run
 test -x internal/installer/payloads/linux_arm64/shipmates-cgroup-launcher
 test "$(grep -R -l 'sudo shipmates install' docs README.md | wc -l)" -ge 1
-test "$(grep -R -l 'shipmates-runtime-v1' internal/installer scripts Makefile | wc -l)" -ge 1
+test "$(grep -R -l 'shipmates-runtime-v1' internal/installer scripts magefile.go | wc -l)" -ge 1
 
 epoch=${SOURCE_DATE_EPOCH:-1700000000}
 for n in one two; do

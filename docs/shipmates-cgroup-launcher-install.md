@@ -12,7 +12,7 @@ executes `sudo` for this step.
 Build the pinned target from the repository root:
 
 ```text
-make shipmates-cgroup-launcher-verify
+go run mage.go cgroupLauncherVerify
 ```
 
 Before installation, verify the generated file is an ELF executable and that

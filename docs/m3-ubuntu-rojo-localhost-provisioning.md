@@ -13,7 +13,7 @@ qualifier, invokes `sudo`, contacts Fleet, or starts systemd.
 Historical build/provisioning details follow for audit and migration context:
 
 ```text
-make shipmates-m3-provision
+go run mage.go m3Provision
 ```
 
 An administrator must install the verified provisioner and fixed runner as:

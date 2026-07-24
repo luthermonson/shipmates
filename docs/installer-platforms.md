@@ -88,8 +88,8 @@ and [qualifier helper history](shipmates-cgroup-launcher-install.md).
 ## Packaging and reproducibility
 
 The release binary embeds the same assets used to generate the installer
-manifest. `make shipmates-installer-manifest` emits the closed JSON manifest
-for offline review. `make shipmates-release` requires `SOURCE_DATE_EPOCH`,
+manifest. `go run mage.go installerManifest` emits the closed JSON manifest
+for offline review. `go run mage.go release` requires `SOURCE_DATE_EPOCH`,
 builds a trimmed Linux binary, emits the manifest alongside the binary and
 operator docs, writes a sorted SHA-256 checksum file, and creates a normalized
 owner/group/timestamp archive. GoReleaser archives the operator docs and
