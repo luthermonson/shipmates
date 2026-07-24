@@ -12,6 +12,7 @@ package watchdog
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"sync"
 	"time"
@@ -113,6 +114,10 @@ func (h *handle) waitLoop() {
 }
 
 // pollLoop samples RSS/CPU on the configured cadence and kills on breach.
+// A failed sample (process racing exit, malformed ps output, permission)
+// is a skipped tick, never a 0.0 reading — it's logged at debug so a
+// persistently failing sampler is diagnosable instead of silently
+// disabling the limit.
 func (h *handle) pollLoop() {
 	tick := time.NewTicker(h.limits.EffectivePollInterval())
 	defer tick.Stop()
@@ -124,7 +129,9 @@ func (h *handle) pollLoop() {
 		case <-tick.C:
 			if h.limits.MaxRSSBytes > 0 {
 				rss, err := sampleRSS(h.cmd.Process.Pid)
-				if err == nil && rss > h.limits.MaxRSSBytes {
+				if err != nil {
+					slog.Debug("watchdog: rss sample failed", "pid", h.cmd.Process.Pid, "err", err)
+				} else if rss > h.limits.MaxRSSBytes {
 					_ = killTree(h.cmd, true)
 					h.emit(containment.Event{
 						Reason:  containment.ReasonMemoryLimit,
@@ -137,7 +144,9 @@ func (h *handle) pollLoop() {
 			}
 			if h.limits.MaxCPUSeconds > 0 {
 				cpu, err := sampleCPUSeconds(h.cmd.Process.Pid)
-				if err == nil {
+				if err != nil {
+					slog.Debug("watchdog: cpu sample failed", "pid", h.cmd.Process.Pid, "err", err)
+				} else {
 					lastCPU = cpu
 					if cpu > h.limits.MaxCPUSeconds {
 						_ = killTree(h.cmd, true)

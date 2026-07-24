@@ -70,6 +70,10 @@ func sampleCPUSeconds(pid int) (float64, error) {
 }
 
 // parseCPUTime accepts "MM:SS.hh" or "HH:MM:SS.hh" or "D-HH:MM:SS.hh".
+// Every component parse error is surfaced: a malformed ps sample must
+// register as a failed sample at the caller (which skips it and retries
+// next tick), never as a silent 0.0 that would keep the CPU limit from
+// ever triggering.
 func parseCPUTime(s string) (float64, error) {
 	if s == "" {
 		return 0, fmt.Errorf("watchdog: empty cpu time")
@@ -78,7 +82,7 @@ func parseCPUTime(s string) (float64, error) {
 	if i := strings.Index(s, "-"); i > 0 {
 		d, err := strconv.Atoi(s[:i])
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("watchdog: bad cpu time days in %q: %w", s, err)
 		}
 		days = float64(d)
 		s = s[i+1:]
@@ -89,20 +93,27 @@ func parseCPUTime(s string) (float64, error) {
 	}
 	var h, m float64
 	var secStr string
+	var err error
 	switch len(parts) {
 	case 2:
-		m, _ = strconv.ParseFloat(parts[0], 64)
+		if m, err = strconv.ParseFloat(parts[0], 64); err != nil {
+			return 0, fmt.Errorf("watchdog: bad cpu time minutes in %q: %w", s, err)
+		}
 		secStr = parts[1]
 	case 3:
-		h, _ = strconv.ParseFloat(parts[0], 64)
-		m, _ = strconv.ParseFloat(parts[1], 64)
+		if h, err = strconv.ParseFloat(parts[0], 64); err != nil {
+			return 0, fmt.Errorf("watchdog: bad cpu time hours in %q: %w", s, err)
+		}
+		if m, err = strconv.ParseFloat(parts[1], 64); err != nil {
+			return 0, fmt.Errorf("watchdog: bad cpu time minutes in %q: %w", s, err)
+		}
 		secStr = parts[2]
 	default:
 		return 0, fmt.Errorf("watchdog: unrecognized cpu time %q", s)
 	}
 	sec, err := strconv.ParseFloat(secStr, 64)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("watchdog: bad cpu time seconds in %q: %w", s, err)
 	}
 	return days*86400 + h*3600 + m*60 + sec, nil
 }
