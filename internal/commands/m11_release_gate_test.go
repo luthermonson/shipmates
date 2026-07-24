@@ -41,9 +41,10 @@ func TestMain(m *testing.M) {
 // public_other.go — so those branches are added by
 // m11_release_gate_unix_test.go via init() when the unix build tag applies.
 var m11PublicCommandTree = map[string][]string{
-	"":        {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail"},
+	"":        {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail", "brig", "freeze", "release"},
 	"policy":  {"validate", "explain"},
 	"routing": {"apply", "show"},
+	"brig":    {"list", "explain", "log", "install"},
 }
 
 func m11Root() *cli.Command {
