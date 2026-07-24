@@ -108,11 +108,18 @@ func selectAskRuntime(ctx context.Context, cliRuntime string) (runtime.Runtime, 
 // resolve the persona, start or resume its session, send the turn, stream
 // normalized events, and persist the session marker for later resume.
 func dispatchRuntimeImages(ctx context.Context, rt runtime.Runtime, persona, prompt string, fresh bool, paths []string, stdout, stderr io.Writer) error {
-	if persona == "captain" {
-		return errors.New("captain is reserved for the human operator; use skipper or quartermaster")
-	}
 	if len(paths) > 0 {
 		return fmt.Errorf("--image is not yet supported with the %s runtime; drop the flag or use --runtime codex", rt.Name())
+	}
+	return dispatchRuntimeTurn(ctx, rt, persona, prompt, fresh, nil, stdout, stderr)
+}
+
+// dispatchRuntimeTurn sends one turn (optionally carrying attachments)
+// through a runtime.Runtime, streams its normalized events, and persists
+// the session marker for later resume.
+func dispatchRuntimeTurn(ctx context.Context, rt runtime.Runtime, persona, prompt string, fresh bool, attachments []runtime.Attachment, stdout, stderr io.Writer) error {
+	if persona == "captain" {
+		return errors.New("captain is reserved for the human operator; use skipper or quartermaster")
 	}
 	if _, err := project.CanonicalPersonaAt(".", persona); err != nil {
 		return err
@@ -146,7 +153,7 @@ func dispatchRuntimeImages(ctx context.Context, rt runtime.Runtime, persona, pro
 		return fmt.Errorf("start %s session: %w", rt.Name(), err)
 	}
 
-	if _, err := rt.SendTurn(ctx, session.ID(), runtime.TurnInput{Text: prompt}); err != nil {
+	if _, err := rt.SendTurn(ctx, session.ID(), runtime.TurnInput{Text: prompt, Attachments: attachments}); err != nil {
 		return fmt.Errorf("send turn: %w", err)
 	}
 	if err := streamRuntimeEvents(ctx, rt, stdout, stderr); err != nil {

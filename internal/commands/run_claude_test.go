@@ -19,6 +19,7 @@ import (
 // command layer handed to the runtime.
 type fakeRuntime struct {
 	name   string
+	caps   runtime.Caps
 	events chan runtime.Event
 	script []runtime.Event
 
@@ -33,14 +34,15 @@ type fakeRuntime struct {
 func newFakeRuntime(script []runtime.Event) *fakeRuntime {
 	return &fakeRuntime{
 		name:      "claude",
+		caps:      runtime.Caps{Streaming: true, Attachments: true},
 		events:    make(chan runtime.Event, len(script)+1),
 		script:    script,
 		sessionID: "fake-session-id",
 	}
 }
 
-func (f *fakeRuntime) Name() string                               { return f.name }
-func (f *fakeRuntime) Capabilities() runtime.Caps                 { return runtime.Caps{Streaming: true} }
+func (f *fakeRuntime) Name() string               { return f.name }
+func (f *fakeRuntime) Capabilities() runtime.Caps { return f.caps }
 func (f *fakeRuntime) Events() <-chan runtime.Event               { return f.events }
 func (f *fakeRuntime) CloseSession(context.Context, string) error { return nil }
 

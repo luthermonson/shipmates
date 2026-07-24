@@ -244,19 +244,19 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 			return nil, err
 		}
 	}
-	if err := p.writeUserMessage(in.Text); err != nil {
+	if err := p.writeUserMessage(in.Text, in.Attachments); err != nil {
 		releaseSlot()
 		return nil, fmt.Errorf("claude: write turn to session process: %w", err)
 	}
 	return &turn{id: turnID, sessionID: sessionID, startedAt: time.Now()}, nil
 }
 
-// SteerTurn implements runtime.Runtime. Writes an additional user message
-// to the session process's stdin while a turn is in flight; Claude Code
-// folds it into the active turn (single result frame). Errors if the
-// session has no active turn — a message written between turns would start
-// a NEW turn, which is SendTurn's job.
-func (r *Runtime) SteerTurn(_ context.Context, sessionID, _ string, text string) error {
+// SendTurnAttachments is SteerTurn with attachments: it folds an additional
+// user message carrying image content blocks into the session's in-flight
+// turn. Verified against claude 2.1.153 — an image block written mid-turn
+// is absorbed by the running turn and answered in its single result frame,
+// exactly like a text steer.
+func (r *Runtime) SteerTurnInput(_ context.Context, sessionID, _ string, in runtime.TurnInput) error {
 	r.sessMu.Lock()
 	s, ok := r.sessions[sessionID]
 	if !ok {
@@ -269,10 +269,19 @@ func (r *Runtime) SteerTurn(_ context.Context, sessionID, _ string, text string)
 	}
 	p := s.proc
 	r.sessMu.Unlock()
-	if err := p.writeUserMessage(text); err != nil {
+	if err := p.writeUserMessage(in.Text, in.Attachments); err != nil {
 		return fmt.Errorf("claude: write steer to session process: %w", err)
 	}
 	return nil
+}
+
+// SteerTurn implements runtime.Runtime. Writes an additional user message
+// to the session process's stdin while a turn is in flight; Claude Code
+// folds it into the active turn (single result frame). Errors if the
+// session has no active turn — a message written between turns would start
+// a NEW turn, which is SendTurn's job.
+func (r *Runtime) SteerTurn(ctx context.Context, sessionID, turnID string, text string) error {
+	return r.SteerTurnInput(ctx, sessionID, turnID, runtime.TurnInput{Text: text})
 }
 
 // InterruptTurn implements runtime.Runtime. Sends the in-band interrupt
@@ -580,17 +589,42 @@ type proc struct {
 	stdinDone bool
 }
 
-// writeUserMessage writes one stream-json user-message line:
+// writeUserMessage writes one stream-json user-message line. With no
+// attachments that is a single text block:
 //
 //	{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}
-func (p *proc) writeUserMessage(text string) error {
+//
+// With image attachments the image blocks precede the text block, using the
+// Anthropic content-block shape (verified against claude 2.1.153):
+//
+//	{"type":"image","source":{"type":"base64","media_type":"image/png","data":"<b64>"}}
+//
+// Images come first because a trailing text block reads as the operator's
+// instruction about the images that precede it.
+func (p *proc) writeUserMessage(text string, attachments []runtime.Attachment) error {
+	content := make([]map[string]any, 0, len(attachments)+1)
+	for _, a := range attachments {
+		if a.Kind != "image" || a.MediaType == "" || a.Base64 == "" {
+			// Non-image attachments are represented in the turn text by
+			// internal/attach; nothing to encode here. Refuse rather than
+			// silently drop an image we cannot type.
+			return fmt.Errorf("claude: attachment %q is not an encodable image content block", a.DisplayPath)
+		}
+		content = append(content, map[string]any{
+			"type": "image",
+			"source": map[string]any{
+				"type":       "base64",
+				"media_type": a.MediaType,
+				"data":       a.Base64,
+			},
+		})
+	}
+	content = append(content, map[string]any{"type": "text", "text": text})
 	msg := map[string]any{
 		"type": "user",
 		"message": map[string]any{
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "text", "text": text},
-			},
+			"role":    "user",
+			"content": content,
 		},
 	}
 	return p.writeLine(msg)

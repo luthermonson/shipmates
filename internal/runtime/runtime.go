@@ -141,13 +141,31 @@ type TurnInput struct {
 	Attachments []Attachment
 }
 
-// Attachment references a file to include with a turn. Runtimes decide how
-// to encode it (base64 inline, upload API, tool call, etc.).
+// Attachment is a file included with a turn, already validated and read by
+// the caller (see internal/turninput and internal/attach). Runtimes decide
+// how to encode it: codex passes the local path, claude emits a base64
+// content block.
+//
+// Only attachments a runtime can carry natively appear here — today that
+// means images. Text is inlined into TurnInput.Text and binary files are
+// referenced by path in TurnInput.Text, both by internal/attach, so no
+// runtime has to decide what to do with an arbitrary byte stream.
 type Attachment struct {
+	// Path is the validated absolute path inside the project root.
 	Path string
-	// Kind is a hint: "image", "text", "audio", "binary". Runtimes may
-	// ignore.
+	// DisplayPath is the project-relative, slash-normalized path. Safe to
+	// put in a prompt or show an operator.
+	DisplayPath string
+	// Kind is a hint: "image", "text", "binary".
 	Kind string
+	// MediaType is the IANA media type, e.g. "image/png". Required by
+	// runtimes that emit typed content blocks.
+	MediaType string
+	// Size is the file size in bytes at validation time.
+	Size uint64
+	// Base64 is the standard-encoded file content. Populated by the caller
+	// immediately before the turn is sent, after revalidating the file.
+	Base64 string
 }
 
 // Event is the normalized cross-runtime event shape. Payload is per-Kind.
