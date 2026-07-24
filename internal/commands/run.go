@@ -45,9 +45,12 @@ func Ask() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "fresh", Usage: "start a new session instead of resuming (applies config changes like model/effort)"},
 			&cli.DurationFlag{Name: "timeout", Value: 10 * time.Minute, Usage: "maximum wall-clock duration for the crew turn"},
-			&cli.StringSliceFlag{Name: "image", Usage: "attach an existing in-project PNG, JPEG, GIF, or WebP (repeatable)"},
+			removedImageFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
+			if len(c.StringSlice("image")) > 0 {
+				return removedImageFlagError("ask")
+			}
 			persona := c.Args().First()
 			prompt := strings.TrimSpace(strings.Join(c.Args().Tail(), " "))
 			if persona == "" || prompt == "" {
@@ -55,30 +58,41 @@ func Ask() *cli.Command {
 			}
 			turnCtx, cancel := context.WithTimeout(ctx, c.Duration("timeout"))
 			defer cancel()
-			return dispatchAskImages(turnCtx, c.String("runtime"), persona, prompt, c.Bool("fresh"), c.StringSlice("image"))
+			return dispatchAsk(turnCtx, c.String("runtime"), persona, prompt, c.Bool("fresh"))
 		},
 	}
 }
 
-// dispatchAskImages routes an ask turn: resolve the runtime via the
-// Selector, dispatch through the runtime interface when it resolves to
-// claude, and fall back to the codex-native dispatcher otherwise.
-func dispatchAskImages(ctx context.Context, cliRuntime, persona, prompt string, fresh bool, paths []string) error {
-	return dispatchAskToImages(ctx, cliRuntime, persona, prompt, fresh, paths, os.Stdout, os.Stderr)
+// removedImageFlag keeps `--image` parseable but hidden on ask and live, so
+// an operator who still types it gets removedImageFlagError instead of
+// urfave/cli's bare "flag provided but not defined".
+func removedImageFlag() cli.Flag {
+	return &cli.StringSliceFlag{Name: "image", Hidden: true, Usage: "removed — use `shipmates show`"}
 }
 
-func dispatchAskToImages(ctx context.Context, cliRuntime, persona, prompt string, fresh bool, paths []string, stdout, stderr io.Writer) error {
+func removedImageFlagError(command string) error {
+	return fmt.Errorf("--image was removed from %s; use `shipmates show <persona> <file-path>... [--caption <text>]`, which attaches any file, not just images", command)
+}
+
+// dispatchAsk routes an ask turn: resolve the runtime via the Selector,
+// dispatch through the runtime interface when it resolves to claude, and
+// fall back to the codex-native dispatcher otherwise.
+func dispatchAsk(ctx context.Context, cliRuntime, persona, prompt string, fresh bool) error {
+	return dispatchAskTo(ctx, cliRuntime, persona, prompt, fresh, os.Stdout, os.Stderr)
+}
+
+func dispatchAskTo(ctx context.Context, cliRuntime, persona, prompt string, fresh bool, stdout, stderr io.Writer) error {
 	rt, source, err := selectAskRuntime(ctx, cliRuntime)
 	if err != nil {
 		return err
 	}
 	if rt == nil {
 		// Codex-native path, exactly as before the runtime interface.
-		return dispatchToImages(ctx, persona, prompt, fresh, paths, stdout, stderr)
+		return dispatchTo(ctx, persona, prompt, fresh, stdout, stderr)
 	}
 	defer rt.Close(ctx)
 	slog.Debug("ask: dispatching through runtime interface", "runtime", rt.Name(), "source", source, "persona", persona)
-	return dispatchRuntimeImages(ctx, rt, persona, prompt, fresh, paths, stdout, stderr)
+	return dispatchRuntimeTurn(ctx, rt, persona, prompt, fresh, nil, stdout, stderr)
 }
 
 // selectAskRuntime resolves the runtime for an ask turn. A nil Runtime with
@@ -102,16 +116,6 @@ func selectAskRuntime(ctx context.Context, cliRuntime string) (runtime.Runtime, 
 		return nil, source, nil
 	}
 	return rt, source, nil
-}
-
-// dispatchRuntimeImages is the runtime-interface ask path (claude today):
-// resolve the persona, start or resume its session, send the turn, stream
-// normalized events, and persist the session marker for later resume.
-func dispatchRuntimeImages(ctx context.Context, rt runtime.Runtime, persona, prompt string, fresh bool, paths []string, stdout, stderr io.Writer) error {
-	if len(paths) > 0 {
-		return fmt.Errorf("--image is not yet supported with the %s runtime; drop the flag or use --runtime codex", rt.Name())
-	}
-	return dispatchRuntimeTurn(ctx, rt, persona, prompt, fresh, nil, stdout, stderr)
 }
 
 // dispatchRuntimeTurn sends one turn (optionally carrying attachments)
@@ -221,7 +225,10 @@ func formatRuntimeErrorPayload(payload any) string {
 }
 
 func Live() *cli.Command {
-	return &cli.Command{Name: "live", Usage: "start a Codex-native live turn", ArgsUsage: "<persona> <prompt>", Flags: []cli.Flag{&cli.BoolFlag{Name: "fresh"}, &cli.StringSliceFlag{Name: "image", Usage: "attach an existing in-project raster image (repeatable)"}}, Action: func(ctx context.Context, c *cli.Command) error {
+	return &cli.Command{Name: "live", Usage: "start a live turn", ArgsUsage: "<persona> <prompt>", Flags: []cli.Flag{&cli.BoolFlag{Name: "fresh"}, removedImageFlag()}, Action: func(ctx context.Context, c *cli.Command) error {
+		if len(c.StringSlice("image")) > 0 {
+			return removedImageFlagError("live")
+		}
 		persona := c.Args().First()
 		prompt := strings.TrimSpace(strings.Join(c.Args().Tail(), " "))
 		if persona == "" || prompt == "" {
@@ -234,9 +241,6 @@ func Live() *cli.Command {
 			return err
 		}
 		body := map[string]any{"prompt": prompt, "fresh": c.Bool("fresh")}
-		if images := c.StringSlice("image"); len(images) > 0 {
-			body["images"] = images
-		}
 		resp, err := client.Do(ctx, http.MethodPost, "/api/live/"+url.PathEscape(persona), body)
 		if err != nil {
 			return err

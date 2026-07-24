@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
 )
 
-func TestImageLiveCLIForwardsOrderedPathsAndZeroImageOmission(t *testing.T) {
+// TestLiveNeverForwardsImages locks in the removal of `--image` from live:
+// the start request carries prompt and fresh only, and no path is smuggled
+// into the prompt. Attachments go through `shipmates show`.
+func TestLiveNeverForwardsImages(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeLiveCommandDiscovery(t)
 	old := http.DefaultTransport
@@ -26,24 +28,19 @@ func TestImageLiveCLIForwardsOrderedPathsAndZeroImageOmission(t *testing.T) {
 		bodies = append(bodies, v)
 		return response(200, `{"persona":"backend","session_id":"s","thread_id":"t","turn_id":"u","state":"working"}`, nil), nil
 	})
-	for _, args := range [][]string{{"live", "--image", "space a.png", "--image", "-dash.png", "backend", "inspect"}, {"live", "backend", "plain"}} {
-		cmd := Live()
-		cmd.Writer = &bytes.Buffer{}
-		cmd.ErrWriter = &bytes.Buffer{}
-		if e := cmd.Run(context.Background(), args); e != nil {
-			t.Fatal(e)
-		}
+	cmd := Live()
+	cmd.Writer = &bytes.Buffer{}
+	cmd.ErrWriter = &bytes.Buffer{}
+	if e := cmd.Run(context.Background(), []string{"live", "backend", "plain"}); e != nil {
+		t.Fatal(e)
 	}
-	images := bodies[0]["images"].([]any)
-	if images[0] != "space a.png" || images[1] != "-dash.png" {
-		t.Fatalf("order=%v", images)
+	if len(bodies) != 1 {
+		t.Fatalf("requests = %d, want 1", len(bodies))
 	}
-	if _, ok := bodies[1]["images"]; ok {
-		t.Fatal("zero-image request changed")
+	if _, ok := bodies[0]["images"]; ok {
+		t.Fatalf("live still forwards images: %v", bodies[0])
 	}
-	for _, b := range bodies {
-		if strings.Contains(b["prompt"].(string), ".png") {
-			t.Fatal("path embedded in prompt")
-		}
+	if bodies[0]["prompt"] != "plain" {
+		t.Fatalf("prompt = %v", bodies[0]["prompt"])
 	}
 }

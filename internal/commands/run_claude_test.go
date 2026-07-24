@@ -11,6 +11,7 @@ import (
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/runtime"
 	"github.com/luthermonson/shipmates/internal/turninput"
+	"github.com/urfave/cli/v3"
 )
 
 // fakeRuntime is a hand-rolled runtime.Runtime for testing the ask dispatch
@@ -134,8 +135,8 @@ func TestAskDispatchesThroughRuntimeSelector(t *testing.T) {
 	swapSelector(t, rt)
 
 	var stdout, stderr bytes.Buffer
-	if err := dispatchAskToImages(context.Background(), "claude", "security", "review this", false, nil, &stdout, &stderr); err != nil {
-		t.Fatalf("dispatchAskToImages: %v", err)
+	if err := dispatchAskTo(context.Background(), "claude", "security", "review this", false, &stdout, &stderr); err != nil {
+		t.Fatalf("dispatchAskTo: %v", err)
 	}
 
 	if !strings.Contains(stdout.String(), "claude answer") {
@@ -175,8 +176,8 @@ func TestAskResumesRuntimeSessionOnMetaMatch(t *testing.T) {
 	swapSelector(t, rt)
 
 	var stdout, stderr bytes.Buffer
-	if err := dispatchAskToImages(context.Background(), "claude", "security", "again", false, nil, &stdout, &stderr); err != nil {
-		t.Fatalf("dispatchAskToImages: %v", err)
+	if err := dispatchAskTo(context.Background(), "claude", "security", "again", false, &stdout, &stderr); err != nil {
+		t.Fatalf("dispatchAskTo: %v", err)
 	}
 	if len(rt.resumeCalls) != 1 || rt.resumeCalls[0] != "prior-session-id" {
 		t.Errorf("resume calls = %v, want [prior-session-id]", rt.resumeCalls)
@@ -202,8 +203,8 @@ func TestAskFreshFlagStartsNewRuntimeSession(t *testing.T) {
 	swapSelector(t, rt)
 
 	var stdout, stderr bytes.Buffer
-	if err := dispatchAskToImages(context.Background(), "claude", "security", "again", true, nil, &stdout, &stderr); err != nil {
-		t.Fatalf("dispatchAskToImages: %v", err)
+	if err := dispatchAskTo(context.Background(), "claude", "security", "again", true, &stdout, &stderr); err != nil {
+		t.Fatalf("dispatchAskTo: %v", err)
 	}
 	if len(rt.startCalls) != 1 || len(rt.resumeCalls) != 0 {
 		t.Errorf("start/resume calls = %d/%d, want 1/0", len(rt.startCalls), len(rt.resumeCalls))
@@ -231,8 +232,8 @@ func TestAskFallsBackToCodexNativePath(t *testing.T) {
 	t.Cleanup(func() { codexTurnDispatcher = prev })
 
 	var stdout, stderr bytes.Buffer
-	if err := dispatchAskToImages(context.Background(), "", "security", "review this", false, nil, &stdout, &stderr); err != nil {
-		t.Fatalf("dispatchAskToImages: %v", err)
+	if err := dispatchAskTo(context.Background(), "", "security", "review this", false, &stdout, &stderr); err != nil {
+		t.Fatalf("dispatchAskTo: %v", err)
 	}
 	if invoked != 1 {
 		t.Errorf("codex dispatcher invoked %d times, want 1", invoked)
@@ -254,7 +255,7 @@ func TestAskRuntimeErrorEventReturnsError(t *testing.T) {
 	swapSelector(t, rt)
 
 	var stdout, stderr bytes.Buffer
-	err := dispatchAskToImages(context.Background(), "claude", "security", "hi", false, nil, &stdout, &stderr)
+	err := dispatchAskTo(context.Background(), "claude", "security", "hi", false, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "boom: model timed out") {
 		t.Fatalf("expected error carrying payload, got %v", err)
 	}
@@ -264,18 +265,39 @@ func TestAskRuntimeErrorEventReturnsError(t *testing.T) {
 	}
 }
 
-// TestAskRuntimePathRejectsImages verifies --image is refused on the
-// runtime-interface path with an actionable message.
-func TestAskRuntimePathRejectsImages(t *testing.T) {
+// TestRemovedImageFlagPointsAtShow verifies the removed `--image` spelling
+// on ask and live still parses and answers with a pointer at `show`, rather
+// than urfave/cli's bare "flag provided but not defined", and that it never
+// dispatches a turn.
+func TestRemovedImageFlagPointsAtShow(t *testing.T) {
 	t.Chdir(t.TempDir())
 	installCodexPersona(t, "security")
 	rt := newFakeRuntime(turnScript("unused"))
 	swapSelector(t, rt)
 
-	var stdout, stderr bytes.Buffer
-	err := dispatchAskToImages(context.Background(), "claude", "security", "hi", false, []string{"x.png"}, &stdout, &stderr)
-	if err == nil || !strings.Contains(err.Error(), "not yet supported") {
-		t.Fatalf("expected image rejection, got %v", err)
+	for _, tc := range []struct {
+		name    string
+		command func() *cli.Command
+		argv    []string
+	}{
+		{"ask", Ask, []string{"ask", "--image", "x.png", "security", "hi"}},
+		{"live", Live, []string{"live", "--image", "x.png", "security", "hi"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := tc.command()
+			cmd.Writer = &bytes.Buffer{}
+			cmd.ErrWriter = &bytes.Buffer{}
+			err := cmd.Run(context.Background(), tc.argv)
+			if err == nil || !strings.Contains(err.Error(), "shipmates show") {
+				t.Fatalf("err = %v, want a pointer at shipmates show", err)
+			}
+			if strings.Contains(err.Error(), "not defined") {
+				t.Fatalf("removed flag surfaced as a parse error: %v", err)
+			}
+		})
+	}
+	if len(rt.sentTurns) != 0 {
+		t.Fatalf("a refused --image still dispatched a turn: %+v", rt.sentTurns)
 	}
 }
 
@@ -286,7 +308,7 @@ func TestAskRuntimePathReservesCaptain(t *testing.T) {
 	rt := newFakeRuntime(nil)
 	swapSelector(t, rt)
 	var stdout, stderr bytes.Buffer
-	err := dispatchAskToImages(context.Background(), "claude", "captain", "hi", false, nil, &stdout, &stderr)
+	err := dispatchAskTo(context.Background(), "claude", "captain", "hi", false, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "reserved") {
 		t.Fatalf("expected captain-reserved error, got %v", err)
 	}
