@@ -19,6 +19,7 @@ import (
 	"github.com/luthermonson/shipmates/internal/codexapp"
 	"github.com/luthermonson/shipmates/internal/livesession"
 	"github.com/luthermonson/shipmates/internal/project"
+	"github.com/luthermonson/shipmates/internal/runtime/env"
 )
 
 type Server struct {
@@ -44,13 +45,21 @@ type discoveryRecord struct {
 
 func New() *Server { return NewWithCodexOptions(codexapp.StartOptions{}) }
 
+// NewWithCodexOptions builds the project-local live-session server. Live
+// sessions run on whichever runtime the operator selected: the manager is
+// given the production runtime.Selector, so SHIPMATES_RUNTIME and
+// .shipmates/config.yaml are honored here exactly as they are by `ask`.
+// The server is a separate process, so the client-side `--runtime` flag
+// does not reach it — config or the environment variable is how you steer
+// the server's runtime.
 func NewWithCodexOptions(options codexapp.StartOptions) *Server {
 	root, _ := os.Getwd()
 	if canonical, err := project.CanonicalRoot(root); err == nil {
 		root = canonical
 	}
 	scope, _ := project.ScopeID(root)
-	return &Server{projectRoot: root, projectScope: scope, liveSessions: livesession.NewAt(root, nil, options), stopCh: make(chan struct{}), ready: make(chan struct{})}
+	manager := livesession.NewWithRuntime(root, env.New(), "", nil, options)
+	return &Server{projectRoot: root, projectScope: scope, liveSessions: manager, stopCh: make(chan struct{}), ready: make(chan struct{})}
 }
 
 func (s *Server) Ready() <-chan struct{} { return s.ready }

@@ -30,10 +30,25 @@ func LiveContinuityMarker(persona string) string {
 	return BackendSessionMarker(persona, CodexAppServerBackend)
 }
 
+// LiveContinuityMarkerFor is the marker path for a specific live backend.
+// Each backend keeps its own marker file, so switching runtimes never
+// resumes a thread the other runtime minted.
+func LiveContinuityMarkerFor(persona, backend string) string {
+	return BackendSessionMarker(persona, backend)
+}
+
+// liveBackendName bounds what may appear in a marker's backend field, so a
+// hand-edited marker cannot name an arbitrary string.
+var liveBackendName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
 func validateLiveContinuity(m LiveContinuity) error {
-	if m.SchemaVersion != LiveContinuitySchema || m.Backend != CodexAppServerBackend ||
+	return validateLiveContinuityFor(m, CodexAppServerBackend)
+}
+
+func validateLiveContinuityFor(m LiveContinuity, backend string) error {
+	if m.SchemaVersion != LiveContinuitySchema || m.Backend != backend || !liveBackendName.MatchString(backend) ||
 		!liveThreadID.MatchString(m.ThreadID) || !fingerprintRE.MatchString(m.ConfigFingerprint) {
-		return errors.New("invalid Codex live continuity marker")
+		return errors.New("invalid live continuity marker")
 	}
 	return nil
 }
@@ -45,10 +60,18 @@ func ReadLiveContinuity(persona string) (LiveContinuity, bool, error) {
 }
 
 func ReadLiveContinuityAt(root, persona string) (LiveContinuity, bool, error) {
+	return ReadLiveContinuityBackendAt(root, persona, CodexAppServerBackend)
+}
+
+// ReadLiveContinuityBackendAt reads the marker for one live backend.
+func ReadLiveContinuityBackendAt(root, persona, backend string) (LiveContinuity, bool, error) {
 	if err := ValidatePersonaName(persona); err != nil {
 		return LiveContinuity{}, false, err
 	}
-	b, err := os.ReadFile(filepath.Join(root, LiveContinuityMarker(persona)))
+	if !liveBackendName.MatchString(backend) {
+		return LiveContinuity{}, false, errors.New("invalid live backend name")
+	}
+	b, err := os.ReadFile(filepath.Join(root, LiveContinuityMarkerFor(persona, backend)))
 	if errors.Is(err, os.ErrNotExist) {
 		return LiveContinuity{}, false, nil
 	}
@@ -56,8 +79,8 @@ func ReadLiveContinuityAt(root, persona string) (LiveContinuity, bool, error) {
 		return LiveContinuity{}, false, err
 	}
 	var m LiveContinuity
-	if json.Unmarshal(b, &m) != nil || validateLiveContinuity(m) != nil {
-		return LiveContinuity{}, false, fmt.Errorf("stored Codex live continuity for %q is invalid", persona)
+	if json.Unmarshal(b, &m) != nil || validateLiveContinuityFor(m, backend) != nil {
+		return LiveContinuity{}, false, fmt.Errorf("stored live continuity for %q is invalid", persona)
 	}
 	return m, true, nil
 }
@@ -70,10 +93,15 @@ func WriteLiveContinuity(persona string, m LiveContinuity) error {
 }
 
 func WriteLiveContinuityAt(root, persona string, m LiveContinuity) error {
+	return WriteLiveContinuityBackendAt(root, persona, CodexAppServerBackend, m)
+}
+
+// WriteLiveContinuityBackendAt writes the marker for one live backend.
+func WriteLiveContinuityBackendAt(root, persona, backend string, m LiveContinuity) error {
 	if err := ValidatePersonaName(persona); err != nil {
 		return err
 	}
-	if err := validateLiveContinuity(m); err != nil {
+	if err := validateLiveContinuityFor(m, backend); err != nil {
 		return err
 	}
 	sessionsDir := filepath.Join(root, SessionsDir())
@@ -104,7 +132,7 @@ func WriteLiveContinuityAt(root, persona string, m LiveContinuity) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, filepath.Join(root, LiveContinuityMarker(persona))); err != nil {
+	if err := os.Rename(tmp, filepath.Join(root, LiveContinuityMarkerFor(persona, backend))); err != nil {
 		return err
 	}
 	d, err := os.Open(filepath.Clean(sessionsDir))

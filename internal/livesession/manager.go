@@ -19,6 +19,7 @@ import (
 	"github.com/luthermonson/shipmates/internal/codexapp"
 	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
+	"github.com/luthermonson/shipmates/internal/runtime"
 	"github.com/luthermonson/shipmates/internal/turninput"
 )
 
@@ -180,12 +181,32 @@ type Error struct{ Code Code }
 func (e *Error) Error() string { return string(e.Code) }
 func failure(c Code) error     { return &Error{Code: c} }
 
-type StartAdapter func(context.Context, codexapp.StartOptions) (*codexapp.Adapter, codexapp.Capabilities, error)
+// StartAdapter starts the codex app-server transport. It is the codex-only
+// half of backend construction; non-codex runtimes come from the Manager's
+// runtime.Selector instead (see resolveRuntime).
+type StartAdapter func(context.Context, codexapp.StartOptions) (Backend, codexapp.Capabilities, error)
+
+// codexStart wraps the production codexapp factory into a StartAdapter,
+// keeping the typed-nil out of the Backend interface on failure.
+func codexStart(ctx context.Context, opts codexapp.StartOptions) (Backend, codexapp.Capabilities, error) {
+	a, caps, err := (codexapp.Factory{}).Start(ctx, opts)
+	if err != nil {
+		return nil, caps, err
+	}
+	return a, caps, nil
+}
 
 type Manager struct {
-	mu              sync.Mutex
-	sessions        map[string]*Session
-	start           StartAdapter
+	mu       sync.Mutex
+	sessions map[string]*Session
+	start    StartAdapter
+	// selector picks the runtime for a new live session. nil keeps every
+	// session on the codex app-server transport, which is what every
+	// direct-manager caller (sail, recovery, tests) wants.
+	selector runtime.Selector
+	// cliRuntime is an explicit `--runtime` override forwarded to the
+	// selector. Empty means "whatever config resolves to".
+	cliRuntime      string
 	adapterOptions  codexapp.StartOptions
 	newSessionID    func() (string, error)
 	newControllerID func() (string, error)
@@ -233,9 +254,12 @@ type Snapshot struct {
 type Session struct {
 	mu                                   sync.Mutex
 	persona, sessionID, threadID, turnID string
+	// backend names the transport this session runs on ("codex-app-server",
+	// "claude"). It is fixed at StartIdle and reported in every snapshot.
+	backend                              string
 	state                                State
 	failureCode                          codexapp.Code
-	adapter                              *codexapp.Adapter
+	adapter                              Backend
 	release                              func()
 	done                                 chan struct{}
 	doneOnce                             sync.Once
@@ -264,11 +288,48 @@ func New(start StartAdapter, adapterOptions codexapp.StartOptions) *Manager {
 
 // NewAt binds all project filesystem access to root. An empty root preserves
 // the direct-manager convention of capturing the caller's current directory.
+// Sessions run on the codex app-server transport; see NewWithRuntime for a
+// manager that honors the operator's runtime selection.
 func NewAt(root string, start StartAdapter, adapterOptions codexapp.StartOptions) *Manager {
 	if start == nil {
-		start = (codexapp.Factory{}).Start
+		start = codexStart
 	}
 	return &Manager{sessions: make(map[string]*Session), start: start, adapterOptions: adapterOptions, newSessionID: randomID, newControllerID: randomID, newApprovalID: randomID, now: time.Now, after: time.After, leaseDuration: 15 * time.Second, loadPolicy: policy.Load, projectRoot: root}
+}
+
+// NewWithRuntime is NewAt plus a runtime.Selector, so new live sessions run
+// on whatever runtime `--runtime` / SHIPMATES_RUNTIME / .shipmates/config.yaml
+// resolves to. A nil selector, or a selection that resolves to codex, keeps
+// the codex app-server transport unchanged.
+func NewWithRuntime(root string, sel runtime.Selector, cliRuntime string, start StartAdapter, adapterOptions codexapp.StartOptions) *Manager {
+	m := NewAt(root, start, adapterOptions)
+	m.selector, m.cliRuntime = sel, cliRuntime
+	return m
+}
+
+// resolveRuntime asks the Selector which runtime a new live session should
+// use. It deliberately does NOT spawn anything: codex is reported as a nil
+// Runtime so the app-server transport is still started later, under the
+// dispatch lock, exactly where it always was.
+func (m *Manager) resolveRuntime(ctx context.Context, cwd string) (runtime.Runtime, string, error) {
+	if m.selector == nil {
+		return nil, project.CodexAppServerBackend, nil
+	}
+	rt, _, err := m.selector.Select(ctx, cwd, m.cliRuntime)
+	if err != nil {
+		var notConfigured *runtime.ErrNotConfigured
+		if errors.As(err, &notConfigured) && notConfigured.Runtime == "codex" {
+			// The Selector's by-design answer for codex: it cannot carry
+			// codexapp.StartOptions. Fall through to the native transport.
+			return nil, project.CodexAppServerBackend, nil
+		}
+		return nil, "", err
+	}
+	if rt.Name() == "codex" {
+		_ = rt.Close(ctx)
+		return nil, project.CodexAppServerBackend, nil
+	}
+	return rt, rt.Name(), nil
 }
 
 func randomID() (string, error) {
@@ -476,7 +537,21 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 	if opts.ReadOnly {
 		sandbox = "read-only"
 	}
-	fingerprint := project.SHA([]byte(project.CodexAppServerBackend + "\x00" + cfg.Fingerprint() + "\x00" + instructions + "\x00" + cwd + "\x00" + sandbox + "\x00never"))
+	// Which runtime this session runs on is part of its identity: the
+	// continuity marker, the config fingerprint and every published event
+	// name it, so a runtime switch can never resume the other runtime's
+	// thread. Resolution here constructs nothing for codex, so the
+	// app-server spawn still happens below, under the dispatch lock.
+	rt, backendName, err := m.resolveRuntime(ctx, cwd)
+	if err != nil {
+		return nil, err
+	}
+	closeRuntime := func() {
+		if rt != nil {
+			_ = rt.Close(context.Background())
+		}
+	}
+	fingerprint := project.SHA([]byte(backendName + "\x00" + cfg.Fingerprint() + "\x00" + instructions + "\x00" + cwd + "\x00" + sandbox + "\x00never"))
 
 	m.mu.Lock()
 	if current := m.sessions[opts.Persona]; current != nil {
@@ -485,15 +560,17 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 		current.mu.Unlock()
 		if active {
 			m.mu.Unlock()
+			closeRuntime()
 			return nil, failure(Busy)
 		}
 	}
 	sid, err := m.newSessionID()
 	if err != nil {
 		m.mu.Unlock()
+		closeRuntime()
 		return nil, failure(Internal)
 	}
-	s := &Session{persona: opts.Persona, sessionID: sid, state: Starting, done: make(chan struct{}), nextSequence: 1, notify: make(chan struct{}, 1), effort: cfg.Effort, exposeActivityDetails: opts.ExposeActivityDetails}
+	s := &Session{persona: opts.Persona, sessionID: sid, backend: backendName, state: Starting, done: make(chan struct{}), nextSequence: 1, notify: make(chan struct{}, 1), effort: cfg.Effort, exposeActivityDetails: opts.ExposeActivityDetails}
 	s.approvalNow = m.now
 	s.beginApproval = func(r NormalizedApprovalRequest, e ApprovalEvaluation, auth ApprovalAuthority, a approvalAdapter) {
 		if _, err := m.BeginApproval(r, e, auth, a); err != nil {
@@ -514,31 +591,38 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 			s.mu.Unlock()
 		}
 	}
-	s.publishLocked("session.starting", "", "", map[string]any{"backend": project.CodexAppServerBackend})
+	s.publishLocked("session.starting", "", "", map[string]any{"backend": backendName})
 	m.sessions[opts.Persona] = s
 	m.mu.Unlock()
 
 	release, err := project.AcquireDispatchLockAt(root, opts.Persona)
 	if err != nil {
+		closeRuntime()
 		s.finish(Failed, nil, codexapp.Internal)
 		return nil, failure(Busy)
 	}
 	s.mu.Lock()
 	s.release = release
 	s.mu.Unlock()
-	marker, have, err := project.ReadLiveContinuityAt(root, opts.Persona)
+	marker, have, err := project.ReadLiveContinuityBackendAt(root, opts.Persona, backendName)
 	if err != nil {
+		closeRuntime()
 		s.startupFailure(ctx, nil, codexapp.Internal)
 		return nil, err
 	}
 	resume := have && !opts.Fresh && marker.ConfigFingerprint == fingerprint
 
-	aopts := m.adapterOptions
-	aopts.WorkingDirectory = cwd
-	a, _, err := m.start(ctx, aopts)
-	if err != nil {
-		s.startupFailure(ctx, nil, codexapp.ErrorCode(err))
-		return nil, err
+	var a Backend
+	if rt != nil {
+		a = newRuntimeBackend(rt, opts.Persona, cwd)
+	} else {
+		aopts := m.adapterOptions
+		aopts.WorkingDirectory = cwd
+		a, _, err = m.start(ctx, aopts)
+		if err != nil {
+			s.startupFailure(ctx, nil, codexapp.ErrorCode(err))
+			return nil, err
+		}
 	}
 	s.mu.Lock()
 	s.adapter = a
@@ -554,8 +638,8 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 		s.startupFailure(ctx, a, codexapp.ErrorCode(err))
 		return nil, err
 	}
-	confirmed := project.LiveContinuity{SchemaVersion: project.LiveContinuitySchema, Backend: project.CodexAppServerBackend, ThreadID: thread.ID, ConfigFingerprint: fingerprint}
-	if err := project.WriteLiveContinuityAt(root, opts.Persona, confirmed); err != nil {
+	confirmed := project.LiveContinuity{SchemaVersion: project.LiveContinuitySchema, Backend: backendName, ThreadID: thread.ID, ConfigFingerprint: fingerprint}
+	if err := project.WriteLiveContinuityBackendAt(root, opts.Persona, backendName, confirmed); err != nil {
 		s.startupFailure(ctx, a, codexapp.Internal)
 		return nil, err
 	}
@@ -706,7 +790,7 @@ func (m *Manager) StartNextTurnInput(ctx context.Context, persona, sessionID, th
 	return result, nil
 }
 
-func (s *Session) startupFailure(ctx context.Context, a *codexapp.Adapter, code codexapp.Code) {
+func (s *Session) startupFailure(ctx context.Context, a Backend, code codexapp.Code) {
 	state := Failed
 	if ctx.Err() != nil {
 		state = Stopped
@@ -756,7 +840,7 @@ func (s *Session) monitor() {
 	}
 }
 
-type codexApprovalAdapter struct{ adapter *codexapp.Adapter }
+type codexApprovalAdapter struct{ adapter Backend }
 
 func (a codexApprovalAdapter) ResolveApproval(ctx context.Context, r AdapterApprovalRequest, d ApprovalDecision) (AdapterApprovalResult, error) {
 	decision := codexapp.Deny
@@ -801,7 +885,7 @@ func (s *Session) handleApprovalRequest(event codexapp.Event) {
 		_, _ = a.ResolveApproval(ctx, AdapterApprovalRequest{event.BackendRequestID, event.ThreadID, event.TurnID, event.PolicySnapshotID}, DenyOnce)
 		return
 	}
-	auth := ApprovalAuthority{Persona: s.persona, SessionID: s.sessionID, Backend: project.CodexAppServerBackend,
+	auth := ApprovalAuthority{Persona: s.persona, SessionID: s.sessionID, Backend: s.snapshotLocked().Backend,
 		ThreadID: s.threadID, TurnID: s.turnID, ControllerID: s.controllerID,
 		ControllerLeaseGeneration: s.controllerLeaseGeneration, BackendRequestID: event.BackendRequestID}
 	r := NormalizedApprovalRequest{Kind: policy.ProcessExec, CommandExact: event.CommandExact,
@@ -1232,10 +1316,14 @@ func CurrentRemoteInterruptTargetReference(persona, sessionID, threadID, turnID 
 }
 
 func (s *Session) snapshotLocked() Snapshot {
-	return Snapshot{Persona: s.persona, SessionID: s.sessionID, Backend: project.CodexAppServerBackend, ThreadID: s.threadID, TurnID: s.turnID, State: s.state, FailureCode: s.failureCode}
+	backend := s.backend
+	if backend == "" {
+		backend = project.CodexAppServerBackend
+	}
+	return Snapshot{Persona: s.persona, SessionID: s.sessionID, Backend: backend, ThreadID: s.threadID, TurnID: s.turnID, State: s.state, FailureCode: s.failureCode}
 }
 
-func (s *Session) finish(state State, a *codexapp.Adapter, code codexapp.Code) {
+func (s *Session) finish(state State, a Backend, code codexapp.Code) {
 	if a != nil {
 		_ = a.Close(context.Background())
 	}
