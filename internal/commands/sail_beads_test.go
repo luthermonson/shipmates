@@ -86,7 +86,9 @@ esac
 	for _, want := range []string{
 		"dep add ship-2 ship-1",
 		"update ship-2 --status=in_progress --assignee=backend",
-		"comments add ship-2 verified --author=shipmates",
+		// --author precedes the "--" end-of-options sentinel guarding the
+		// persona-influenced summary (OWASP audit fix in beads/client.go).
+		"comments add ship-2 --author=shipmates -- verified",
 		"close ship-2 --reason=Shipmates voyage task completed",
 	} {
 		if !strings.Contains(log, want) {

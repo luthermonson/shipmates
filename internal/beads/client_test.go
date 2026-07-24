@@ -79,7 +79,9 @@ func TestClientLifecycleUsesBoundedArgvCommands(t *testing.T) {
 		"create --json --type=task --title=bounded task",
 		"dep add ship-abc ship-parent",
 		"update ship-abc --status=in_progress --assignee=backend",
-		"comments add ship-abc done --author=shipmates",
+		// --author precedes the "--" end-of-options sentinel guarding the
+		// persona-influenced summary (OWASP audit fix in client.go).
+		"comments add ship-abc --author=shipmates -- done",
 		"close ship-abc --reason=Shipmates voyage task completed",
 	} {
 		if !strings.Contains(log, want) {

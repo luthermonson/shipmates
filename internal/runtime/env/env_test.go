@@ -2,6 +2,7 @@ package env
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,18 +23,20 @@ func writeProjectConfig(t *testing.T, projectDir, body string) {
 	}
 }
 
-func TestSelect_DefaultsToClaudeWithNoConfig(t *testing.T) {
+// TestSelect_DefaultsToCodexWithNoConfig: the built-in default runtime is
+// codex (the codex-native command surface stays the default behavior), and
+// codex through the Selector surfaces as a typed ErrNotConfigured — the
+// signal `ask` uses to take the codex-native dispatcher.
+func TestSelect_DefaultsToCodexWithNoConfig(t *testing.T) {
 	projectDir := t.TempDir()
 	sel := New()
-	rt, src, err := sel.Select(context.Background(), projectDir, "")
-	if err != nil {
-		t.Fatalf("select: %v", err)
-	}
-	if rt.Name() != "claude" {
-		t.Errorf("Name()=%q want claude", rt.Name())
-	}
+	_, src, err := sel.Select(context.Background(), projectDir, "")
 	if src != "default" {
 		t.Errorf("Source()=%q want default", src)
+	}
+	var notCfg *runtime.ErrNotConfigured
+	if !errors.As(err, &notCfg) || notCfg.Runtime != "codex" {
+		t.Fatalf("err = %v, want *ErrNotConfigured for codex", err)
 	}
 }
 

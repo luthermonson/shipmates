@@ -1,0 +1,65 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod pins the exact toolchain (1.26.x); setup-go resolves it.
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # The fleetconfig, m3provision, and m3runtime test suites are
+      # environment-dependent: they exercise the M3 authority/qualifier
+      # deployment posture (pinned trust roots, delegated cgroup slices, a
+      # running M3 authority daemon) that a stock GitHub runner does not
+      # provide, and they fail closed by design ("fleet config
+      # unavailable") rather than skipping. Until those suites grow a
+      # detect-and-skip preflight for non-provisioned hosts, exclude the
+      # three packages from CI on Linux. Everything else runs with -race.
+      - name: Test (ubuntu)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          go test -race -count=1 -timeout=10m $(go list ./... | grep -v -E 'internal/(fleetconfig|m3provision|m3runtime)$')
+
+      # Windows runs the cross-platform product surface (commands, the
+      # runtime interface + both adapters, containment, catalog, policy,
+      # project tooling that is portable, …) with -race. Excluded packages
+      # fall into two pre-existing buckets, neither introduced by the
+      # runtime-interface work:
+      #   1. unix-only subsystems whose *test* files are not build-tag
+      #      gated, so `go test` fails to compile them on Windows:
+      #      dashboard, delegation, fleetcommandermailbox, fleetconfig,
+      #      installer.
+      #   2. suites that exercise unix permission/fsync/daemon semantics
+      #      not yet ported to Windows (0600 marker bits, directory
+      #      fsync, DACL round-trips, local server + app-server spawning):
+      #      client, codexapp, fleetidentity, fleetinterrupt, livesession,
+      #      project, recovery, server, voyage.
+      # Shrinking this list is tracked in docs/platform-support.md
+      # ("Where to next").
+      - name: Test (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          go test -race -count=1 -timeout=10m $(go list ./... | grep -v -E 'internal/(client|codexapp|dashboard|delegation|fleetcommandermailbox|fleetconfig|fleetidentity|fleetinterrupt|installer|livesession|project|recovery|server|voyage)$')
