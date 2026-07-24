@@ -2,6 +2,17 @@
 // runtime.Runtime interface. The adapter's method names and shapes are close
 // to the interface already (StartThread → StartSession, StartTurn →
 // SendTurn, etc.); this file is thin glue plus event normalization.
+//
+// Containment posture: codex self-contains inside codexapp.Adapter via
+// codexapp.StartOptions.RequireExecutionContainment (kernel-enforced on
+// Linux). The runtime.Runtime layer does NOT double-wrap here — see
+// factory.NewFromResolved. The claude runtime, by contrast, routes its
+// exec.Cmd spawn through a containment.Watcher because there is no
+// equivalent in-adapter enforcement.
+//
+// TODO(cgroup-watcher): if a future codexapp surface lets us intercept
+// child-process spawns, route them through containment.Watcher too so
+// the two runtimes share one containment story.
 package codex
 
 import (
