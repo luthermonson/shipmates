@@ -35,8 +35,10 @@ All notable changes to Shipmates are documented here. This project follows
 
 ### Changed
 
-- **Cross-platform build.** Shipmates now compiles on Linux, macOS, and
-  Windows. Prior to this release, the binary was Linux-only.
+- **Cross-platform build.** Shipmates now compiles on Linux and Windows;
+  the release workflow ships binaries for both. macOS builds from source
+  are partially supported (see Notes for operators). Prior to this
+  release, the release workflow was Linux-only.
 - **Fleet Commander (M1-M3) is unix-only.** `Fleet`, `Ship`, and `Server`
   commands are gated `//go:build unix` because the underlying durable
   mailbox + delegation validator depend on filesystem primitives
@@ -68,10 +70,24 @@ All notable changes to Shipmates are documented here. This project follows
 
 ### Notes for operators
 
-- Windows and macOS binaries are buildable from source (`go build ./...`)
-  but are **not** produced by the release workflow yet. `goreleaser` still
-  ships Linux-only archives. Cross-platform binaries will follow once
-  the Claude runtime has soaked in production.
+- The release workflow now produces Linux and Windows binaries
+  (`amd64` + `arm64` each) alongside the source archive; the archive
+  bundles `README.md`, `LICENSE`, `CHANGELOG.md`, `docs/platform-support.md`,
+  `docs/installer-platforms.md`, `docs/security.md`, `docs/cli-reference.md`.
+- **macOS is not yet in the release workflow.** Two files use Linux-only
+  syscalls that don't cross-compile to darwin: `internal/fleetconfig/config.go`
+  uses `unix.O_PATH` (part of the M3 credential-open path), and
+  `internal/codexapp/process_unix.go` uses `unix.PidfdOpen` /
+  `unix.PidfdSendSignal` for atomic process handles. Both need a
+  darwin-native port (kqueue / EVFILT_PROC for process handles; a
+  descriptor-only open dance for the M3 openat chain) before darwin can
+  be added to `.goreleaser.yml`. Tracked as a follow-up.
+- Codex remains selectable in config, but `env.Selector` returns a
+  pointing error for codex: it requires `codexapp.StartOptions`
+  (transport, credential isolation) that the base config cannot carry.
+  Use `factory.NewCodexWith(ctx, opts)` directly, as the existing
+  codex-native commands (`ask`, `live`, `sail`, `fleet`, `ship`,
+  `server`) already do.
 - Codex remains selectable in config, but `env.Selector` returns a
   pointing error for codex: it requires `codexapp.StartOptions`
   (transport, credential isolation) that the base config cannot carry.
