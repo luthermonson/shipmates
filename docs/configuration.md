@@ -1,7 +1,67 @@
 # Configuration and state
 
-Shipmates has one project configuration file and a deliberately small set of
-managed state directories. Paths are resolved from the canonical project root.
+Shipmates has one project configuration file (`shipmates.yaml`), an
+optional runtime-selection file (`.shipmates/config.yaml`), and a
+deliberately small set of managed state directories. Paths are resolved
+from the canonical project root.
+
+## Runtime selection: `.shipmates/config.yaml`
+
+The runtime interface (`internal/runtime`) selects between the `claude`
+and `codex` runtime adapters at command entry. Selection sources, from
+highest to lowest precedence:
+
+1. `--runtime <name>` CLI flag (or `SHIPMATES_RUNTIME` env var).
+2. Project `.shipmates/config.yaml` (`runtime:` key).
+3. User `~/.shipmates/config.yaml` (`runtime:` key).
+4. Built-in default: `claude`.
+
+A minimal project override:
+
+```yaml
+runtime: claude   # or codex
+```
+
+Per-runtime settings live under `runtimes:`; unknown keys are preserved
+so a runtime can consume its own settings without this loader knowing
+them. Example:
+
+```yaml
+runtime: claude
+
+runtimes:
+  claude:
+    binary: claude          # override PATH lookup
+    default_args:
+      - --dangerously-skip-permissions   # example only; know what this does
+  codex:
+    binary: codex
+
+containment:
+  mode: watchdog            # watchdog | cgroup | none
+  memory_limit_mb: 8192     # 0 = uncapped
+  poll_interval_ms: 500
+  graceful_timeout_ms: 2000
+```
+
+Notes:
+
+- `runtime` values are lower-cased and trimmed before comparison.
+- Runtime `settings` are taken from the *first* file that specifies them
+  (project, then user) and are **not** merged.
+- `containment.mode` accepts `watchdog` (default; kernel-primitive-backed),
+  `cgroup` (Linux enterprise; currently degrades to `watchdog`), and
+  `none` (escape hatch).
+- The `codex` runtime, when requested through `env.Selector`, returns a
+  pointing `runtime.ErrNotConfigured` because the codex adapter needs
+  `codexapp.StartOptions`. Existing codex-native commands still call
+  `factory.NewCodexWith(ctx, opts)` directly. See
+  [Runtime interface plan](runtime-interface-plan.md).
+
+The command surface is being migrated onto the runtime interface
+incrementally; in this release the codex-native command path remains the
+production dispatch path, so `runtime: claude` currently affects only
+callers that go through `env.Selector` / `factory.NewFromResolved`.
 
 ## Runtime assets
 
@@ -48,8 +108,12 @@ the hardest tasks. Projects may reorder or replace the ladder to match the
 models their Codex workspace exposes.
 
 The parser uses a strict schema. Unknown keys are errors. Persona launch
-configuration supports Codex `model` and `effort` only; there is no alternate
-backend or arbitrary process command.
+configuration in `shipmates.yaml` supports the Codex-style `model` and
+`effort` fields; these are consumed by the codex-native command path.
+Runtime binary selection and per-invocation defaults for the claude/codex
+runtime adapters live in `.shipmates/config.yaml` under
+`runtimes:` (see [Runtime selection](#runtime-selection-shipmatesconfigyaml)
+above). There is no alternate backend or arbitrary process command.
 
 ### Project fields
 
@@ -152,14 +216,23 @@ shipmates beads init
 
 ## Canonical persona files
 
-Installed personas live at:
+The canonical, runtime-neutral persona source lives at
+`catalog/<persona>/persona.md` (with legacy `agent.md` still supported by
+the catalog reader). Each runtime installer translates the canonical
+form into its native on-disk shape:
 
 ```text
-.codex/agents/<persona>.toml
+.codex/agents/<persona>.toml    # codex — written by shipmates init today
+.claude/agents/<persona>.md     # claude — written by runtime.claude.InstallPersona
 ```
 
-These TOML files are canonical runtime instructions. Catalog source lives at
-`catalog/<persona>/agent.md` and is rendered directly into the Codex artifact.
+Today `shipmates init` and `shipmates add` write the codex TOML artifact
+directly. The claude Markdown writer plus a `SessionStart` memory hook
+(`.claude/settings.json`) are implemented in `internal/runtime/claude`
+and exercised in unit tests; the CLI's `init`/`add` will emit them once
+they are migrated onto the runtime interface (see
+[Runtime interface plan](runtime-interface-plan.md)).
+
 Persona names must match `^[a-z][a-z0-9_-]*$`.
 
 ## Policy files

@@ -9,9 +9,29 @@ Commands operate on the Git repository containing the current directory.
 Persona names begin with a lowercase letter and contain lowercase letters,
 digits, underscores, or hyphens.
 
-Delegation writes normalized progress to stderr and the final persona response
-to stdout. Shipmates invokes Codex directly with argument arrays; persona input
-is never evaluated by a shell.
+Delegation writes normalized progress to stderr and the final persona
+response to stdout. Shipmates invokes the underlying runtime CLI directly
+with argument arrays; persona input is never evaluated by a shell.
+
+### Global flags
+
+The following flags apply to every subcommand:
+
+- `--verbose` — enable debug logging.
+- `--runtime <name>` — select the agent runtime. Accepted values: `claude`,
+  `codex`. Overrides `.shipmates/config.yaml` and `~/.shipmates/config.yaml`.
+  Also readable from the `SHIPMATES_RUNTIME` environment variable.
+
+The default when nothing is set is `claude`. Precedence is:
+`--runtime` (or `SHIPMATES_RUNTIME`) > project `.shipmates/config.yaml` >
+user `~/.shipmates/config.yaml` > built-in default.
+
+The runtime interface lives in `internal/runtime` and is wired through
+`internal/runtime/factory`. The individual commands below are being
+migrated onto that interface incrementally; in this release the codex-
+native command path remains the production dispatch path, and the
+sections that describe Codex behavior below apply to that path. See
+[Runtime interface plan](runtime-interface-plan.md).
 
 ## Runtime installation
 
@@ -73,7 +93,8 @@ the result is printed. Export targets do not become runtime authority.
 
 ### `shipmates ask <persona> <prompt>`
 
-Runs one synchronous Codex turn. `--fresh` starts a new thread,
+Runs one synchronous persona turn against the configured runtime (currently
+the codex-native path in this release). `--fresh` starts a new thread,
 `--timeout <duration>` bounds it, and repeatable `--image <path>` flags attach
 validated project-local raster images.
 
@@ -158,7 +179,8 @@ lease. `--plain` supports constrained terminals and logs.
 ### `shipmates live <persona> <prompt>`
 
 Starts a managed Codex app-server turn and reports session, thread, and turn
-identifiers. It accepts `--fresh` and repeatable `--image` flags.
+identifiers. It accepts `--fresh` and repeatable `--image` flags. This
+command is codex-native today.
 
 ### `shipmates feed <persona> [--follow] [--after <sequence>]`
 
