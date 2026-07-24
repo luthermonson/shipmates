@@ -44,6 +44,12 @@ func (e *NativeEditor) Next(ctx context.Context) (Input, error) {
 			if errors.Is(err, io.EOF) {
 				return Input{Kind: InputEOF}, nil
 			}
+			// Cancellation can land inside readByte's poll loop just as
+			// easily as before the top-of-loop select; both must yield the
+			// same InputCancel so callers see one cancellation contract.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return Input{Kind: InputCancel}, nil
+			}
 			return Input{}, err
 		}
 		switch c {
