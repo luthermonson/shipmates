@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,12 +16,27 @@ import (
 	"github.com/luthermonson/shipmates/internal/client"
 	"github.com/luthermonson/shipmates/internal/livesession"
 	"github.com/luthermonson/shipmates/internal/project"
+	"github.com/luthermonson/shipmates/internal/runtime"
+	"github.com/luthermonson/shipmates/internal/runtime/claude"
+	"github.com/luthermonson/shipmates/internal/runtime/env"
 	"github.com/luthermonson/shipmates/internal/turninput"
 	"github.com/urfave/cli/v3"
 )
 
+// selector resolves which runtime `ask` dispatches through — the first
+// command migrated onto the runtime interface (runtime-interface-plan.md
+// Phase 6). Package-level so tests can swap in a fake.
+var selector runtime.Selector = env.New()
+
 // Ask runs a one-shot, turn-based delegation: create the persona's session the
 // first time, resume it afterward. Output streams to the terminal.
+//
+// Ask is the first command that honors the runtime selection (`--runtime`
+// CLI flag / SHIPMATES_RUNTIME / `runtime:` config): when the selection
+// resolves to claude, the turn dispatches through the runtime interface;
+// otherwise it takes the codex-native path unchanged. The `--runtime` flag
+// itself is declared once on the root command (main.go) and read here via
+// urfave/cli's lineage lookup.
 func Ask() *cli.Command {
 	return &cli.Command{
 		Name:      "ask",
@@ -39,9 +55,162 @@ func Ask() *cli.Command {
 			}
 			turnCtx, cancel := context.WithTimeout(ctx, c.Duration("timeout"))
 			defer cancel()
-			return dispatchImages(turnCtx, persona, prompt, c.Bool("fresh"), c.StringSlice("image"))
+			return dispatchAskImages(turnCtx, c.String("runtime"), persona, prompt, c.Bool("fresh"), c.StringSlice("image"))
 		},
 	}
+}
+
+// dispatchAskImages routes an ask turn: resolve the runtime via the
+// Selector, dispatch through the runtime interface when it resolves to
+// claude, and fall back to the codex-native dispatcher otherwise.
+func dispatchAskImages(ctx context.Context, cliRuntime, persona, prompt string, fresh bool, paths []string) error {
+	return dispatchAskToImages(ctx, cliRuntime, persona, prompt, fresh, paths, os.Stdout, os.Stderr)
+}
+
+func dispatchAskToImages(ctx context.Context, cliRuntime, persona, prompt string, fresh bool, paths []string, stdout, stderr io.Writer) error {
+	rt, source, err := selectAskRuntime(ctx, cliRuntime)
+	if err != nil {
+		return err
+	}
+	if rt == nil {
+		// Codex-native path, exactly as before the runtime interface.
+		return dispatchToImages(ctx, persona, prompt, fresh, paths, stdout, stderr)
+	}
+	defer rt.Close(ctx)
+	slog.Debug("ask: dispatching through runtime interface", "runtime", rt.Name(), "source", source, "persona", persona)
+	return dispatchRuntimeImages(ctx, rt, persona, prompt, fresh, paths, stdout, stderr)
+}
+
+// selectAskRuntime resolves the runtime for an ask turn. A nil Runtime with
+// a nil error means "use the codex-native dispatcher": codex is selected
+// (its transport needs codexapp.StartOptions the Selector cannot carry, so
+// the Selector reports ErrNotConfigured for it by design).
+func selectAskRuntime(ctx context.Context, cliRuntime string) (runtime.Runtime, string, error) {
+	rt, source, err := selector.Select(ctx, ".", cliRuntime)
+	if err != nil {
+		var notCfg *runtime.ErrNotConfigured
+		if errors.As(err, &notCfg) && notCfg.Runtime == "codex" {
+			return nil, source, nil
+		}
+		return nil, source, fmt.Errorf("select runtime: %w", err)
+	}
+	if rt.Name() == "codex" {
+		// A future Selector may construct codex directly; the codex-native
+		// dispatcher already carries the full policy/containment posture, so
+		// prefer it until the interface migration covers those.
+		_ = rt.Close(ctx)
+		return nil, source, nil
+	}
+	return rt, source, nil
+}
+
+// dispatchRuntimeImages is the runtime-interface ask path (claude today):
+// resolve the persona, start or resume its session, send the turn, stream
+// normalized events, and persist the session marker for later resume.
+func dispatchRuntimeImages(ctx context.Context, rt runtime.Runtime, persona, prompt string, fresh bool, paths []string, stdout, stderr io.Writer) error {
+	if persona == "captain" {
+		return errors.New("captain is reserved for the human operator; use skipper or quartermaster")
+	}
+	if len(paths) > 0 {
+		return fmt.Errorf("--image is not yet supported with the %s runtime; drop the flag or use --runtime codex", rt.Name())
+	}
+	if _, err := project.CanonicalPersonaAt(".", persona); err != nil {
+		return err
+	}
+	cfg, err := project.ResolvePersonaConfig(persona)
+	if err != nil {
+		return err
+	}
+	root, err := project.CanonicalRoot(".")
+	if err != nil {
+		return err
+	}
+
+	// Session persistence mirrors the codex marker scheme:
+	// .shipmates/sessions/<persona>.<runtime>.session with an auto-fresh on
+	// config drift.
+	fingerprint := cfg.Fingerprint()
+	meta, have := project.ReadBackendSessionMeta(persona, rt.Name())
+	if have && !fresh && meta.ConfigHash != "" && meta.ConfigHash != fingerprint {
+		fresh = true
+	}
+
+	spec := runtime.SessionSpec{Persona: persona, ProjectDir: root}
+	var session runtime.Session
+	if have && !fresh && meta.ID != "" {
+		session, err = rt.ResumeSession(ctx, meta.ID, spec)
+	} else {
+		session, err = rt.StartSession(ctx, spec)
+	}
+	if err != nil {
+		return fmt.Errorf("start %s session: %w", rt.Name(), err)
+	}
+
+	if _, err := rt.SendTurn(ctx, session.ID(), runtime.TurnInput{Text: prompt}); err != nil {
+		return fmt.Errorf("send turn: %w", err)
+	}
+	if err := streamRuntimeEvents(ctx, rt, stdout, stderr); err != nil {
+		return err
+	}
+	return project.WriteBackendSessionMeta(persona, rt.Name(), persona, session.ID(), fingerprint)
+}
+
+// streamRuntimeEvents consumes the runtime's normalized event stream until
+// the turn finishes. KindText goes to stdout; tool activity is summarized
+// on stderr (matching the codex path's "activity:" lines); KindError ends
+// the turn with a non-nil error.
+func streamRuntimeEvents(ctx context.Context, rt runtime.Runtime, stdout, stderr io.Writer) error {
+	events := rt.Events()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ev, ok := <-events:
+			if !ok {
+				// Stream closed without a terminal event — treat as clean
+				// EOF so the caller can persist session meta and exit.
+				return nil
+			}
+			switch ev.Kind {
+			case runtime.KindText:
+				if s, _ := ev.Payload.(string); s != "" {
+					fmt.Fprint(stdout, s)
+					if !strings.HasSuffix(s, "\n") {
+						fmt.Fprintln(stdout)
+					}
+				}
+			case runtime.KindToolCall:
+				if tc, ok := ev.Payload.(claude.ToolCall); ok && tc.Name != "" {
+					fmt.Fprintln(stderr, "activity: "+tc.Name)
+				}
+			case runtime.KindTurnDone:
+				return nil
+			case runtime.KindError:
+				return fmt.Errorf("%s turn failed: %s", rt.Name(), formatRuntimeErrorPayload(ev.Payload))
+			default:
+				// KindToolResult / KindBackend / KindApprovalNeeded /
+				// KindSessionClosed are not part of the one-shot ask UX.
+				slog.Debug("ask: ignored runtime event", "kind", ev.Kind)
+			}
+		}
+	}
+}
+
+// formatRuntimeErrorPayload renders whatever a runtime put in an error
+// event as a scrubbed, single-line string safe for the terminal.
+func formatRuntimeErrorPayload(payload any) string {
+	var s string
+	switch p := payload.(type) {
+	case string:
+		s = p
+	case []byte:
+		s = string(p)
+	case error:
+		s = p.Error()
+	default:
+		s = fmt.Sprintf("%v", p)
+	}
+	return scrubTerminalControl(s)
 }
 
 func Live() *cli.Command {

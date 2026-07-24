@@ -54,9 +54,12 @@ type Resolved struct {
 }
 
 // Defaults returns the built-in defaults used when neither config file
-// exists.
+// exists. The default runtime is codex: the shipmates command surface is
+// codex-native today, and defaulting to codex keeps `shipmates ask` on the
+// existing dispatcher unless the operator explicitly selects claude via
+// config or --runtime.
 func Defaults() File {
-	return File{Runtime: "claude"}
+	return File{Runtime: "codex"}
 }
 
 // LoadProject reads .shipmates/config.yaml under projectDir. Missing file
