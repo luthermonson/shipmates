@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -13,6 +14,12 @@ import (
 )
 
 func TestLegacyCaptainMigrationArchivesEditedAgentAndReservesHumanRole(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Init and Update call withPolicyWriteLock (install.go), which relies on
+		// unix flock via policylock_unix.go. The Windows equivalent is not yet
+		// wired up, so the migration workflow cannot be exercised here.
+		t.Skip("policy mutation locking is unix-only")
+	}
 	t.Chdir(t.TempDir())
 	files := fstest.MapFS{}
 	for _, name := range []string{"captain", "quartermaster", "skipper"} {

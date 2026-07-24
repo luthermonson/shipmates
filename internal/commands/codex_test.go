@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +18,16 @@ import (
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/turninput"
 )
+
+// skipIfNoPOSIXShell skips tests that install a `#!/bin/sh` fake codex
+// binary and then expect the OS to execute it. Windows has no POSIX shell
+// interpreter, so shell-based fakes never load via exec.LookPath.
+func skipIfNoPOSIXShell(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake codex fixture is a #!/bin/sh script; Windows cannot exec it")
+	}
+}
 
 func TestCodexArgs(t *testing.T) {
 	t.Chdir(t.TempDir())
@@ -112,6 +123,7 @@ func installCodexPersona(t *testing.T, persona string) {
 }
 
 func TestDispatchCodexFreshThenResumeWithoutLegacyRuntime(t *testing.T) {
+	skipIfNoPOSIXShell(t)
 	t.Chdir(t.TempDir())
 	installCodexPersona(t, "security")
 	logPath := filepath.Join(t.TempDir(), "argv.log")
@@ -149,6 +161,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"c
 }
 
 func TestDispatchCodexTimeoutPreservesMarker(t *testing.T) {
+	skipIfNoPOSIXShell(t)
 	t.Chdir(t.TempDir())
 	installCodexPersona(t, "security")
 	if err := project.WriteBackendSessionMeta("security", "codex", "old", "thread-old", "hash"); err != nil {
@@ -172,6 +185,10 @@ func TestDispatchCodexTimeoutPreservesMarker(t *testing.T) {
 }
 
 func TestFreshInitAddAndAskAreCodexNative(t *testing.T) {
+	// Init calls withPolicyWriteLock (unix flock), and the persona turn uses
+	// a #!/bin/sh fake codex; both fixtures are unix-only.
+	skipIfNoPolicyLock(t)
+	skipIfNoPOSIXShell(t)
 	t.Chdir(t.TempDir())
 	cat := catalog.New(fstest.MapFS{
 		"catalog/security/agent.md": {Data: []byte("---\nname: security\ndescription: Security review.\n---\n\nReview security carefully.\n")},
@@ -301,6 +318,7 @@ func TestAskImageProcessRefusalFailureAndMarkerPreservation(t *testing.T) {
 }
 
 func TestAskImageFakeCodexExactArgvAndCrashCancellation(t *testing.T) {
+	skipIfNoPOSIXShell(t)
 	for _, mode := range []string{"success", "crash", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Chdir(t.TempDir())

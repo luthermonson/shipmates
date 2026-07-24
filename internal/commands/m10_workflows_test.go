@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -111,6 +112,12 @@ func codexPersonasFromLog(t *testing.T, path string) []string {
 }
 
 func TestM10PublicCommandWorkflowsUseSortedCodexOnlyInventory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// installM10CommandSentinels writes a `#!/bin/sh` fake codex, and the
+		// workflows drive Routing apply which locks policy via unix flock —
+		// neither fixture is available on Windows.
+		t.Skip("test fixture is unix-only (#!/bin/sh fake codex + flock-based policy lock)")
+	}
 	useLegacyCodexTestDispatcher(t)
 	t.Chdir(t.TempDir())
 	writeM10CommandFixture(t, "zeta", "captain", "alpha")
@@ -144,6 +151,10 @@ func TestM10PublicCommandWorkflowsUseSortedCodexOnlyInventory(t *testing.T) {
 }
 
 func TestM10RoutingApplyPreservesAllPersonasAndIsIdempotent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Routing apply calls withPolicyWriteLock, which requires unix flock.
+		t.Skip("policy mutation locking is unix-only")
+	}
 	t.Chdir(t.TempDir())
 	original := writeM10CommandFixture(t, "zeta", "alpha")
 	cat := m10Catalog()
@@ -181,6 +192,12 @@ func TestM10RoutingApplyPreservesAllPersonasAndIsIdempotent(t *testing.T) {
 }
 
 func TestM10RoutingApplyRefusesUntrackedAndManifestDriftWithoutMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Routing apply calls withPolicyWriteLock (install.go), which relies on
+		// unix flock via policylock_unix.go. Until Windows LockFileEx support
+		// lands the mutation-refusal contract cannot be exercised here.
+		t.Skip("policy mutation locking is unix-only")
+	}
 	for _, tc := range []struct {
 		name, want string
 		arrange    func(*testing.T)

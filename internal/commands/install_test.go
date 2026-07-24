@@ -3,6 +3,7 @@ package commands
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -10,6 +11,16 @@ import (
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/project"
 )
+
+// skipIfNoPolicyLock skips tests that require withPolicyWriteLock, which
+// relies on unix flock via internal/project/policylock_unix.go and has no
+// Windows equivalent yet.
+func skipIfNoPolicyLock(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("policy mutation locking is unix-only")
+	}
+}
 
 func TestEnsureAttachGitignore(t *testing.T) {
 	t.Run("creates .gitignore when missing", func(t *testing.T) {
@@ -124,6 +135,7 @@ func TestComposeAgent(t *testing.T) {
 }
 
 func TestAddPersonaReplacesLegacyCatalogPolicyWithM5Policy(t *testing.T) {
+	skipIfNoPolicyLock(t)
 	cat := catalog.New(fstest.MapFS{
 		"catalog/geordi/agent.md":    {Data: []byte("---\nname: geordi\n---\n\n# Geordi\n")},
 		"catalog/geordi/policy.yaml": {Data: []byte("allow:\n  - Bash(git status)\ndeny:\n  - Bash(rm -rf /)\n")},
@@ -160,6 +172,7 @@ func TestAddPersonaReplacesLegacyCatalogPolicyWithM5Policy(t *testing.T) {
 }
 
 func TestAddPersonaWithoutCatalogPolicyInstallsFailClosedOverlay(t *testing.T) {
+	skipIfNoPolicyLock(t)
 	cat := catalog.New(fstest.MapFS{
 		"catalog/geordi/agent.md": {Data: []byte("---\nname: geordi\n---\n\n# Geordi\n")},
 	})
@@ -177,6 +190,7 @@ func TestAddPersonaWithoutCatalogPolicyInstallsFailClosedOverlay(t *testing.T) {
 }
 
 func TestAddPersonaMigratesManagedLegacyPolicyButPreservesModified(t *testing.T) {
+	skipIfNoPolicyLock(t)
 	legacy := []byte("allow:\n  - Bash(git status)\nask: []\ndeny: []\n")
 	cat := catalog.New(fstest.MapFS{
 		"catalog/captain/agent.md":    {Data: []byte("---\nname: captain\n---\n\nLead.\n")},
@@ -247,6 +261,7 @@ func TestCatalogM5PolicyAcceptsOnlyStrictV1(t *testing.T) {
 }
 
 func TestUpdateMigratesManagedLegacyCatalogPolicy(t *testing.T) {
+	skipIfNoPolicyLock(t)
 	legacy := []byte("allow: [Bash(git status)]\nask: []\ndeny: []\n")
 	cat := catalog.New(fstest.MapFS{
 		"catalog/captain/agent.md":    {Data: []byte("---\nname: captain\n---\n\nLead.\n")},
@@ -281,6 +296,7 @@ func TestUpdateMigratesManagedLegacyCatalogPolicy(t *testing.T) {
 }
 
 func TestAddPersonaPreservesMemoryAndCodexSession(t *testing.T) {
+	skipIfNoPolicyLock(t)
 	cat := catalog.New(fstest.MapFS{
 		"catalog/security/agent.md":              {Data: []byte("---\nname: security\n---\n\nReview security.\n")},
 		"catalog/security/memory-seeds/notes.md": {Data: []byte("seed\n")},

@@ -1,3 +1,10 @@
+//go:build unix
+
+// Every test in this file exercises a policy-mutating lifecycle command
+// (addPersona, runUpdate, runRemove). Each of those calls withPolicyWriteLock
+// which relies on unix flock via internal/project/policylock_unix.go. Windows
+// support depends on a LockFileEx-based equivalent that has not landed yet.
+
 package commands
 
 import (
@@ -8,9 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"testing/fstest"
 
-	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/project"
 )
 
@@ -79,21 +84,6 @@ func TestAddPreservesExistingCodexAgentByM2BaselineRules(t *testing.T) {
 			t.Fatal("advanced agent baseline not saved")
 		}
 	})
-}
-
-func lifecycleCatalog(role, policy string) *catalog.Catalog {
-	fsys := fstest.MapFS{
-		"catalog/security/agent.md":              {Data: []byte("---\nname: security\ndescription: Security.\n---\n\n" + role + "\n")},
-		"catalog/security/memory-seeds/notes.md": {Data: []byte("seed\n")},
-	}
-	if policy != "" {
-		fsys["catalog/security/policy.yaml"] = &fstest.MapFile{Data: []byte(policy)}
-	}
-	return catalog.New(fsys)
-}
-
-func lifecyclePolicy(command string) string {
-	return "version: 1\nallow:\n  - id: test.allow\n    kind: process.exec\n    match:\n      command_exact: \"" + command + "\"\n    reason: test policy\nask: []\ndeny: []\n"
 }
 
 func TestCodexUpdatePreservesMemorySessionsAndLegacyLegacyRuntime(t *testing.T) {

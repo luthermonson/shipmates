@@ -1,3 +1,10 @@
+//go:build unix
+
+// Every test in this file exercises Init/Add/Update/Remove, each of which
+// calls withPolicyWriteLock backed by unix flock (see
+// internal/project/policylock_unix.go). Until the Windows LockFileEx port
+// lands, these lifecycle scenarios cannot execute cross-platform.
+
 package commands
 
 import (

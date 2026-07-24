@@ -36,15 +36,14 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// m11PublicCommandTree mirrors PublicCommands. The Fleet Commander
+// subsystem (fleet/server/ship) is unix-only — see public_unix.go /
+// public_other.go — so those branches are added by
+// m11_release_gate_unix_test.go via init() when the unix build tag applies.
 var m11PublicCommandTree = map[string][]string{
-	"":                 {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail", "fleet", "server", "ship"},
-	"policy":           {"validate", "explain"},
-	"routing":          {"apply", "show"},
-	"fleet":            {"init", "enrollment", "credential", "serve-observer", "steer", "steer-targets", "interrupt", "interrupt-targets", "ships", "status", "events", "follow"},
-	"fleet/enrollment": {"create", "consume"},
-	"fleet/credential": {"issue", "inspect", "rotate", "commit", "revoke"},
-	"server":           {"serve", "stop"},
-	"ship":             {"observe", "serve", "add", "status", "install", "uninstall"},
+	"":        {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail"},
+	"policy":  {"validate", "explain"},
+	"routing": {"apply", "show"},
 }
 
 func m11Root() *cli.Command {
@@ -198,6 +197,13 @@ func m11InstallHostileRuntimeGuard(t *testing.T) {
 }
 
 func TestM11HostileLegacyRuntimeAndLegacyCanariesAreUnreachable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Init / Add / policy-mutating workflows call withPolicyWriteLock, which
+		// relies on unix flock (see policylock_unix.go). Until the Windows port
+		// lands (LockFileEx-based equivalent) the guarantees under test cannot
+		// be exercised here — the fleet-commander subsystem is unix-only.
+		t.Skip("policy mutation locking is unix-only; hostile-runtime guard cannot run on Windows")
+	}
 	useLegacyCodexTestDispatcher(t)
 	root := t.TempDir()
 	t.Chdir(root)

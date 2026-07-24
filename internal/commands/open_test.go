@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,6 +14,9 @@ import (
 )
 
 func TestOpenCodexOnlyPersonaReachesDashboard(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("open uses a PTY code path that is unix-only; Windows returns a different unsupported-platform error")
+	}
 	t.Chdir(t.TempDir())
 	writeOpenCodexPersona(t, "backend", `developer_instructions = "Review backend changes."`+"\n")
 
