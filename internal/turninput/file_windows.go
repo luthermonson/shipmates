@@ -5,11 +5,12 @@ package turninput
 import (
 	"errors"
 	"fmt"
-	"golang.org/x/sys/windows"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/windows"
 )
 
 type imageIdentity struct {
@@ -26,6 +27,11 @@ type capturedRoot struct {
 	identity imageIdentity
 }
 
+// openWin opens one path component with FILE_FLAG_OPEN_REPARSE_POINT so a
+// junction/symlink is opened as the reparse point itself rather than
+// followed, then refuses it outright — that is how the Windows path
+// enforces "no links anywhere in the chain". It also refuses a
+// file-where-directory-expected (and vice versa).
 func openWin(path string, dir bool) (windows.Handle, imageIdentity, error) {
 	p, e := windows.UTF16PtrFromString(path)
 	if e != nil {
@@ -46,6 +52,7 @@ func openWin(path string, dir bool) (windows.Handle, imageIdentity, error) {
 	}
 	return h, imageIdentity{uint64(i.VolumeSerialNumber), uint64(i.FileIndexHigh)<<32 | uint64(i.FileIndexLow), uint64(i.FileSizeHigh)<<32 | uint64(i.FileSizeLow), i.LastWriteTime, i.NumberOfLinks}, nil
 }
+
 func captureRoot(root string) (*capturedRoot, error) {
 	p, e := filepath.Abs(root)
 	if e != nil {
@@ -57,13 +64,20 @@ func captureRoot(root string) (*capturedRoot, error) {
 	}
 	return &capturedRoot{p, []windows.Handle{h}, id}, nil
 }
+
 func (r *capturedRoot) close() {
 	for _, h := range r.handles {
 		windows.CloseHandle(h)
 	}
 	r.handles = nil
 }
-func validateImage(r *capturedRoot, raw string) (ImageDescriptorV1, error) {
+
+// validateFile walks each path component from the captured root with
+// reparse-point refusal, holds every component handle open for the batch's
+// lifetime so the chain cannot be swapped, then re-opens the leaf by
+// absolute path and requires the two handles to name the same file object
+// before reading the sniff prefix (TOCTOU).
+func validateFile(r *capturedRoot, raw string, maxBytes uint64) (FileDescriptorV1, error) {
 	abs := raw
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(r.path, raw)
@@ -71,7 +85,7 @@ func validateImage(r *capturedRoot, raw string) (ImageDescriptorV1, error) {
 	abs = filepath.Clean(abs)
 	rel, e := filepath.Rel(r.path, abs)
 	if e != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == "." {
-		return ImageDescriptorV1{}, errors.New("image_outside_project")
+		return FileDescriptorV1{}, errors.New("outside_project")
 	}
 	p := r.path
 	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
@@ -80,67 +94,80 @@ func validateImage(r *capturedRoot, raw string) (ImageDescriptorV1, error) {
 		h, _, x := openWin(p, dir)
 		if x != nil {
 			if _, statErr := os.Lstat(p); errors.Is(statErr, os.ErrNotExist) {
-				return ImageDescriptorV1{}, errors.New("image_not_found")
+				return FileDescriptorV1{}, errors.New("not_found")
 			}
-			return ImageDescriptorV1{}, errors.New("image_reparse_refused")
+			return FileDescriptorV1{}, errors.New("reparse_refused")
 		}
 		r.handles = append(r.handles, h)
 	}
 	leaf := r.handles[len(r.handles)-1]
 	var info windows.ByHandleFileInformation
 	if windows.GetFileInformationByHandle(leaf, &info) != nil || info.NumberOfLinks == 0 {
-		return ImageDescriptorV1{}, errors.New("image_not_regular")
+		return FileDescriptorV1{}, errors.New("not_regular")
 	}
 	size := uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow)
 	if size == 0 {
-		return ImageDescriptorV1{}, errors.New("image_empty")
+		return FileDescriptorV1{}, errors.New("empty")
 	}
-	if size > MaxImageBytes {
-		return ImageDescriptorV1{}, errors.New("image_too_large")
+	if size > maxBytes {
+		return FileDescriptorV1{}, errors.New("too_large")
 	}
+	id := imageIdentity{uint64(info.VolumeSerialNumber), uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow), size, info.LastWriteTime, info.NumberOfLinks}
 	readHandle, readID, e := openWin(abs, false)
-	if e != nil || readID != (imageIdentity{uint64(info.VolumeSerialNumber), uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow), size, info.LastWriteTime, info.NumberOfLinks}) {
+	if e != nil || readID != id {
 		if readHandle != windows.InvalidHandle {
 			windows.CloseHandle(readHandle)
 		}
-		return ImageDescriptorV1{}, errors.New("image_changed")
+		return FileDescriptorV1{}, errors.New("changed")
 	}
-	f := os.NewFile(uintptr(readHandle), abs)
-	hbuf := make([]byte, 16)
-	n, e := f.ReadAt(hbuf, 0)
-	closeErr := f.Close()
-	if e != nil && e != io.EOF {
-		return ImageDescriptorV1{}, errors.New("image_unreadable")
-	}
-	if closeErr != nil {
-		return ImageDescriptorV1{}, errors.New("image_unreadable")
-	}
-	format, e := classify(hbuf[:n])
+	head, e := sniffHandle(readHandle, abs)
 	if e != nil {
-		return ImageDescriptorV1{}, e
+		return FileDescriptorV1{}, e
 	}
-	id := imageIdentity{uint64(info.VolumeSerialNumber), uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow), size, info.LastWriteTime, info.NumberOfLinks}
-	return ImageDescriptorV1{absolute: abs, display: filepath.ToSlash(rel), Format: format, Size: size, identity: id, root: r}, nil
+	kind, format := classifyContent(head, uint64(len(head)) < size)
+	return FileDescriptorV1{absolute: abs, display: filepath.ToSlash(rel), Kind: kind, Format: format, Size: size, limit: maxBytes, identity: id, root: r}, nil
 }
-func revalidateImage(r *capturedRoot, d *ImageDescriptorV1) error {
+
+// revalidateFile re-opens the leaf by absolute path (reparse points still
+// refused) and requires identity, kind, and format to be unchanged.
+func revalidateFile(_ *capturedRoot, d *FileDescriptorV1) error {
 	h, id, e := openWin(d.absolute, false)
 	if e != nil {
 		return e
 	}
-	defer windows.CloseHandle(h)
 	if id != d.identity {
+		windows.CloseHandle(h)
 		return errors.New("changed")
 	}
-	buf := make([]byte, 16)
-	f := os.NewFile(uintptr(h), d.absolute)
-	n, e := f.ReadAt(buf, 0)
-	f.Close()
-	if e != nil && e != io.EOF {
+	if id.size > d.revalidationLimit() {
+		windows.CloseHandle(h)
+		return errors.New("changed")
+	}
+	head, e := sniffHandle(h, d.absolute)
+	if e != nil {
 		return e
 	}
-	format, e := classify(buf[:n])
-	if e != nil || format != d.Format {
+	kind, format := classifyContent(head, uint64(len(head)) < id.size)
+	if kind != d.Kind || format != d.Format {
 		return errors.New("changed")
 	}
 	return nil
+}
+
+// sniffHandle takes ownership of h, reads the bounded classification prefix,
+// and always releases the handle exactly once (os.File owns it after
+// NewFile, so the raw handle must not be closed separately).
+func sniffHandle(h windows.Handle, name string) ([]byte, error) {
+	f := os.NewFile(uintptr(h), name)
+	if f == nil {
+		windows.CloseHandle(h)
+		return nil, errors.New("unreadable")
+	}
+	buf := make([]byte, sniffBytes)
+	n, readErr := f.ReadAt(buf, 0)
+	closeErr := f.Close()
+	if (readErr != nil && readErr != io.EOF) || closeErr != nil {
+		return nil, errors.New("unreadable")
+	}
+	return buf[:n], nil
 }

@@ -5,10 +5,11 @@ package turninput
 import (
 	"errors"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 type imageIdentity struct {
@@ -46,13 +47,20 @@ func captureRoot(root string) (*capturedRoot, error) {
 	}
 	return &capturedRoot{p, fd, unixIdentity(&st, "")}, nil
 }
+
 func (r *capturedRoot) close() {
 	if r.fd >= 0 {
 		unix.Close(r.fd)
 		r.fd = -1
 	}
 }
-func validateImage(r *capturedRoot, raw string) (ImageDescriptorV1, error) {
+
+// validateFile walks the path one component at a time with openat +
+// O_NOFOLLOW from the captured root fd, so no symlink anywhere in the chain
+// can escape the project, then fstats the leaf, sniffs a bounded prefix for
+// the content kind, and re-fstats to prove the file did not change between
+// the first stat and the read (TOCTOU).
+func validateFile(r *capturedRoot, raw string, maxBytes uint64) (FileDescriptorV1, error) {
 	abs := raw
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(r.path, raw)
@@ -60,12 +68,12 @@ func validateImage(r *capturedRoot, raw string) (ImageDescriptorV1, error) {
 	abs = filepath.Clean(abs)
 	rel, e := filepath.Rel(r.path, abs)
 	if e != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == "." {
-		return ImageDescriptorV1{}, errors.New("image_outside_project")
+		return FileDescriptorV1{}, errors.New("outside_project")
 	}
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	fd, e := unix.Dup(r.fd)
 	if e != nil {
-		return ImageDescriptorV1{}, e
+		return FileDescriptorV1{}, e
 	}
 	ancestorKey := r.identity.rootKey()
 	current := r.path
@@ -74,12 +82,12 @@ func validateImage(r *capturedRoot, raw string) (ImageDescriptorV1, error) {
 		next, x := unix.Openat(fd, p, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		unix.Close(fd)
 		if x != nil {
-			return ImageDescriptorV1{}, classifyUnixPathFailure(current)
+			return FileDescriptorV1{}, classifyUnixPathFailure(current)
 		}
 		var dst unix.Stat_t
 		if unix.Fstat(next, &dst) != nil || dst.Mode&unix.S_IFMT != unix.S_IFDIR {
 			unix.Close(next)
-			return ImageDescriptorV1{}, errors.New("image_not_regular")
+			return FileDescriptorV1{}, errors.New("not_regular")
 		}
 		ancestorKey += "/" + unixIdentity(&dst, "").keyFull()
 		fd = next
@@ -88,42 +96,42 @@ func validateImage(r *capturedRoot, raw string) (ImageDescriptorV1, error) {
 	leaf, e := unix.Openat(fd, parts[len(parts)-1], unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	unix.Close(fd)
 	if e != nil {
-		return ImageDescriptorV1{}, classifyUnixPathFailure(leafPath)
+		return FileDescriptorV1{}, classifyUnixPathFailure(leafPath)
 	}
 	defer unix.Close(leaf)
 	var st unix.Stat_t
 	if unix.Fstat(leaf, &st) != nil {
-		return ImageDescriptorV1{}, errors.New("image_unreadable")
+		return FileDescriptorV1{}, errors.New("unreadable")
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		return ImageDescriptorV1{}, errors.New("image_not_regular")
+		return FileDescriptorV1{}, errors.New("not_regular")
 	}
 	if st.Mode&0o444 == 0 {
-		return ImageDescriptorV1{}, errors.New("image_unreadable")
+		return FileDescriptorV1{}, errors.New("unreadable")
 	}
 	if st.Size == 0 {
-		return ImageDescriptorV1{}, errors.New("image_empty")
+		return FileDescriptorV1{}, errors.New("empty")
 	}
-	if uint64(st.Size) > MaxImageBytes {
-		return ImageDescriptorV1{}, errors.New("image_too_large")
+	if uint64(st.Size) > maxBytes {
+		return FileDescriptorV1{}, errors.New("too_large")
 	}
-	h := make([]byte, 16)
+	h := make([]byte, sniffBytes)
 	n, e := unix.Pread(leaf, h, 0)
 	if e != nil {
-		return ImageDescriptorV1{}, errors.New("image_unreadable")
+		return FileDescriptorV1{}, errors.New("unreadable")
 	}
-	format, e := classify(h[:n])
-	if e != nil {
-		return ImageDescriptorV1{}, e
-	}
+	kind, format := classifyContent(h[:n], uint64(n) < uint64(st.Size))
 	var after unix.Stat_t
 	if unix.Fstat(leaf, &after) != nil || unixIdentity(&st, "") != unixIdentity(&after, "") {
-		return ImageDescriptorV1{}, errors.New("image_changed")
+		return FileDescriptorV1{}, errors.New("changed")
 	}
 	id := unixIdentity(&st, ancestorKey)
-	return ImageDescriptorV1{absolute: abs, display: filepath.ToSlash(rel), Format: format, Size: uint64(st.Size), identity: id, root: r}, nil
+	return FileDescriptorV1{absolute: abs, display: filepath.ToSlash(rel), Kind: kind, Format: format, Size: uint64(st.Size), limit: maxBytes, identity: id, root: r}, nil
 }
-func revalidateImage(r *capturedRoot, d *ImageDescriptorV1) error {
+
+// revalidateFile re-pins the project root, then re-runs the full validation
+// and refuses if the file's identity, kind, or format moved.
+func revalidateFile(r *capturedRoot, d *FileDescriptorV1) error {
 	fd, e := unix.Open(r.path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if e != nil {
 		return e
@@ -134,11 +142,11 @@ func revalidateImage(r *capturedRoot, d *ImageDescriptorV1) error {
 	if e != nil || unixIdentity(&rootStat, "").rootKey() != r.identity.rootKey() {
 		return errors.New("changed")
 	}
-	now, e := validateImage(r, d.absolute)
+	now, e := validateFile(r, d.absolute, d.revalidationLimit())
 	if e != nil {
 		return e
 	}
-	if now.identity != d.identity || now.Format != d.Format {
+	if now.identity != d.identity || now.Format != d.Format || now.Kind != d.Kind {
 		return errors.New("changed")
 	}
 	return nil
@@ -161,16 +169,16 @@ func (i imageIdentity) rootKey() string {
 func classifyUnixPathFailure(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return errors.New("image_not_found")
+		return errors.New("not_found")
 	}
 	if err != nil {
-		return errors.New("image_unreadable")
+		return errors.New("unreadable")
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("image_link_refused")
+		return errors.New("link_refused")
 	}
 	if !info.Mode().IsRegular() && !info.IsDir() {
-		return errors.New("image_not_regular")
+		return errors.New("not_regular")
 	}
-	return errors.New("image_unreadable")
+	return errors.New("unreadable")
 }
