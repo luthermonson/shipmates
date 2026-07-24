@@ -1,3 +1,5 @@
+//go:build unix
+
 package commands
 
 // This file is the private production composition boundary for M3. It is

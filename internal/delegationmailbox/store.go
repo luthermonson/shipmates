@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package delegationmailbox is the ship-local M3 inbox/outbox. It contains no
 // transport and calls M2 only through the narrow adapter below.
 package delegationmailbox

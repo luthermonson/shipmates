@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package fleettunnel implements the authenticated, outbound-only M7 ship
 // observation tunnel. It intentionally has no command, controller, approval,
 // filesystem, browser, CLI, or generic RPC surface.

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package m3provision implements the administrator-owned, fixed-profile M3
 // prerequisite provisioner. It never starts Fleet, a service, or the
 // qualifier; all writes are create-new and committed by one final rename.

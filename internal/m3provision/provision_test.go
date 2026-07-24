@@ -1,3 +1,5 @@
+//go:build unix
+
 package m3provision
 
 import (

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package fleetobserver exposes the authenticated, read-only M7 Fleet query
 // surface. It owns no listener and contains no action or proxy facility.
 package fleetobserver
