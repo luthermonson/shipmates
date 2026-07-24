@@ -58,8 +58,15 @@ type Runtime struct {
 	stream  chan runtime.Event
 	stopFan chan struct{}
 	stopped sync.Once
+	// fanWG tracks in-flight fanoutTurn goroutines so Close can drain them
+	// before closing the stream channel exactly once.
+	fanWG sync.WaitGroup
 
+	// sessMu guards sessions, closed, AND every session's mutable fields
+	// (turnActive, currentCmd, currentHandle). One lock keeps the
+	// SendTurn/InterruptTurn/Close interleavings easy to reason about.
 	sessMu   sync.Mutex
+	closed   bool
 	sessions map[string]*session
 }
 
@@ -152,12 +159,14 @@ func (r *Runtime) ResumeSession(_ context.Context, id string, spec runtime.Sessi
 func (r *Runtime) CloseSession(ctx context.Context, id string) error {
 	r.sessMu.Lock()
 	s, ok := r.sessions[id]
+	var handle containment.Handle
 	if ok {
 		delete(r.sessions, id)
+		handle = s.currentHandle
 	}
 	r.sessMu.Unlock()
-	if ok && s.currentHandle != nil {
-		_ = s.currentHandle.Close(ctx)
+	if handle != nil {
+		_ = handle.Close(ctx)
 	}
 	return nil
 }
@@ -166,14 +175,30 @@ func (r *Runtime) CloseSession(ctx context.Context, id string) error {
 // --output-format stream-json`, writes the turn text to stdin, and streams
 // JSONL events into r.stream via fanoutTurn.
 func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.TurnInput) (runtime.Turn, error) {
+	// Reserve the session's single turn slot atomically. Claude Code
+	// sessions are one-turn-at-a-time; silently overwriting a live handle
+	// would orphan the prior process, so a concurrent SendTurn is an error.
 	r.sessMu.Lock()
 	s, ok := r.sessions[sessionID]
+	if ok && s.turnActive {
+		r.sessMu.Unlock()
+		return nil, fmt.Errorf("claude: session %s already has an active turn", sessionID)
+	}
+	if ok {
+		s.turnActive = true
+	}
 	r.sessMu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("claude: unknown session %q", sessionID)
 	}
+	releaseSlot := func() {
+		r.sessMu.Lock()
+		s.turnActive = false
+		r.sessMu.Unlock()
+	}
 	turnID, err := mintTurnID()
 	if err != nil {
+		releaseSlot()
 		return nil, err
 	}
 
@@ -198,19 +223,34 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		releaseSlot()
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		releaseSlot()
 		return nil, err
 	}
 	// Route the spawn through containment so RSS/CPU are bounded per turn.
 	handle, err := r.contain.Start(cmd, r.limits)
 	if err != nil {
+		releaseSlot()
 		return nil, err
+	}
+	r.sessMu.Lock()
+	if r.closed {
+		// Runtime shut down while we were spawning: tear the process back
+		// down rather than leaking it past Close's drain.
+		r.sessMu.Unlock()
+		_ = handle.Close(ctx)
+		return nil, fmt.Errorf("claude: runtime closed")
 	}
 	s.currentCmd = cmd
 	s.currentHandle = handle
+	// Register with the fan-out drain inside the lock so Close cannot start
+	// waiting between our closed-check and the Add.
+	r.fanWG.Add(1)
+	r.sessMu.Unlock()
 
 	// Write the turn message and close stdin so claude knows we're done.
 	go func() {
@@ -220,8 +260,18 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 
 	// Fan out events from claude's JSONL output into r.stream; the
 	// Handle's Done() supplies the terminal event (natural exit, memory
-	// kill, requested close).
-	go r.fanoutTurn(sessionID, turnID, handle, stdout)
+	// kill, requested close). When the turn is over, release the session's
+	// turn slot so the next SendTurn is accepted.
+	go func() {
+		defer r.fanWG.Done()
+		r.fanoutTurn(sessionID, turnID, handle, stdout)
+		r.sessMu.Lock()
+		if s.currentHandle == handle {
+			s.currentCmd, s.currentHandle = nil, nil
+		}
+		s.turnActive = false
+		r.sessMu.Unlock()
+	}()
 
 	return &turn{id: turnID, sessionID: sessionID, startedAt: time.Now()}, nil
 }
@@ -232,11 +282,15 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 func (r *Runtime) InterruptTurn(ctx context.Context, sessionID, _ string) error {
 	r.sessMu.Lock()
 	s, ok := r.sessions[sessionID]
+	var handle containment.Handle
+	if ok {
+		handle = s.currentHandle
+	}
 	r.sessMu.Unlock()
-	if !ok || s.currentHandle == nil {
+	if handle == nil {
 		return &runtime.ErrUnsupported{Runtime: "claude", Feature: "InterruptTurn on inactive session"}
 	}
-	return s.currentHandle.Close(ctx)
+	return handle.Close(ctx)
 }
 
 // SteerTurn implements runtime.Runtime. Claude Code has no equivalent of
@@ -256,17 +310,31 @@ func (r *Runtime) ResolveApproval(context.Context, runtime.ApprovalResponse, run
 }
 
 // Close implements runtime.Runtime. Tears down every open session's
-// containment handle so the whole spawned process tree exits.
+// containment handle so the whole spawned process tree exits, drains the
+// fan-out goroutines, and closes the event stream so consumers ranging
+// over Events() terminate — symmetric with the codex runtime's fanout.
 func (r *Runtime) Close(ctx context.Context) error {
-	r.stopped.Do(func() { close(r.stopFan) })
-	r.sessMu.Lock()
-	for _, s := range r.sessions {
-		if s.currentHandle != nil {
-			_ = s.currentHandle.Close(ctx)
+	r.stopped.Do(func() {
+		close(r.stopFan)
+		r.sessMu.Lock()
+		r.closed = true
+		var handles []containment.Handle
+		for _, s := range r.sessions {
+			if s.currentHandle != nil {
+				handles = append(handles, s.currentHandle)
+			}
 		}
-	}
-	r.sessions = map[string]*session{}
-	r.sessMu.Unlock()
+		r.sessions = map[string]*session{}
+		r.sessMu.Unlock()
+		for _, h := range handles {
+			_ = h.Close(ctx)
+		}
+		// Every fanoutTurn goroutine bails out promptly once stopFan is
+		// closed and its process is dead; wait for them, then close the
+		// stream exactly once.
+		r.fanWG.Wait()
+		close(r.stream)
+	})
 	return nil
 }
 
@@ -330,11 +398,16 @@ func (r *Runtime) fanoutTurn(sessionID, turnID string, handle containment.Handle
 	}
 }
 
-// session is the runtime.Session implementation for claude sessions.
+// session is the runtime.Session implementation for claude sessions. The
+// mutable fields (turnActive, currentCmd, currentHandle) are guarded by
+// Runtime.sessMu — see the Runtime struct comment.
 type session struct {
 	id, persona, projectDir, wdOverride string
-	currentCmd                          *exec.Cmd
-	currentHandle                       containment.Handle
+	// turnActive reserves the session's single turn slot from the moment
+	// SendTurn accepts a turn until its fanout goroutine finishes.
+	turnActive    bool
+	currentCmd    *exec.Cmd
+	currentHandle containment.Handle
 }
 
 func (s *session) ID() string      { return s.id }
