@@ -25,8 +25,19 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Vet
+      - name: Vet (ubuntu)
+        if: runner.os == 'Linux'
         run: go vet ./...
+
+      # Vet compiles test files too, so on Windows it must skip the same
+      # packages the Windows test step skips (their test files are not
+      # build-tag gated for unix-only code) — see the Test (windows)
+      # comment below for the rationale per package.
+      - name: Vet (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          go vet $(go list ./... | grep -v -E 'internal/(client|codexapp|dashboard|delegation|fleetcommandermailbox|fleetconfig|fleetidentity|fleetinterrupt|installer|livesession|project|recovery|server|voyage)$')
 
       # The fleetconfig, m3provision, and m3runtime test suites are
       # environment-dependent: they exercise the M3 authority/qualifier
