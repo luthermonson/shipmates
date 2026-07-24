@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -189,6 +190,12 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 
 	cmd := exec.CommandContext(ctx, r.binary, args...)
 	cmd.Dir = s.workingDir()
+	// Export the persona so the SessionStart hook (`shipmates hook
+	// load-memory`, wired by InstallMemoryHook) can resolve which persona's
+	// memory to inject — Claude Code doesn't pass the agent name to hooks.
+	if s.persona != "" {
+		cmd.Env = append(os.Environ(), "SHIPMATES_PERSONA="+s.persona)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

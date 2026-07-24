@@ -15,6 +15,7 @@ func PublicCommands(cat *catalog.Catalog) []*cli.Command {
 		Init(cat), Policy(), Add(cat), List(cat), Remove(), Update(cat),
 		Render(cat), Routing(cat), Open(), Ask(), Live(), Tell(), Feed(), Interrupt(),
 		Fanout(), Drain(cat), DrainMany(cat), Autonomous(cat), Beads(), Plan(), Sail(),
+		Hook(),
 	}
 	return append(base, platformCommands()...)
 }
