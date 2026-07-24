@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,6 +138,76 @@ func TestShowFallsBackToCodexNativePath(t *testing.T) {
 	}
 	if !strings.Contains(gotPrompt, "inline me") || !strings.Contains(gotPrompt, "caption here") {
 		t.Errorf("codex prompt = %q", gotPrompt)
+	}
+}
+
+// TestShowPrefersTheLiveSessionOverAOneShot verifies show reaches the live
+// server first and, when the server accepts, never dispatches a one-shot
+// turn.
+func TestShowPrefersTheLiveSessionOverAOneShot(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installCodexPersona(t, "security")
+	writeLiveCommandDiscovery(t)
+	writeShowFixture(t, "screen.png", showPNG)
+	old := http.DefaultTransport
+	defer func() { http.DefaultTransport = old }()
+	var showBody map[string]any
+	var showPath string
+	http.DefaultTransport = liveRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/health" {
+			return response(200, "ok", map[string]string{"X-Shipmates-Project": r.Header.Get("X-Shipmates-Project")}), nil
+		}
+		showPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &showBody)
+		return response(200, `{"code":"","target":{"persona":"security","session_id":"s","backend":"claude","thread_id":"t","turn_id":"u","state":"working"},"injected":true,"notes":["screen.png: attached as png image"]}`, nil), nil
+	})
+	rt := newFakeRuntime(turnScript("unused"))
+	swapSelector(t, rt)
+
+	var stdout, stderr bytes.Buffer
+	if err := runShow(context.Background(), "claude", "security", []string{"screen.png"}, "look", false, &stdout, &stderr); err != nil {
+		t.Fatalf("runShow: %v", err)
+	}
+	if showPath != "/api/live/security/show" {
+		t.Fatalf("path = %q", showPath)
+	}
+	files, _ := showBody["files"].([]any)
+	if len(files) != 1 || files[0] != "screen.png" || showBody["caption"] != "look" {
+		t.Fatalf("body = %v", showBody)
+	}
+	if len(rt.sentTurns) != 0 {
+		t.Fatalf("one-shot dispatched despite live delivery: %+v", rt.sentTurns)
+	}
+	if !strings.Contains(stderr.String(), "the running turn") {
+		t.Errorf("stderr did not report the injection: %q", stderr.String())
+	}
+}
+
+// TestShowFallsBackToOneShotWhenNoLiveSession verifies a not_found from the
+// server is a fallback signal, not an error.
+func TestShowFallsBackToOneShotWhenNoLiveSession(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installCodexPersona(t, "security")
+	writeLiveCommandDiscovery(t)
+	writeShowFixture(t, "notes.md", []byte("read me"))
+	old := http.DefaultTransport
+	defer func() { http.DefaultTransport = old }()
+	http.DefaultTransport = liveRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/health" {
+			return response(200, "ok", map[string]string{"X-Shipmates-Project": r.Header.Get("X-Shipmates-Project")}), nil
+		}
+		return response(404, `{"code":"not_found"}`, nil), nil
+	})
+	rt := newFakeRuntime(turnScript("one-shot ack"))
+	swapSelector(t, rt)
+
+	var stdout, stderr bytes.Buffer
+	if err := runShow(context.Background(), "claude", "security", []string{"notes.md"}, "", false, &stdout, &stderr); err != nil {
+		t.Fatalf("runShow: %v", err)
+	}
+	if len(rt.sentTurns) != 1 || !strings.Contains(rt.sentTurns[0].Text, "read me") {
+		t.Fatalf("one-shot fallback did not run: %+v", rt.sentTurns)
 	}
 }
 

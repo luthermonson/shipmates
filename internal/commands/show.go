@@ -2,12 +2,17 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/luthermonson/shipmates/internal/attach"
+	"github.com/luthermonson/shipmates/internal/client"
+	"github.com/luthermonson/shipmates/internal/livesession"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/turninput"
 	"github.com/urfave/cli/v3"
@@ -73,8 +78,23 @@ func runShow(ctx context.Context, cliRuntime, persona string, paths []string, ca
 	if err != nil {
 		return err
 	}
+	// The batch is validated here so the operator gets a precise local
+	// error; the server revalidates against its own project root before it
+	// reads a single byte, so this is convenience, never authority.
+	batch.Close()
+
+	if delivered, err := showToLiveSession(ctx, persona, paths, caption, stdout, stderr); err != nil {
+		return err
+	} else if delivered {
+		return nil
+	}
+
+	batch, err = turninput.ValidateFiles(root, paths)
+	if err != nil {
+		return err
+	}
 	defer batch.Close()
-	plan, err := attach.Render(caption, batch.Files())
+	plan, err := attach.Render(caption, batch.Files(), attach.Native)
 	if err != nil {
 		return err
 	}
@@ -82,6 +102,43 @@ func runShow(ctx context.Context, cliRuntime, persona string, paths []string, ca
 		fmt.Fprintln(stderr, "attachment: "+note)
 	}
 	return dispatchAttachedTurn(ctx, cliRuntime, persona, plan, fresh, stdout, stderr)
+}
+
+// showToLiveSession delivers the attachment into the persona's live session
+// if one is running. It reports false — without an error — when there is no
+// server, or no live session for this persona, so the caller falls back to a
+// one-shot turn.
+func showToLiveSession(ctx context.Context, persona string, paths []string, caption string, stdout, stderr io.Writer) (bool, error) {
+	if !client.Healthy() {
+		return false, nil
+	}
+	resp, err := client.Do(ctx, http.MethodPost, "/api/live/"+url.PathEscape(persona)+"/show", map[string]any{"files": paths, "caption": caption})
+	if err != nil {
+		return false, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		code := serverErrorCode(resp)
+		switch livesession.Code(code) {
+		case livesession.NotFound, livesession.StoppedCode, livesession.FailedCode:
+			// No live session to attach to — one-shot delivery it is.
+			return false, nil
+		}
+		return false, errors.New(code)
+	}
+	var res livesession.ShowResult
+	if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&res) != nil {
+		return false, errors.New("invalid show server response")
+	}
+	for _, note := range res.Notes {
+		fmt.Fprintln(stderr, "attachment: "+note)
+	}
+	target := "a new turn"
+	if res.Injected {
+		target = "the running turn"
+	}
+	fmt.Fprintf(stderr, "delivered to %s's live session (%s); watch with: shipmates feed %s --follow\n", persona, target, persona)
+	return true, json.NewEncoder(stdout).Encode(res.Snapshot)
 }
 
 // dispatchAttachedTurn sends a one-shot turn carrying the rendered

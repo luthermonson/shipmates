@@ -262,14 +262,20 @@ func Live() *cli.Command {
 }
 
 func safeServerError(resp *http.Response) error {
+	return errors.New(serverErrorCode(resp))
+}
+
+// serverErrorCode extracts the server's stable error code, never its
+// message: response bodies are protocol data and are not surfaced verbatim.
+func serverErrorCode(resp *http.Response) string {
 	var v struct {
 		Code string `json:"code"`
 	}
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&v)
 	if v.Code == "" {
-		v.Code = "server_error"
+		return "server_error"
 	}
-	return errors.New(v.Code)
+	return v.Code
 }
 
 // dispatch runs a one-shot turn-based delegation: resolve the persona's config,

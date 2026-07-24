@@ -41,7 +41,7 @@ func TestRenderInlinesTextReferencesBinaryAndPassesImages(t *testing.T) {
 		"c-blob.bin": {0x00, 0xff, 0x00},
 	})
 	defer done()
-	plan, err := Render("please review", files)
+	plan, err := Render("please review", files, Native)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,11 +72,32 @@ func TestRenderInlinesTextReferencesBinaryAndPassesImages(t *testing.T) {
 	}
 }
 
+func TestRenderReferenceModeKeepsImagesOutOfTheAttachmentList(t *testing.T) {
+	_, files, done := fixtures(t, map[string][]byte{
+		"a-notes.md": []byte("still inlined"),
+		"b-shot.png": {0x89, 'P', 'N', 'G', 13, 10, 26, 10, 'x'},
+	})
+	defer done()
+	plan, err := Render("", files, Reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Images) != 0 {
+		t.Fatalf("reference mode still produced attachments: %+v", plan.Images)
+	}
+	if !strings.Contains(plan.Text, "b-shot.png") || !strings.Contains(plan.Text, "not attached inline") {
+		t.Fatalf("image not referenced by path:\n%s", plan.Text)
+	}
+	if !strings.Contains(plan.Text, "still inlined") {
+		t.Fatalf("text attachment stopped being inlined:\n%s", plan.Text)
+	}
+}
+
 func TestRenderTruncatesLargeTextWithNotice(t *testing.T) {
 	body := strings.Repeat("x", MaxInlineTextBytes+512)
 	_, files, done := fixtures(t, map[string][]byte{"big.txt": []byte(body)})
 	defer done()
-	plan, err := Render("", files)
+	plan, err := Render("", files, Native)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +115,7 @@ func TestRenderTruncatesLargeTextWithNotice(t *testing.T) {
 func TestRenderFenceCannotBeClosedByContent(t *testing.T) {
 	_, files, done := fixtures(t, map[string][]byte{"md.md": []byte("```\nnot the end\n```\n")})
 	defer done()
-	plan, err := Render("", files)
+	plan, err := Render("", files, Native)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +125,7 @@ func TestRenderFenceCannotBeClosedByContent(t *testing.T) {
 }
 
 func TestRenderEmptyBatchIsJustTheCaption(t *testing.T) {
-	plan, err := Render("  just words  ", nil)
+	plan, err := Render("  just words  ", nil, Native)
 	if err != nil {
 		t.Fatal(err)
 	}

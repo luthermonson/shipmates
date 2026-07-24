@@ -1040,6 +1040,14 @@ func (m *Manager) ShutdownAll(ctx context.Context) error {
 }
 
 func (m *Manager) Tell(ctx context.Context, persona, sid, tid, turn, text string) (ControlResult, error) {
+	return m.TellInput(ctx, persona, sid, tid, turn, text, nil)
+}
+
+// TellInput is Tell with attachments folded into the same mid-turn message.
+// Backends that can carry an attachment mid-turn take it natively; the rest
+// never receive one, because the caller renders images as path references
+// for those transports instead (see attach.Reference).
+func (m *Manager) TellInput(ctx context.Context, persona, sid, tid, turn, text string, images []turninput.ImageDescriptorV1) (ControlResult, error) {
 	if strings.TrimSpace(text) == "" {
 		return ControlResult{}, failure(Internal)
 	}
@@ -1068,7 +1076,13 @@ func (m *Manager) Tell(ctx context.Context, persona, sid, tid, turn, text string
 	s.state = Steering
 	a := s.adapter
 	s.mu.Unlock()
-	err = a.SteerTurn(ctx, tid, turn, text)
+	if len(images) == 0 {
+		err = a.SteerTurn(ctx, tid, turn, text)
+	} else if steerer, ok := a.(attachmentSteerer); ok {
+		err = steerer.SteerTurnInput(ctx, tid, turn, codexapp.TurnInput{Text: text, Images: images})
+	} else {
+		err = failure(InvalidInput)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state == Steering {
@@ -1078,7 +1092,11 @@ func (m *Manager) Tell(ctx context.Context, persona, sid, tid, turn, text string
 		s.publishLocked("steering.refused", tid, turn, map[string]any{"code": "refused", "message": "steering was refused"})
 		return ControlResult{}, err
 	}
-	s.publishLocked("steering.accepted", tid, turn, nil)
+	data := map[string]any(nil)
+	if len(images) != 0 {
+		data = map[string]any{"image_count": len(images)}
+	}
+	s.publishLocked("steering.accepted", tid, turn, data)
 	return ControlResult{Snapshot: s.snapshotLocked()}, nil
 }
 

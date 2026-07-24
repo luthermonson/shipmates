@@ -45,6 +45,10 @@ type liveTargetRequest struct {
 	TurnID    string `json:"turn_id"`
 	Message   string `json:"message,omitempty"`
 }
+type liveShowRequest struct {
+	Files   []string `json:"files"`
+	Caption string   `json:"caption,omitempty"`
+}
 type liveAttachRequest struct {
 	Fresh     bool   `json:"fresh"`
 	SessionID string `json:"session_id,omitempty"`
@@ -174,6 +178,37 @@ func (s *Server) handleCodexLive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeLiveJSON(w, 200, sess.Snapshot())
+}
+
+// handleLiveShow delivers `shipmates show` attachments into the persona's
+// live session. Paths are revalidated here against the server's own project
+// root — the client's validation is a convenience, never authority — and
+// the session's exact tuple is captured inside the manager, so the caller
+// never supplies a turn id that could be stale.
+func (s *Server) handleLiveShow(w http.ResponseWriter, r *http.Request) {
+	var req liveShowRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&req) != nil || len(req.Files) == 0 {
+		writeLiveJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_request"})
+		return
+	}
+	if strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]) != "application/json" {
+		writeLiveJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_request"})
+		return
+	}
+	batch, err := turninput.ValidateFiles(s.projectRoot, req.Files)
+	if err != nil {
+		writeLiveJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_file"})
+		return
+	}
+	defer batch.Close()
+	res, err := s.liveSessions.ShowAttachment(r.Context(), r.PathValue("persona"), req.Caption, batch.Files())
+	if err != nil {
+		writeLiveError(w, err)
+		return
+	}
+	writeLiveJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleCodexAttach(w http.ResponseWriter, r *http.Request) {

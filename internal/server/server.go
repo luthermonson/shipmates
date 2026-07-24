@@ -84,6 +84,7 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("POST /api/live/{persona}/approval", s.projectOnly(http.HandlerFunc(s.handleCodexApproval)))
 	mux.Handle("GET /api/live/{persona}/feed", s.projectOnly(http.HandlerFunc(s.handleCodexFeed)))
 	mux.Handle("POST /api/live/{persona}/tell", s.projectOnly(http.HandlerFunc(s.handleCodexTell)))
+	mux.Handle("POST /api/live/{persona}/show", s.projectOnly(http.HandlerFunc(s.handleLiveShow)))
 	mux.Handle("POST /api/live/{persona}/interrupt", s.projectOnly(http.HandlerFunc(s.handleCodexInterrupt)))
 	mux.Handle("GET /api/local/v1/steer-targets", s.localControlOnly(http.HandlerFunc(s.handleLocalSteerTargets)))
 	mux.Handle("POST /api/local/v1/steer-exact", s.localControlOnly(http.HandlerFunc(s.handleLocalSteerExact)))

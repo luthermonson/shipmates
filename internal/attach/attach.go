@@ -34,6 +34,21 @@ const MaxInlineTextBytes = 64 * 1024
 // MaxTotalInlineTextBytes bounds the inlined text across a whole batch.
 const MaxTotalInlineTextBytes = 128 * 1024
 
+// Mode selects how images are represented.
+type Mode int
+
+const (
+	// Native attaches images to the turn itself: a localImage input on a
+	// codex turn, a base64 image content block on claude. Plan.Images
+	// carries the descriptors.
+	Native Mode = iota
+	// Reference names images by project-relative path in the text instead.
+	// Used for transports that cannot carry an image with the message —
+	// today that is a codex mid-turn steer, whose input shipmates only
+	// sends as text. Plan.Images is empty in this mode.
+	Reference
+)
+
 // Plan is the runtime-neutral rendering of one attachment batch.
 type Plan struct {
 	// Text is the complete turn text: caption, per-file headers, inlined
@@ -51,7 +66,7 @@ type Plan struct {
 // descriptors. It reads text attachments through FileDescriptorV1.Bytes,
 // which revalidates identity before and after the read, so a file swapped
 // since validation is refused rather than inlined.
-func Render(caption string, files []turninput.FileDescriptorV1) (Plan, error) {
+func Render(caption string, files []turninput.FileDescriptorV1, mode Mode) (Plan, error) {
 	if len(files) == 0 {
 		return Plan{Text: strings.TrimSpace(caption)}, nil
 	}
@@ -66,6 +81,11 @@ func Render(caption string, files []turninput.FileDescriptorV1) (Plan, error) {
 	for _, d := range files {
 		switch d.Kind {
 		case turninput.FileImage:
+			if mode == Reference {
+				fmt.Fprintf(&b, "\n- %s (%s image, %d bytes) — not attached inline. Open it from the project at that path to view it.\n", d.DisplayPath(), d.Format, d.Size)
+				plan.Notes = append(plan.Notes, fmt.Sprintf("%s: %s image, referenced by path (this transport cannot attach it mid-turn)", d.DisplayPath(), d.Format))
+				break
+			}
 			fmt.Fprintf(&b, "\n- %s (%s image, %d bytes) — attached to this turn as an image.\n", d.DisplayPath(), d.Format, d.Size)
 			plan.Images = append(plan.Images, d)
 			plan.Notes = append(plan.Notes, fmt.Sprintf("%s: attached as %s image", d.DisplayPath(), d.Format))
