@@ -72,14 +72,25 @@ func (r *Runtime) Capabilities() runtime.Caps {
 		// that flag post-init, so we conservatively report false and rely
 		// on the caller's config to know they asked for it.
 		Containment: false,
+		// The codex app-server transport has no per-session process
+		// environment (codexapp.ThreadOptions cannot carry one), so
+		// SessionSpec.Environment is unsupported — see StartSession.
+		Environment: false,
 	}
 }
 
 // Events implements runtime.Runtime.
 func (r *Runtime) Events() <-chan runtime.Event { return r.stream }
 
-// StartSession implements runtime.Runtime.
+// StartSession implements runtime.Runtime. SessionSpec.Environment is
+// rejected rather than silently dropped: codexapp.ThreadOptions has no way
+// to carry a per-session process environment through the app-server
+// transport, and pretending otherwise would let callers believe an
+// override took effect (Caps.Environment is false accordingly).
 func (r *Runtime) StartSession(ctx context.Context, spec runtime.SessionSpec) (runtime.Session, error) {
+	if len(spec.Environment) > 0 {
+		return nil, &runtime.ErrUnsupported{Runtime: "codex", Feature: "SessionSpec.Environment"}
+	}
 	th, err := r.adapter.StartThread(ctx, threadOptsFromSpec(spec))
 	if err != nil {
 		return nil, err
@@ -87,8 +98,12 @@ func (r *Runtime) StartSession(ctx context.Context, spec runtime.SessionSpec) (r
 	return r.rememberSession(th.ID, spec), nil
 }
 
-// ResumeSession implements runtime.Runtime.
+// ResumeSession implements runtime.Runtime. Rejects SessionSpec.Environment
+// for the same reason as StartSession.
 func (r *Runtime) ResumeSession(ctx context.Context, id string, spec runtime.SessionSpec) (runtime.Session, error) {
+	if len(spec.Environment) > 0 {
+		return nil, &runtime.ErrUnsupported{Runtime: "codex", Feature: "SessionSpec.Environment"}
+	}
 	th, err := r.adapter.ResumeThread(ctx, id, threadOptsFromSpec(spec))
 	if err != nil {
 		return nil, err
@@ -206,6 +221,8 @@ func threadOptsFromSpec(spec runtime.SessionSpec) codexapp.ThreadOptions {
 		WorkingDirectory: spec.WorkingDir,
 		// DeveloperInstructions / Model / ReadOnly / Toolless come from the
 		// persona/policy layer, not raw SessionSpec — plumbed in Phase 3+.
+		// spec.Environment never reaches here: Start/ResumeSession reject a
+		// non-empty value because ThreadOptions cannot carry it.
 	}
 }
 

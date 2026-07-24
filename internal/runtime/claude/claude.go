@@ -32,6 +32,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"sync"
 	"time"
 
@@ -126,6 +127,7 @@ func (r *Runtime) Capabilities() runtime.Caps {
 		Attachments: true,
 		Refusal:     false, // claude surfaces refusals as regular text events
 		Containment: false,
+		Environment: true, // SessionSpec.Environment applied to every spawn
 	}
 }
 
@@ -215,11 +217,26 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 
 	cmd := exec.CommandContext(ctx, r.binary, args...)
 	cmd.Dir = s.workingDir()
-	// Export the persona so the SessionStart hook (`shipmates hook
-	// load-memory`, wired by InstallMemoryHook) can resolve which persona's
-	// memory to inject — Claude Code doesn't pass the agent name to hooks.
-	if s.persona != "" {
-		cmd.Env = append(os.Environ(), "SHIPMATES_PERSONA="+s.persona)
+	// Child environment: inherit ours, export the persona so the
+	// SessionStart hook (`shipmates hook load-memory`, wired by
+	// InstallMemoryHook) can resolve which persona's memory to inject —
+	// Claude Code doesn't pass the agent name to hooks — then layer on the
+	// caller's SessionSpec.Environment overrides (sorted for determinism;
+	// later entries win in exec.Cmd, so overrides beat inherited values).
+	if s.persona != "" || len(s.environment) > 0 {
+		childEnv := os.Environ()
+		if s.persona != "" {
+			childEnv = append(childEnv, "SHIPMATES_PERSONA="+s.persona)
+		}
+		keys := make([]string, 0, len(s.environment))
+		for k := range s.environment {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			childEnv = append(childEnv, k+"="+s.environment[k])
+		}
+		cmd.Env = childEnv
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -341,10 +358,11 @@ func (r *Runtime) Close(ctx context.Context) error {
 func (r *Runtime) rememberSession(id string, spec runtime.SessionSpec) *session {
 	r.sessMu.Lock()
 	s := &session{
-		id:         id,
-		persona:    spec.Persona,
-		projectDir: spec.ProjectDir,
-		wdOverride: spec.WorkingDir,
+		id:          id,
+		persona:     spec.Persona,
+		projectDir:  spec.ProjectDir,
+		wdOverride:  spec.WorkingDir,
+		environment: spec.Environment,
 	}
 	r.sessions[id] = s
 	r.sessMu.Unlock()
@@ -403,6 +421,9 @@ func (r *Runtime) fanoutTurn(sessionID, turnID string, handle containment.Handle
 // Runtime.sessMu — see the Runtime struct comment.
 type session struct {
 	id, persona, projectDir, wdOverride string
+	// environment holds SessionSpec.Environment overrides applied to every
+	// turn spawned under this session. Immutable after rememberSession.
+	environment map[string]string
 	// turnActive reserves the session's single turn slot from the moment
 	// SendTurn accepts a turn until its fanout goroutine finishes.
 	turnActive    bool

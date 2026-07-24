@@ -21,6 +21,11 @@ func TestMain(m *testing.M) {
 	if os.Getenv("SHIPMATES_CLAUDE_FAKE") == "1" {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		fmt.Println(`{"type":"assistant","message":{"content":[{"type":"text","text":"fake hello"}]}}`)
+		// Echo a requested environment variable back as a text frame so
+		// tests can prove SessionSpec.Environment reached the child.
+		if name := os.Getenv("SHIPMATES_CLAUDE_FAKE_ECHO_ENV"); name != "" {
+			fmt.Printf("{\"type\":\"text\",\"text\":\"env %s=%s\"}\n", name, os.Getenv(name))
+		}
 		fmt.Println(`{"type":"result","subtype":"success"}`)
 		if ms := os.Getenv("SHIPMATES_CLAUDE_FAKE_LINGER_MS"); ms != "" {
 			var n int
@@ -199,6 +204,49 @@ func TestClose_ClosesEventStream(t *testing.T) {
 	// Idempotent.
 	if err := rt.Close(context.Background()); err != nil {
 		t.Fatalf("second close: %v", err)
+	}
+}
+
+// TestSendTurn_AppliesSessionEnvironment verifies SessionSpec.Environment
+// (and the SHIPMATES_PERSONA export) reach the spawned process.
+func TestSendTurn_AppliesSessionEnvironment(t *testing.T) {
+	rt := fakeClaudeRuntime(t, 0)
+	defer rt.Close(context.Background())
+	t.Setenv("SHIPMATES_CLAUDE_FAKE_ECHO_ENV", "SHIPMATES_TEST_MARKER")
+
+	s, err := rt.StartSession(context.Background(), runtime.SessionSpec{
+		Persona:     "tester",
+		ProjectDir:  t.TempDir(),
+		Environment: map[string]string{"SHIPMATES_TEST_MARKER": "spec-env-value"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.SendTurn(context.Background(), s.ID(), runtime.TurnInput{Text: "go"}); err != nil {
+		t.Fatal(err)
+	}
+
+	timeout := time.After(15 * time.Second)
+	var sawEnv bool
+	for !sawEnv {
+		select {
+		case ev, ok := <-rt.Events():
+			if !ok {
+				t.Fatal("stream closed before env echo")
+			}
+			if ev.Kind == runtime.KindText {
+				if s, _ := ev.Payload.(string); strings.Contains(s, "SHIPMATES_TEST_MARKER=spec-env-value") {
+					sawEnv = true
+				}
+			}
+			if ev.Kind == runtime.KindTurnDone || ev.Kind == runtime.KindError {
+				if !sawEnv {
+					t.Fatalf("turn ended without env echo (last event %v)", ev.Kind)
+				}
+			}
+		case <-timeout:
+			t.Fatal("no env echo within 15s")
+		}
 	}
 }
 

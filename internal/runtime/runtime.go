@@ -92,6 +92,11 @@ type Caps struct {
 	// process containment). Only true on Linux with the cgroup launcher
 	// available.
 	Containment bool
+	// Environment: SessionSpec.Environment overrides are applied to the
+	// runtime's spawned processes. Runtimes without per-session process
+	// environments (codex app-server) report false and reject specs that
+	// set Environment with ErrUnsupported.
+	Environment bool
 }
 
 // Session is a handle to an active or resumable runtime session.
@@ -120,7 +125,10 @@ type SessionSpec struct {
 	// WorkingDir is where the runtime's shell/tool calls originate. Defaults
 	// to ProjectDir if empty.
 	WorkingDir string
-	// Environment overrides for the runtime process.
+	// Environment overrides for the runtime process. Honored only when
+	// Caps.Environment is true (claude applies it to every spawned turn;
+	// codex's app-server transport cannot carry per-session environments
+	// and rejects a non-empty value with ErrUnsupported).
 	Environment map[string]string
 	// ContainExec requests cgroup-based process containment. Ignored (with
 	// a warning) if the runtime returns Caps.Containment == false.
