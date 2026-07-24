@@ -24,6 +24,32 @@ The human operator is captain. Runtime leadership is split between the skipper,
 which owns conversation and execution sequencing, and the quartermaster, which
 preserves strategic memory and constraints.
 
+## Terminology: two different "servers"
+
+Shipmates docs mention two processes whose names both contain the word
+"server". They are not the same:
+
+- **Codex app-server** — a mode of the OpenAI Codex CLI (`codex
+  app-server`) owned and shipped by OpenAI. It runs as a JSON-RPC
+  process over stdio and is what Shipmates spawns as a managed child
+  when driving the codex runtime. The adapter lives in
+  `internal/codexapp/adapter.go`. It is cross-platform because it is
+  driven over stdio.
+- **Shipmates server** — Shipmates' own project-local coordination
+  server. It binds an ephemeral loopback address, requires a bearer
+  token in `.shipmates/sessions/`, and exposes the lifecycle,
+  controller, feed, and Fleet-adapter routes. It is registered as
+  `shipmates server` (`internal/commands/servercmd.go`) and implemented
+  in `internal/server/`. The CLI-level `server` subcommand is registered
+  only on unix (via `internal/commands/public_unix.go`), because the
+  Fleet Commander subsystem it fronts is unix-only.
+
+When this document (or any other Shipmates doc) says "app-server", it
+means Codex. When it says "local server", "loopback server",
+"project-local server", or `shipmates server`, it means the Shipmates
+process. See [Platform support](platform-support.md) for the platform
+matrix.
+
 ## Project state
 
 | Path | Purpose |

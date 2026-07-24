@@ -217,6 +217,13 @@ not start tasks or construct an execution graph.
 
 ## Local server
 
+Note: `shipmates server` is Shipmates' own project-local loopback
+coordination server, distinct from `codex app-server` (the OpenAI Codex
+CLI mode Shipmates spawns as a managed child for turn control). The
+`server` subcommand below manages the Shipmates process only. See the
+[Architecture terminology note](architecture.md#terminology-two-different-servers)
+for the full distinction.
+
 ### `shipmates server serve`
 
 Runs the project-local loopback server in the foreground. Authenticated
