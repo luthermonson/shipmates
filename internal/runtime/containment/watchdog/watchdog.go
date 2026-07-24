@@ -28,15 +28,17 @@ func (watcher) Kind() string { return "watchdog" }
 
 func (watcher) Start(cmd *exec.Cmd, limits containment.Limits) (containment.Handle, error) {
 	// Attach the platform-specific containment (Unix process group, Windows
-	// Job Object) BEFORE Cmd.Start runs.
-	if err := prepare(cmd); err != nil {
+	// Job Object) BEFORE Cmd.Start runs. Limits flow through so kernel-
+	// enforced caps (Windows Job Object memory / active process limits) can
+	// be programmed at the same time.
+	if err := prepare(cmd, limits); err != nil {
 		return nil, fmt.Errorf("watchdog: prepare: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("watchdog: start: %w", err)
 	}
 	// Post-start setup (e.g. assign to Windows Job Object). No-op on Unix.
-	if err := attach(cmd); err != nil {
+	if err := attach(cmd, limits); err != nil {
 		_ = cmd.Process.Kill()
 		return nil, fmt.Errorf("watchdog: attach: %w", err)
 	}

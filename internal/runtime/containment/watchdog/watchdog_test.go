@@ -86,14 +86,14 @@ func TestSampleRSS_ReturnsSensible(t *testing.T) {
 	// Sample our own process; any RSS > 0 is a win — verifies the platform
 	// syscall path compiles and returns.
 	cmd := sleeper(30)
-	if err := prepare(cmd); err != nil {
+	if err := prepare(cmd, containment.Limits{}); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer cmd.Process.Kill()
-	if err := attach(cmd); err != nil {
+	if err := attach(cmd, containment.Limits{}); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 

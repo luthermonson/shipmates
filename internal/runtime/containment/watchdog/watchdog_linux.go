@@ -9,11 +9,16 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/luthermonson/shipmates/internal/runtime/containment"
 )
 
 // prepare arranges for the child to become the leader of its own process
-// group so we can signal the whole tree with a single -pgid kill.
-func prepare(cmd *exec.Cmd) error {
+// group so we can signal the whole tree with a single -pgid kill. The
+// limits argument is accepted for signature parity with Windows (where it
+// programs Job Object caps); Linux enforces memory/CPU via the poll loop
+// today. TODO: wire limits.MaxProcesses / MaxRSSBytes to cgroup delegation.
+func prepare(cmd *exec.Cmd, _ containment.Limits) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -22,7 +27,7 @@ func prepare(cmd *exec.Cmd) error {
 }
 
 // attach is a post-start no-op on Unix; Setpgid at Start time is enough.
-func attach(*exec.Cmd) error { return nil }
+func attach(*exec.Cmd, containment.Limits) error { return nil }
 
 // killTree sends SIGTERM (kill=false) or SIGKILL (kill=true) to the child's
 // process group. Using a negative pid targets the group, so orphaned

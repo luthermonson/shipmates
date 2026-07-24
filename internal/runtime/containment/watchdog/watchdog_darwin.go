@@ -8,10 +8,14 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/luthermonson/shipmates/internal/runtime/containment"
 )
 
-// prepare puts the child into its own process group (same as Linux).
-func prepare(cmd *exec.Cmd) error {
+// prepare puts the child into its own process group (same as Linux). The
+// limits argument is accepted for signature parity with Windows and is
+// currently unused on macOS (memory/CPU enforced by the poll loop).
+func prepare(cmd *exec.Cmd, _ containment.Limits) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -19,7 +23,7 @@ func prepare(cmd *exec.Cmd) error {
 	return nil
 }
 
-func attach(*exec.Cmd) error { return nil }
+func attach(*exec.Cmd, containment.Limits) error { return nil }
 
 func killTree(cmd *exec.Cmd, kill bool) error {
 	if cmd.Process == nil {

@@ -32,12 +32,14 @@ type File struct {
 //	  mode: watchdog        # watchdog | cgroup | none
 //	  memory_limit_mb: 8192  # 0 = uncapped
 //	  cpu_limit_seconds: 0
+//	  max_processes: 0       # 0 = uncapped; kernel-enforced on Windows only
 //	  poll_interval_ms: 500
 //	  graceful_timeout_ms: 2000
 type Containment struct {
 	Mode              string `yaml:"mode,omitempty"`
 	MemoryLimitMB     int64  `yaml:"memory_limit_mb,omitempty"`
 	CPULimitSeconds   int64  `yaml:"cpu_limit_seconds,omitempty"`
+	MaxProcesses      int64  `yaml:"max_processes,omitempty"`
 	PollIntervalMS    int64  `yaml:"poll_interval_ms,omitempty"`
 	GracefulTimeoutMS int64  `yaml:"graceful_timeout_ms,omitempty"`
 }

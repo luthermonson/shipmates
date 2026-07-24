@@ -111,6 +111,12 @@ type Limits struct {
 	// GracefulTimeout is the deadline for cooperative shutdown before the
 	// watcher escalates to SIGKILL / TerminateJobObject. Defaults to 2s.
 	GracefulTimeout time.Duration
+
+	// MaxProcesses caps the number of active processes in the tree. 0 =
+	// uncapped. Only enforced by the Windows watchdog today (via
+	// JOB_OBJECT_LIMIT_ACTIVE_PROCESS). Linux/macOS ignore this field.
+	// TODO: extend to Linux (cgroup pids.max) and macOS (RLIMIT_NPROC).
+	MaxProcesses uint32
 }
 
 // EffectivePollInterval returns Limits.PollInterval or the default.

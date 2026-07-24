@@ -10,13 +10,16 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/luthermonson/shipmates/internal/runtime/containment"
 )
 
 // prepare marks the process to be created suspended so we can assign it to
 // a Job Object before it starts running any code. It also flags the process
 // as the root of a new process group so console signals don't propagate
-// upstream.
-func prepare(cmd *exec.Cmd) error {
+// upstream. Limits are consumed later in attach (they can't be programmed
+// before the Job Object exists), so prepare ignores them.
+func prepare(cmd *exec.Cmd, _ containment.Limits) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -25,13 +28,18 @@ func prepare(cmd *exec.Cmd) error {
 }
 
 // attach creates a Job Object, applies "kill everything in the job when it
-// closes" semantics, assigns the started (still-suspended) process to it,
-// then resumes the process. This is Windows' native answer to cgroups:
-// every descendant automatically joins the job and is killed with it.
+// closes" semantics plus any kernel-enforced caps from limits (memory,
+// active process count), assigns the started (still-suspended) process to
+// it, then resumes the process. This is Windows' native answer to cgroups:
+// every descendant automatically joins the job and is killed with it, and
+// memory/process caps are enforced by the kernel — no polling gap. The
+// polling watchdog still runs on top as defense in depth, and it remains
+// the only enforcement for CPU-seconds limits, which Job Objects don't
+// express this way.
 //
 // We stash the job handle on the process handle via a package-level map so
 // killTree can Terminate the job later.
-func attach(cmd *exec.Cmd) error {
+func attach(cmd *exec.Cmd, limits containment.Limits) error {
 	if cmd.Process == nil {
 		return fmt.Errorf("watchdog: cmd not started")
 	}
@@ -39,12 +47,25 @@ func attach(cmd *exec.Cmd) error {
 	if err != nil {
 		return fmt.Errorf("watchdog: CreateJobObject: %w", err)
 	}
-	// Configure the job so exiting the job handle kills all associated
-	// processes. This is our tree-kill mechanism.
+	// Start with the tree-kill semantic; layer on kernel-enforced caps
+	// requested by limits. Setting a flag WITHOUT also setting the paired
+	// value field is a no-op, so guard each addition on a non-zero limit.
 	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
 		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
 			LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 		},
+	}
+	if limits.MaxRSSBytes > 0 {
+		// JobMemoryLimit is total committed memory for all processes in the
+		// job. When a process tries to allocate past it, the allocation
+		// fails at the kernel level — no polling gap. Most languages'
+		// alloc-then-crash behavior means the process dies promptly.
+		info.BasicLimitInformation.LimitFlags |= windows.JOB_OBJECT_LIMIT_JOB_MEMORY
+		info.JobMemoryLimit = uintptr(limits.MaxRSSBytes)
+	}
+	if limits.MaxProcesses > 0 {
+		info.BasicLimitInformation.LimitFlags |= windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+		info.BasicLimitInformation.ActiveProcessLimit = limits.MaxProcesses
 	}
 	_, err = windows.SetInformationJobObject(
 		job,

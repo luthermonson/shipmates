@@ -95,6 +95,9 @@ func containmentFor(c config.Containment) (containment.Watcher, containment.Limi
 		PollInterval:    time.Duration(c.PollIntervalMS) * time.Millisecond,
 		GracefulTimeout: time.Duration(c.GracefulTimeoutMS) * time.Millisecond,
 	}
+	if c.MaxProcesses > 0 {
+		limits.MaxProcesses = uint32(min(c.MaxProcesses, int64(^uint32(0))))
+	}
 	switch c.Mode {
 	case "", "watchdog":
 		return watchdog.New(), limits, nil
