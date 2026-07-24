@@ -7,6 +7,30 @@ All notable changes to Shipmates are documented here. This project follows
 
 ### Added
 
+- **The Brig — Ship's Articles.** shipmates' security-and-hardening
+  subsystem enforces fifteen rules on every persona at three layers:
+  prompt (developer_instructions reminder), kernel (per-persona policy
+  overlay), and freeze (`.shipmates/freeze` emergency stop). Articles 1-5
+  are standards-grounded (OWASP Top 10, OWASP LLM Top 10, CWE Top 25,
+  NIST SSDF, 12-Factor); Articles 6-15 are incident-driven (No Prod DB,
+  No Destructive Git, No Secrets in Commits, Verify Every Package, No
+  Piped Execution, No Lies About Failure, Respect the Freeze, Confirm
+  Before Destroying, No Self-Escalation, Stay Aboard).
+  - New commands: `shipmates brig list|explain|log|install` and
+    `shipmates freeze|release`. `brig install` and `brig install --fleet`
+    are idempotent — safe to re-run on every upgrade.
+  - New package: `internal/brig` carries the canonical rule inventory,
+    idempotent `MergeInto` for persona overlays, freeze marker
+    check/set/clear, and the JSONL denial log helpers.
+  - New catalog assets: `catalog/ARTICLES.md` (canonical rules doc),
+    `catalog/brig.policy.yaml` (kernel-policy template merged into
+    persona overlays), `catalog/fleet-brig.default.yaml` (fleet-wide
+    baseline for `~/.shipmates/brig.yaml`).
+  - `shipmates add` and `shipmates update` now stamp the Articles
+    reminder block into every persona's `developer_instructions` and
+    into the persona's policy overlay (as commented documentation).
+    Both are marker-delimited and safe to hand-edit around.
+  - Operator guide: [`docs/brig.md`](docs/brig.md).
 - **Runtime interface.** New `internal/runtime` package introduces a
   `Runtime` interface with `claude` and `codex` as peer implementations,
   selected by config. Commands are being migrated onto the interface so
