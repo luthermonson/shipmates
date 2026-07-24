@@ -103,12 +103,22 @@ func TestInstallMemoryHook_CreatesSettings(t *testing.T) {
 		t.Fatalf("no hooks block; got %v", settings)
 	}
 	sessionStart, _ := hooks["SessionStart"].([]any)
-	if len(sessionStart) != 1 {
-		t.Fatalf("SessionStart len = %d, want 1", len(sessionStart))
+	if len(sessionStart) != 2 {
+		t.Fatalf("SessionStart len = %d, want 2 (load-memory + brig-reminder)", len(sessionStart))
 	}
-	entry := sessionStart[0].(map[string]any)
-	if !strings.Contains(entry["command"].(string), "load-memory") {
-		t.Errorf("command missing marker; got %v", entry)
+	commands := map[string]bool{}
+	for _, entry := range sessionStart {
+		if m, ok := entry.(map[string]any); ok {
+			if cmd, _ := m["command"].(string); cmd != "" {
+				commands[cmd] = true
+			}
+		}
+	}
+	if !commands["shipmates hook load-memory"] {
+		t.Errorf("missing load-memory hook; got %v", commands)
+	}
+	if !commands["shipmates hook brig-reminder"] {
+		t.Errorf("missing brig-reminder hook; got %v", commands)
 	}
 }
 
@@ -144,18 +154,21 @@ func TestInstallMemoryHook_IdempotentAndPreservesExisting(t *testing.T) {
 	}
 	hooks := settings["hooks"].(map[string]any)
 	starts := hooks["SessionStart"].([]any)
-	if len(starts) != 2 {
-		t.Errorf("SessionStart len = %d, want 2 (existing + ours, not doubled by 2nd install)", len(starts))
+	if len(starts) != 3 {
+		t.Errorf("SessionStart len = %d, want 3 (existing + load-memory + brig-reminder, not doubled by 2nd install)", len(starts))
 	}
-	// Marker must appear exactly once.
-	markers := 0
+	// Each shipmates marker must appear exactly once regardless of re-runs.
+	counts := map[string]int{}
 	for _, e := range starts {
 		m := e.(map[string]any)
-		if cmd, _ := m["command"].(string); strings.Contains(cmd, "load-memory") {
-			markers++
+		if cmd, _ := m["command"].(string); cmd != "" {
+			counts[cmd]++
 		}
 	}
-	if markers != 1 {
-		t.Errorf("found %d load-memory hooks, want exactly 1", markers)
+	if counts["shipmates hook load-memory"] != 1 {
+		t.Errorf("found %d load-memory hooks, want exactly 1", counts["shipmates hook load-memory"])
+	}
+	if counts["shipmates hook brig-reminder"] != 1 {
+		t.Errorf("found %d brig-reminder hooks, want exactly 1", counts["shipmates hook brig-reminder"])
 	}
 }

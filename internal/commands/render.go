@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
+	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
 )
 
@@ -337,6 +338,10 @@ func renderCodex(fm frontmatter, body string) string {
 	instructions += "\n\n## Persistent Memory\n\n" +
 		"At the start of each task, read the relevant files under `.shipmates/memory/" + name + "/`. " +
 		"Record durable project decisions, verified constraints, and reusable findings there when they would help a later task."
+	// Prepend the Ship's Articles reminder. Idempotent — re-composing a
+	// persona replaces the marker-delimited block instead of stacking new
+	// copies.
+	instructions = project.PrependArticlesBlock(instructions)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "name = %s\n", strconv.Quote(name))

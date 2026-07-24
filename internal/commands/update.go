@@ -212,6 +212,11 @@ func runUpdateLocked(cat *catalog.Catalog, only, accept string, m *project.Manif
 		if err := reconcileFile(m, st, project.PolicyPath(name), policy, "policy"); err != nil {
 			return err
 		}
+		// Refresh the Brig Articles block; MergeInto is idempotent and only
+		// rewrites the marker-delimited section.
+		if err := installBrigBlock(cat, name); err != nil {
+			slog.Warn("brig: could not refresh Articles block", "persona", name, "err", err)
+		}
 	}
 
 	if err := m.Save(); err != nil {

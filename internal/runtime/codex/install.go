@@ -44,15 +44,18 @@ func (r *Runtime) UninstallPersona(_ context.Context, projectDir, name string) e
 	return nil
 }
 
-// InstallMemoryHook wires codex's session-start memory injection.
+// InstallMemoryHook wires codex's session-start memory injection AND the
+// Brig reminder ("you are bound by the Ship's Articles at
+// .shipmates/ARTICLES.md; violating any rule sends you to the brig.").
 //
 // TODO(follow-up): codex has a distinct mechanism from Claude's
 // SessionStart hook (its agent config is JSON-driven with different fields).
 // The exact wiring lives in the codexapp adapter and the branch's
 // installer code — pulling it into a stable per-runtime seam is a
-// follow-up commit. For now we no-op instead of returning ErrUnsupported
-// so that shipmates init can call InstallMemoryHook on both runtimes
-// uniformly and only Claude will actually mutate settings on Phase 4.
+// follow-up commit. For now the memory + Brig reminders are covered at
+// the prompt layer via project.PrependArticlesBlock, which is invoked
+// during renderCodex; this method is a no-op so shipmates init can call
+// InstallMemoryHook on both runtimes uniformly.
 func (r *Runtime) InstallMemoryHook(context.Context, string) error {
 	return nil
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
@@ -430,7 +431,26 @@ func addPersonaLocked(cat *catalog.Catalog, name string, m *project.Manifest) er
 		return err
 	}
 
+	// Stamp the Brig's Articles reminder block into the persona's overlay.
+	// The block is commented YAML — see brig.MergeInto's docstring — so it
+	// never activates a rule the operator didn't opt into, but it puts the
+	// full Articles catalogue one file-open away from every persona.
+	if err := installBrigBlock(cat, name); err != nil {
+		slog.Warn("brig: could not stamp Articles block", "persona", name, "err", err)
+	}
+
 	return m.Save()
+}
+
+// installBrigBlock reads the embedded Brig template and merges it into the
+// persona's overlay. Missing template is a soft failure — the persona still
+// works, it just doesn't get the Articles reminder yet.
+func installBrigBlock(cat *catalog.Catalog, name string) error {
+	template, err := cat.BrigPolicyTemplate()
+	if err != nil {
+		return fmt.Errorf("read Brig template: %w", err)
+	}
+	return brig.MergeInto(project.PolicyPath(name), template)
 }
 
 // catalogM5Policy returns a catalog overlay only when it satisfies the strict

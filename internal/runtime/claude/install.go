@@ -83,17 +83,35 @@ func (r *Runtime) InstallMemoryHook(_ context.Context, projectDir string) error 
 	sessionStart, _ := hooks["SessionStart"].([]any)
 	// Guard against duplicate installs by checking for our marker command.
 	const marker = "shipmates hook load-memory"
+	// The Brig reminder is a second SessionStart entry: an echo of the
+	// binding text so every session opens knowing it is bound by the Ship's
+	// Articles. Kept short — the full Articles document is loaded on demand
+	// via the persona instructions block and .shipmates/ARTICLES.md.
+	const brigMarker = "shipmates hook brig-reminder"
+	hasMemory, hasBrig := false, false
 	for _, entry := range sessionStart {
 		if m, ok := entry.(map[string]any); ok {
-			if cmd, _ := m["command"].(string); cmd == marker {
-				return nil // already installed
+			cmd, _ := m["command"].(string)
+			if cmd == marker {
+				hasMemory = true
+			}
+			if cmd == brigMarker {
+				hasBrig = true
 			}
 		}
 	}
-	sessionStart = append(sessionStart, map[string]any{
-		"type":    "command",
-		"command": marker,
-	})
+	if !hasMemory {
+		sessionStart = append(sessionStart, map[string]any{
+			"type":    "command",
+			"command": marker,
+		})
+	}
+	if !hasBrig {
+		sessionStart = append(sessionStart, map[string]any{
+			"type":    "command",
+			"command": brigMarker,
+		})
+	}
 	hooks["SessionStart"] = sessionStart
 	settings["hooks"] = hooks
 
