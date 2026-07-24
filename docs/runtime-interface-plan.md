@@ -179,7 +179,8 @@ Each phase ships independently.
 
 ## Non-goals
 
-- Perfect API parity between Codex and Claude. Some capabilities (Steer,
-  Refusal) may return `not supported` on Claude. That's fine.
+- Perfect API parity between Codex and Claude. Some capabilities (e.g.
+  Refusal) may return `not supported` on Claude. That's fine. (Steer and
+  Interrupt landed on Claude via the persistent stream-json transport.)
 - Runtime auto-switching mid-session. Config-time selection is enough.
 - Cross-runtime session migration. Sessions are runtime-scoped.

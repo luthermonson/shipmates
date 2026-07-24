@@ -14,14 +14,22 @@ import (
 // payload. That guarantees consumers never lose information even if
 // Anthropic adds fields.
 //
-// The most common frames we care about:
+// Frames observed against claude 2.1.153 (`-p --input-format stream-json
+// --output-format stream-json --verbose`):
 //
-//   {"type":"assistant","message":{"content":[{"type":"text","text":"…"}]}}
-//   {"type":"tool_use","id":"…","name":"Bash","input":{…}}
-//   {"type":"tool_result","tool_use_id":"…","content":"…"}
-//   {"type":"result","subtype":"…"}
+//	{"type":"system","subtype":"init",…}                            per-turn preamble
+//	{"type":"assistant","message":{"content":[{"type":"text","text":"…"}]}}
+//	{"type":"assistant","message":{"content":[{"type":"thinking",…}]}}
+//	{"type":"assistant","message":{"content":[{"type":"tool_use","id":"…","name":"Bash","input":{…}}]}}
+//	{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"…","content":"…"}]}}
+//	{"type":"result","subtype":"success","is_error":false,…}        turn boundary
+//	{"type":"result","subtype":"error_during_execution","is_error":true,…}
+//	{"type":"control_response","response":{"subtype":"success","request_id":"…"}}
+//	{"type":"rate_limit_event",…}
 //
-// Plus wrapping/system messages we treat as backend events.
+// Tool use / tool results are nested inside assistant/user message content
+// blocks; we also keep the legacy flat {"type":"tool_use"} handling for
+// robustness.
 
 type frame struct {
 	Type    string          `json:"type"`
@@ -34,6 +42,34 @@ type frame struct {
 	Text    string          `json:"text,omitempty"`
 	// tool_result-shaped
 	ToolUseID string `json:"tool_use_id,omitempty"`
+	// result-shaped
+	IsError bool `json:"is_error,omitempty"`
+}
+
+// contentBlock is one element of message.content in assistant/user frames.
+type contentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+	// tool_use-shaped
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+	// tool_result-shaped
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+}
+
+// frameType cheaply extracts the "type" of one JSONL line so the read loop
+// can spot turn-boundary result frames without a full decode. Returns ""
+// on malformed JSON.
+func frameType(raw []byte) string {
+	var t struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return ""
+	}
+	return t.Type
 }
 
 // decodeFrame parses one JSONL line and produces a normalized event.
@@ -57,9 +93,21 @@ func decodeFrame(raw []byte, sessionID, turnID string) runtime.Event {
 	}
 
 	switch f.Type {
-	case "assistant", "text":
+	case "assistant":
+		return decodeMessageFrame(ev, f, copyOfRaw)
+	case "text":
 		ev.Kind = runtime.KindText
 		ev.Payload = extractText(f, copyOfRaw)
+	case "user":
+		// Tool results echo back as user-role frames with tool_result
+		// content blocks; anything else user-shaped is backend noise.
+		if tr, ok := extractToolResult(f); ok {
+			ev.Kind = runtime.KindToolResult
+			ev.Payload = tr
+		} else {
+			ev.Kind = runtime.KindBackend
+			ev.Payload = copyOfRaw
+		}
 	case "tool_use":
 		ev.Kind = runtime.KindToolCall
 		ev.Payload = ToolCall{ID: f.ID, Name: f.Name, InputJSON: f.Input}
@@ -67,7 +115,13 @@ func decodeFrame(raw []byte, sessionID, turnID string) runtime.Event {
 		ev.Kind = runtime.KindToolResult
 		ev.Payload = ToolResult{ToolUseID: f.ToolUseID, ContentJSON: f.Content}
 	case "result":
-		ev.Kind = runtime.KindTurnDone
+		// The per-turn boundary frame. is_error covers API failures and
+		// interrupted turns (subtype "error_during_execution").
+		if f.IsError {
+			ev.Kind = runtime.KindError
+		} else {
+			ev.Kind = runtime.KindTurnDone
+		}
 		ev.Payload = copyOfRaw
 	case "system":
 		ev.Kind = runtime.KindBackend
@@ -82,26 +136,70 @@ func decodeFrame(raw []byte, sessionID, turnID string) runtime.Event {
 	return ev
 }
 
-// extractText pulls a plain-text payload out of an assistant/text frame.
-// Claude Code sometimes nests text in message.content[].text; we handle
-// both flat {"text":"…"} and the nested shape.
+// decodeMessageFrame maps an assistant frame by its message content: text
+// blocks become KindText, tool_use blocks become KindToolCall, anything
+// else (thinking blocks, signatures) stays KindBackend with the raw JSON
+// preserved.
+func decodeMessageFrame(ev runtime.Event, f frame, raw []byte) runtime.Event {
+	for _, c := range messageContent(f) {
+		switch c.Type {
+		case "text":
+			if c.Text != "" {
+				ev.Kind = runtime.KindText
+				ev.Payload = c.Text
+				return ev
+			}
+		case "tool_use":
+			ev.Kind = runtime.KindToolCall
+			ev.Payload = ToolCall{ID: c.ID, Name: c.Name, InputJSON: c.Input}
+			return ev
+		}
+	}
+	// Flat {"type":"assistant","text":"…"} — not observed on current
+	// claude, kept for robustness.
+	if f.Text != "" {
+		ev.Kind = runtime.KindText
+		ev.Payload = f.Text
+		return ev
+	}
+	ev.Kind = runtime.KindBackend
+	ev.Payload = raw
+	return ev
+}
+
+// messageContent unmarshals message.content blocks, tolerating absence.
+func messageContent(f frame) []contentBlock {
+	if len(f.Message) == 0 {
+		return nil
+	}
+	var inner struct {
+		Content []contentBlock `json:"content"`
+	}
+	if err := json.Unmarshal(f.Message, &inner); err != nil {
+		return nil
+	}
+	return inner.Content
+}
+
+// extractToolResult pulls a tool_result content block out of a user frame.
+func extractToolResult(f frame) (ToolResult, bool) {
+	for _, c := range messageContent(f) {
+		if c.Type == "tool_result" {
+			return ToolResult{ToolUseID: c.ToolUseID, ContentJSON: c.Content}, true
+		}
+	}
+	return ToolResult{}, false
+}
+
+// extractText pulls a plain-text payload out of a text-shaped frame.
+// Handles both flat {"text":"…"} and the nested message.content shape.
 func extractText(f frame, fallback []byte) string {
 	if f.Text != "" {
 		return f.Text
 	}
-	if len(f.Message) > 0 {
-		var inner struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		}
-		if err := json.Unmarshal(f.Message, &inner); err == nil {
-			for _, c := range inner.Content {
-				if c.Type == "text" && c.Text != "" {
-					return c.Text
-				}
-			}
+	for _, c := range messageContent(f) {
+		if c.Type == "text" && c.Text != "" {
+			return c.Text
 		}
 	}
 	return string(fallback)

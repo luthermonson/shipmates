@@ -1,32 +1,35 @@
 // Package claude implements runtime.Runtime by driving the `claude` CLI
 // (Anthropic Claude Code) via non-interactive stdio streaming.
 //
-// Sessions map to `--session-id <uuid>` invocations of `claude -p
-// --output-format stream-json`. Each SendTurn spawns (or continues) a
-// session, writes the turn message to stdin, and streams parsed JSONL
-// events into the runtime.Event channel. The session state (recent turn
-// IDs, running processes) lives in Runtime.
+// Sessions map to one persistent `claude -p --input-format stream-json
+// --output-format stream-json` process each, spawned lazily on the first
+// SendTurn. Turns are user-message JSONL lines written to the child's
+// stdin; the per-turn `result` frame on stdout marks the turn boundary.
+// Because stdin stays open for the process lifetime, mid-turn steering
+// (additional user messages) and protocol-level interrupt
+// (`control_request` / `control_response`) are both supported.
 //
-// # Phase 2 status
+// Protocol notes (verified against claude 2.1.153):
 //
-// This is the initial cross-runtime Claude implementation restored after
-// the codex-adaptation branch removed the fleet-side Claude integration.
-// It's intentionally minimal: single-turn invocations, no PTY, no
-// interactive multi-turn conversations, no persona-side hooks. Follow-ups:
-//
-//   - Session persistence across restarts (Claude Code already stores by
-//     session-id under ~/.claude; we just need to remember which id
-//     belongs to which shipmates persona)
-//   - PTY-hosted interactive mates — the on-main story from
-//     internal/server/ptyproc.go. Reintroduce alongside the runtime
-//     wrapper as an "attached mode" transport.
-//   - Attachments: Claude Code accepts image files via the -f flag or an
-//     inline content JSON. Wire once the persona catalog format lands.
+//   - A user turn is one stdin line:
+//     {"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}
+//   - Each user turn eventually produces one stdout line
+//     {"type":"result","subtype":"success"|"error_during_execution",…,"is_error":bool}
+//   - A user message written while a turn is in flight is folded INTO that
+//     turn (single result frame); written between turns it starts a new turn.
+//   - Interrupt: {"type":"control_request","request_id":"…","request":{"subtype":"interrupt"}}
+//     is answered by {"type":"control_response","response":{"subtype":"success","request_id":"…"}}
+//     followed by a result frame with subtype "error_during_execution";
+//     the process stays alive and accepts further turns.
+//   - `--session-id <id>` may only be used for a session that does not
+//     exist yet ("Session ID … is already in use." otherwise); respawns and
+//     resumes must use `--resume <id>`, which keeps the same session id.
 package claude
 
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +44,11 @@ import (
 	"github.com/luthermonson/shipmates/internal/runtime/containment/none"
 )
 
+// defaultInterruptGrace is how long InterruptTurn waits for the protocol
+// interrupt to end the turn before falling back to killing the process
+// tree via the containment handle.
+const defaultInterruptGrace = 5 * time.Second
+
 // Runtime is the claude-backed runtime.Runtime. Zero value is not usable;
 // call New.
 type Runtime struct {
@@ -49,23 +57,28 @@ type Runtime struct {
 	// defaultArgs are appended to every invocation (e.g. per-firm flags).
 	defaultArgs []string
 
-	// contain wraps every subprocess spawn so RSS/CPU are bounded per turn.
-	// Defaults to the no-op watcher when unset.
+	// contain wraps every subprocess spawn so RSS/CPU are bounded per
+	// session process. Defaults to the no-op watcher when unset.
 	contain containment.Watcher
-	// limits are the per-turn budget applied via contain.Start(). Zero =
+	// limits are the per-process budget applied via contain.Start(). Zero =
 	// no bounds.
 	limits containment.Limits
+
+	// interruptGrace bounds InterruptTurn's wait for the in-band interrupt
+	// before escalating to a containment-handle kill. Tests shrink it.
+	interruptGrace time.Duration
 
 	stream  chan runtime.Event
 	stopFan chan struct{}
 	stopped sync.Once
-	// fanWG tracks in-flight fanoutTurn goroutines so Close can drain them
+	// fanWG tracks in-flight readLoop goroutines so Close can drain them
 	// before closing the stream channel exactly once.
 	fanWG sync.WaitGroup
 
 	// sessMu guards sessions, closed, AND every session's mutable fields
-	// (turnActive, currentCmd, currentHandle). One lock keeps the
-	// SendTurn/InterruptTurn/Close interleavings easy to reason about.
+	// (turnActive, turnID, turnDone, proc, resume). One lock keeps the
+	// SendTurn/SteerTurn/InterruptTurn/Close interleavings easy to reason
+	// about.
 	sessMu   sync.Mutex
 	closed   bool
 	sessions map[string]*session
@@ -76,15 +89,15 @@ type Config struct {
 	// Binary overrides the default "claude" name if the CLI isn't on PATH
 	// or the operator wants a specific version.
 	Binary string
-	// DefaultArgs appear on every claude invocation before the turn
-	// message, after the session-id + output-format flags.
+	// DefaultArgs appear on every claude invocation after the session +
+	// stream-format flags.
 	DefaultArgs []string
-	// Containment is the process-containment mode for spawned turns.
-	// nil defaults to none (no-op watcher). Plug in
+	// Containment is the process-containment mode for spawned session
+	// processes. nil defaults to none (no-op watcher). Plug in
 	// containment/watchdog.New() or a cgroup Watcher to bound memory/CPU.
 	Containment containment.Watcher
-	// Limits are applied by Containment on every turn spawn. Zero-value
-	// means no bounds.
+	// Limits are applied by Containment on every spawn. Zero-value means no
+	// bounds.
 	Limits containment.Limits
 }
 
@@ -102,28 +115,31 @@ func New(cfg Config) *Runtime {
 		contain = none.New()
 	}
 	return &Runtime{
-		binary:      binary,
-		defaultArgs: append([]string(nil), cfg.DefaultArgs...),
-		contain:     contain,
-		limits:      cfg.Limits,
-		stream:      make(chan runtime.Event, 64),
-		stopFan:     make(chan struct{}),
-		sessions:    map[string]*session{},
+		binary:         binary,
+		defaultArgs:    append([]string(nil), cfg.DefaultArgs...),
+		contain:        contain,
+		limits:         cfg.Limits,
+		interruptGrace: defaultInterruptGrace,
+		stream:         make(chan runtime.Event, 64),
+		stopFan:        make(chan struct{}),
+		sessions:       map[string]*session{},
 	}
 }
 
 // Name implements runtime.Runtime.
 func (r *Runtime) Name() string { return "claude" }
 
-// Capabilities implements runtime.Runtime. Claude Code streams events over
-// JSONL, doesn't currently expose a mid-turn steer or interrupt, and its
-// containment story on Linux uses shipmates-side sandboxing (not the
-// codex-adaptation cgroup launcher).
+// Capabilities implements runtime.Runtime. With the persistent stream-json
+// transport, Claude Code supports both mid-turn steering (additional user
+// messages on stdin) and in-band interrupt (control_request). Containment
+// here means the codex-adaptation cgroup launcher, which claude doesn't
+// use; process bounds are applied shipmates-side via the containment
+// watcher instead.
 func (r *Runtime) Capabilities() runtime.Caps {
 	return runtime.Caps{
 		Streaming:   true,
-		Interrupt:   false,
-		Steer:       false,
+		Interrupt:   true,
+		Steer:       true,
 		Attachments: true,
 		Refusal:     false, // claude surfaces refusals as regular text events
 		Containment: false,
@@ -134,80 +150,250 @@ func (r *Runtime) Capabilities() runtime.Caps {
 // Events implements runtime.Runtime.
 func (r *Runtime) Events() <-chan runtime.Event { return r.stream }
 
-// StartSession implements runtime.Runtime. Claude Code sessions are
-// content-addressed by session-id, so "starting" a session just means
-// minting a fresh ID and remembering the persona/project binding.
+// StartSession implements runtime.Runtime. The session's process is spawned
+// lazily on the first SendTurn; "starting" a session just mints a fresh ID
+// and remembers the persona/project binding.
 func (r *Runtime) StartSession(_ context.Context, spec runtime.SessionSpec) (runtime.Session, error) {
 	id, err := mintSessionID()
 	if err != nil {
 		return nil, err
 	}
-	return r.rememberSession(id, spec), nil
+	return r.rememberSession(id, spec, false), nil
 }
 
 // ResumeSession implements runtime.Runtime. A resumable claude session is
 // identified by an id the caller previously received from StartSession
-// (persisted in shipmates state); we validate the id shape and re-bind it
-// to spec.Persona / spec.ProjectDir.
+// (persisted in shipmates state). The next spawn uses `--resume <id>` —
+// `--session-id` rejects ids that already exist on disk.
 func (r *Runtime) ResumeSession(_ context.Context, id string, spec runtime.SessionSpec) (runtime.Session, error) {
 	if id == "" {
 		return nil, errors.New("claude: empty session id")
 	}
-	return r.rememberSession(id, spec), nil
+	return r.rememberSession(id, spec, true), nil
 }
 
-// CloseSession implements runtime.Runtime. Drops shipmates-side bookkeeping
-// and interrupts any turn currently running under the session.
+// CloseSession implements runtime.Runtime. Drops shipmates-side bookkeeping,
+// closes the session process's stdin (letting claude exit cleanly), and
+// tears down the containment handle. Does not delete the persisted
+// transcript — the session id remains resumable.
 func (r *Runtime) CloseSession(ctx context.Context, id string) error {
 	r.sessMu.Lock()
 	s, ok := r.sessions[id]
-	var handle containment.Handle
+	var p *proc
 	if ok {
 		delete(r.sessions, id)
-		handle = s.currentHandle
+		p = s.proc
 	}
 	r.sessMu.Unlock()
-	if handle != nil {
-		_ = handle.Close(ctx)
+	if p != nil {
+		p.closeStdin()
+		_ = p.handle.Close(ctx)
 	}
 	return nil
 }
 
-// SendTurn implements runtime.Runtime. Spawns `claude -p --session-id <id>
-// --output-format stream-json`, writes the turn text to stdin, and streams
-// JSONL events into r.stream via fanoutTurn.
+// SendTurn implements runtime.Runtime. Ensures the session's persistent
+// `claude` process is running (spawning it on first use), writes the turn's
+// user message to its stdin, and lets the session's readLoop stream JSONL
+// events into r.stream until the per-turn result frame ends the turn.
 func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.TurnInput) (runtime.Turn, error) {
-	// Reserve the session's single turn slot atomically. Claude Code
-	// sessions are one-turn-at-a-time; silently overwriting a live handle
-	// would orphan the prior process, so a concurrent SendTurn is an error.
-	r.sessMu.Lock()
-	s, ok := r.sessions[sessionID]
-	if ok && s.turnActive {
-		r.sessMu.Unlock()
-		return nil, fmt.Errorf("claude: session %s already has an active turn", sessionID)
-	}
-	if ok {
-		s.turnActive = true
-	}
-	r.sessMu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("claude: unknown session %q", sessionID)
-	}
-	releaseSlot := func() {
-		r.sessMu.Lock()
-		s.turnActive = false
-		r.sessMu.Unlock()
-	}
 	turnID, err := mintTurnID()
 	if err != nil {
-		releaseSlot()
 		return nil, err
 	}
 
+	// Reserve the session's single turn slot atomically. Claude Code
+	// sessions are one-turn-at-a-time; a second user message while a turn
+	// is in flight would be folded into it (that's SteerTurn's job), so a
+	// concurrent SendTurn is an error. Reserving before the (lock-free)
+	// spawn also guarantees at most one goroutine spawns the process.
+	r.sessMu.Lock()
+	if r.closed {
+		r.sessMu.Unlock()
+		return nil, fmt.Errorf("claude: runtime closed")
+	}
+	s, ok := r.sessions[sessionID]
+	if !ok {
+		r.sessMu.Unlock()
+		return nil, fmt.Errorf("claude: unknown session %q", sessionID)
+	}
+	if s.turnActive {
+		r.sessMu.Unlock()
+		return nil, fmt.Errorf("claude: session %s already has an active turn", sessionID)
+	}
+	s.turnActive = true
+	s.turnID = turnID
+	s.turnDone = make(chan struct{})
+	p := s.proc
+	r.sessMu.Unlock()
+
+	releaseSlot := func() {
+		r.sessMu.Lock()
+		if s.turnID == turnID && s.turnActive {
+			s.turnActive = false
+			s.turnID = ""
+			close(s.turnDone)
+		}
+		r.sessMu.Unlock()
+	}
+
+	if p == nil {
+		p, err = r.spawn(ctx, s)
+		if err != nil {
+			releaseSlot()
+			return nil, err
+		}
+	}
+	if err := p.writeUserMessage(in.Text); err != nil {
+		releaseSlot()
+		return nil, fmt.Errorf("claude: write turn to session process: %w", err)
+	}
+	return &turn{id: turnID, sessionID: sessionID, startedAt: time.Now()}, nil
+}
+
+// SteerTurn implements runtime.Runtime. Writes an additional user message
+// to the session process's stdin while a turn is in flight; Claude Code
+// folds it into the active turn (single result frame). Errors if the
+// session has no active turn — a message written between turns would start
+// a NEW turn, which is SendTurn's job.
+func (r *Runtime) SteerTurn(_ context.Context, sessionID, _ string, text string) error {
+	r.sessMu.Lock()
+	s, ok := r.sessions[sessionID]
+	if !ok {
+		r.sessMu.Unlock()
+		return fmt.Errorf("claude: unknown session %q", sessionID)
+	}
+	if !s.turnActive || s.proc == nil {
+		r.sessMu.Unlock()
+		return fmt.Errorf("claude: session %s has no active turn to steer", sessionID)
+	}
+	p := s.proc
+	r.sessMu.Unlock()
+	if err := p.writeUserMessage(text); err != nil {
+		return fmt.Errorf("claude: write steer to session process: %w", err)
+	}
+	return nil
+}
+
+// InterruptTurn implements runtime.Runtime. Sends the in-band interrupt
+// (`control_request` subtype "interrupt") over the session process's stdin
+// and waits up to interruptGrace for the turn's result frame; if the
+// protocol interrupt doesn't land in time (or stdin is already broken), it
+// falls back to killing the process tree via the containment handle.
+func (r *Runtime) InterruptTurn(ctx context.Context, sessionID, _ string) error {
+	r.sessMu.Lock()
+	s, ok := r.sessions[sessionID]
+	if !ok || !s.turnActive || s.proc == nil {
+		r.sessMu.Unlock()
+		return &runtime.ErrUnsupported{Runtime: "claude", Feature: "InterruptTurn on inactive session"}
+	}
+	p := s.proc
+	done := s.turnDone
+	r.sessMu.Unlock()
+
+	reqID, err := mintTurnID()
+	if err != nil {
+		return err
+	}
+	if err := p.writeControlRequest(reqID, "interrupt"); err != nil {
+		// Stdin is broken — the process is dying or dead; make sure the
+		// tree is gone.
+		return p.handle.Close(ctx)
+	}
+	grace := r.interruptGrace
+	if grace <= 0 {
+		grace = defaultInterruptGrace
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+		// Turn ended — the interrupt's result frame (subtype
+		// error_during_execution) was emitted by readLoop. Process stays
+		// alive for the next turn.
+		return nil
+	case <-timer.C:
+		return p.handle.Close(ctx)
+	case <-ctx.Done():
+		return p.handle.Close(ctx)
+	}
+}
+
+// ResolveApproval implements runtime.Runtime. Claude Code approvals arrive
+// through the SessionStart / PermissionRequest hook shipmates already
+// wires; that plumbing hooks in via InstallMemoryHook + a companion
+// permissions hook in later phases. Until then, we return
+// ErrUnsupported so callers know they must not rely on it.
+func (r *Runtime) ResolveApproval(context.Context, runtime.ApprovalResponse, runtime.ApprovalDecision) (bool, error) {
+	return false, &runtime.ErrUnsupported{Runtime: "claude", Feature: "ResolveApproval (Phase 4 hook plumbing)"}
+}
+
+// Close implements runtime.Runtime. Tears down every open session's
+// process (stdin close + containment handle) so the spawned trees exit,
+// drains the reader goroutines, and closes the event stream so consumers
+// ranging over Events() terminate — symmetric with the codex runtime's
+// fanout.
+func (r *Runtime) Close(ctx context.Context) error {
+	r.stopped.Do(func() {
+		close(r.stopFan)
+		r.sessMu.Lock()
+		r.closed = true
+		var procs []*proc
+		for _, s := range r.sessions {
+			if s.proc != nil {
+				procs = append(procs, s.proc)
+			}
+		}
+		r.sessions = map[string]*session{}
+		r.sessMu.Unlock()
+		for _, p := range procs {
+			p.closeStdin()
+			_ = p.handle.Close(ctx)
+		}
+		// Every readLoop goroutine bails out promptly once stopFan is
+		// closed and its process is dead; wait for them, then close the
+		// stream exactly once.
+		r.fanWG.Wait()
+		close(r.stream)
+	})
+	return nil
+}
+
+func (r *Runtime) rememberSession(id string, spec runtime.SessionSpec, resume bool) *session {
+	r.sessMu.Lock()
+	s := &session{
+		id:          id,
+		persona:     spec.Persona,
+		projectDir:  spec.ProjectDir,
+		wdOverride:  spec.WorkingDir,
+		environment: spec.Environment,
+		resume:      resume,
+	}
+	r.sessions[id] = s
+	r.sessMu.Unlock()
+	return s
+}
+
+// spawn launches the session's persistent claude process through the
+// containment watcher and starts its readLoop. Caller must hold the
+// session's turn slot (turnActive) so at most one spawn races per session.
+func (r *Runtime) spawn(ctx context.Context, s *session) (*proc, error) {
 	args := []string{
 		"-p",
-		"--session-id", sessionID,
+		"--input-format", "stream-json",
 		"--output-format", "stream-json",
+		"--verbose",
+	}
+	r.sessMu.Lock()
+	resume := s.resume
+	r.sessMu.Unlock()
+	if resume {
+		// The session already exists on disk (prior process, or resumed
+		// from persisted shipmates state): --session-id would fail with
+		// "Session ID … is already in use"; --resume keeps the same id.
+		args = append(args, "--resume", s.id)
+	} else {
+		args = append(args, "--session-id", s.id)
 	}
 	args = append(args, r.defaultArgs...)
 	// Persona → --agent is the Claude Code convention shipmates uses.
@@ -215,7 +401,10 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 		args = append(args, "--agent", s.persona)
 	}
 
-	cmd := exec.CommandContext(ctx, r.binary, args...)
+	// Deliberately NOT CommandContext: the process is session-scoped and
+	// must outlive any single turn's ctx. Teardown happens via the
+	// containment handle (InterruptTurn fallback, CloseSession, Close).
+	cmd := exec.Command(r.binary, args...)
 	cmd.Dir = s.workingDir()
 	// Child environment: inherit ours, export the persona so the
 	// SessionStart hook (`shipmates hook load-memory`, wired by
@@ -240,176 +429,102 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		releaseSlot()
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		releaseSlot()
 		return nil, err
 	}
-	// Route the spawn through containment so RSS/CPU are bounded per turn.
+	// Route the spawn through containment so RSS/CPU are bounded.
 	handle, err := r.contain.Start(cmd, r.limits)
 	if err != nil {
-		releaseSlot()
 		return nil, err
 	}
+	p := &proc{handle: handle, stdin: stdin}
+
 	r.sessMu.Lock()
 	if r.closed {
 		// Runtime shut down while we were spawning: tear the process back
 		// down rather than leaking it past Close's drain.
 		r.sessMu.Unlock()
+		p.closeStdin()
 		_ = handle.Close(ctx)
 		return nil, fmt.Errorf("claude: runtime closed")
 	}
-	s.currentCmd = cmd
-	s.currentHandle = handle
+	s.proc = p
+	// Any future spawn for this id must resume: the id now exists on disk.
+	s.resume = true
 	// Register with the fan-out drain inside the lock so Close cannot start
 	// waiting between our closed-check and the Add.
 	r.fanWG.Add(1)
 	r.sessMu.Unlock()
 
-	// Write the turn message and close stdin so claude knows we're done.
-	go func() {
-		defer stdin.Close()
-		_, _ = io.WriteString(stdin, in.Text)
-	}()
-
-	// Fan out events from claude's JSONL output into r.stream; the
-	// Handle's Done() supplies the terminal event (natural exit, memory
-	// kill, requested close). When the turn is over, release the session's
-	// turn slot so the next SendTurn is accepted.
 	go func() {
 		defer r.fanWG.Done()
-		r.fanoutTurn(sessionID, turnID, handle, stdout)
-		r.sessMu.Lock()
-		if s.currentHandle == handle {
-			s.currentCmd, s.currentHandle = nil, nil
-		}
-		s.turnActive = false
-		r.sessMu.Unlock()
+		r.readLoop(s, p, stdout)
 	}()
-
-	return &turn{id: turnID, sessionID: sessionID, startedAt: time.Now()}, nil
+	return p, nil
 }
 
-// InterruptTurn implements runtime.Runtime. Claude Code has no in-band
-// interrupt; we tear down the containment handle so the whole process
-// tree dies atomically (Job Object on Windows, process group on Unix).
-func (r *Runtime) InterruptTurn(ctx context.Context, sessionID, _ string) error {
-	r.sessMu.Lock()
-	s, ok := r.sessions[sessionID]
-	var handle containment.Handle
-	if ok {
-		handle = s.currentHandle
-	}
-	r.sessMu.Unlock()
-	if handle == nil {
-		return &runtime.ErrUnsupported{Runtime: "claude", Feature: "InterruptTurn on inactive session"}
-	}
-	return handle.Close(ctx)
-}
-
-// SteerTurn implements runtime.Runtime. Claude Code has no equivalent of
-// mid-turn steering, so this returns ErrUnsupported. Consumers can achieve
-// similar UX by interrupting and re-sending an amended turn.
-func (r *Runtime) SteerTurn(context.Context, string, string, string) error {
-	return &runtime.ErrUnsupported{Runtime: "claude", Feature: "SteerTurn"}
-}
-
-// ResolveApproval implements runtime.Runtime. Claude Code approvals arrive
-// through the SessionStart / PermissionRequest hook shipmates already
-// wires; that plumbing hooks in via InstallMemoryHook + a companion
-// permissions hook in later phases. Until then, we return
-// ErrUnsupported so callers know they must not rely on it.
-func (r *Runtime) ResolveApproval(context.Context, runtime.ApprovalResponse, runtime.ApprovalDecision) (bool, error) {
-	return false, &runtime.ErrUnsupported{Runtime: "claude", Feature: "ResolveApproval (Phase 4 hook plumbing)"}
-}
-
-// Close implements runtime.Runtime. Tears down every open session's
-// containment handle so the whole spawned process tree exits, drains the
-// fan-out goroutines, and closes the event stream so consumers ranging
-// over Events() terminate — symmetric with the codex runtime's fanout.
-func (r *Runtime) Close(ctx context.Context) error {
-	r.stopped.Do(func() {
-		close(r.stopFan)
-		r.sessMu.Lock()
-		r.closed = true
-		var handles []containment.Handle
-		for _, s := range r.sessions {
-			if s.currentHandle != nil {
-				handles = append(handles, s.currentHandle)
-			}
-		}
-		r.sessions = map[string]*session{}
-		r.sessMu.Unlock()
-		for _, h := range handles {
-			_ = h.Close(ctx)
-		}
-		// Every fanoutTurn goroutine bails out promptly once stopFan is
-		// closed and its process is dead; wait for them, then close the
-		// stream exactly once.
-		r.fanWG.Wait()
-		close(r.stream)
-	})
-	return nil
-}
-
-func (r *Runtime) rememberSession(id string, spec runtime.SessionSpec) *session {
-	r.sessMu.Lock()
-	s := &session{
-		id:          id,
-		persona:     spec.Persona,
-		projectDir:  spec.ProjectDir,
-		wdOverride:  spec.WorkingDir,
-		environment: spec.Environment,
-	}
-	r.sessions[id] = s
-	r.sessMu.Unlock()
-	return s
-}
-
-// fanoutTurn reads JSONL frames from claude's stdout, decodes each via
-// decodeFrame (see events.go), and streams normalized runtime.Events.
-// The containment handle's Done() channel supplies the terminal event
-// so consumers learn WHY the turn ended (natural exit, memory_limit,
-// requested close, etc.) rather than only that it did.
-func (r *Runtime) fanoutTurn(sessionID, turnID string, handle containment.Handle, stdout io.Reader) {
+// readLoop streams the session process's JSONL frames into r.stream for
+// the process's whole lifetime. `result` frames end the active turn
+// (releasing the turn slot and signalling turnDone); process death with a
+// turn in flight surfaces the containment handle's terminal event as a
+// KindError so consumers learn WHY the turn ended (memory kill, requested
+// close, crash) rather than only that it did.
+func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
+		line := scanner.Bytes()
+		isResult := frameType(line) == "result"
+		r.sessMu.Lock()
+		turnID := s.turnID
+		if isResult && s.turnActive {
+			s.turnActive = false
+			s.turnID = ""
+			close(s.turnDone)
+		}
+		r.sessMu.Unlock()
 		select {
 		case <-r.stopFan:
 			return
-		case r.stream <- decodeFrame(scanner.Bytes(), sessionID, turnID):
+		case r.stream <- decodeFrame(line, s.id, turnID):
 		}
 	}
-	// Wait for containment to report the terminal event.
-	ev, ok := <-handle.Done()
-	kind := runtime.KindTurnDone
+	// Stdout closed: the process is exiting. Wait for containment to
+	// report the terminal event, then clean up session state.
+	ev, ok := <-p.handle.Done()
+	r.sessMu.Lock()
+	if s.proc == p {
+		s.proc = nil
+	}
+	turnID := s.turnID
+	active := s.turnActive
+	if active {
+		s.turnActive = false
+		s.turnID = ""
+		close(s.turnDone)
+	}
+	r.sessMu.Unlock()
+
+	kind := runtime.KindSessionClosed
 	var payload any = ev
 	if !ok {
-		kind = runtime.KindError
 		payload = "handle closed without terminal event"
-	} else {
-		switch ev.Reason {
-		case containment.ReasonExited:
-			// natural exit — but non-zero exit code should surface as error
-			if ev.ExitCode != 0 {
-				kind = runtime.KindError
-			}
-		case containment.ReasonMemoryLimit, containment.ReasonCPULimit,
-			containment.ReasonRequested, containment.ReasonStartFailed,
-			containment.ReasonUnknown:
-			kind = runtime.KindError
-		}
+	}
+	if active {
+		// The process died mid-turn — whatever the reason (memory kill,
+		// crash, requested close, even a clean exit), the turn never got
+		// its result frame, so surface it as an error terminal.
+		kind = runtime.KindError
 	}
 	select {
 	case <-r.stopFan:
 	case r.stream <- runtime.Event{
 		Timestamp: time.Now(),
 		Kind:      kind,
-		SessionID: sessionID,
+		SessionID: s.id,
 		TurnID:    turnID,
 		Payload:   payload,
 	}:
@@ -417,18 +532,29 @@ func (r *Runtime) fanoutTurn(sessionID, turnID string, handle containment.Handle
 }
 
 // session is the runtime.Session implementation for claude sessions. The
-// mutable fields (turnActive, currentCmd, currentHandle) are guarded by
-// Runtime.sessMu — see the Runtime struct comment.
+// mutable fields (turnActive, turnID, turnDone, proc, resume) are guarded
+// by Runtime.sessMu — see the Runtime struct comment.
 type session struct {
 	id, persona, projectDir, wdOverride string
-	// environment holds SessionSpec.Environment overrides applied to every
-	// turn spawned under this session. Immutable after rememberSession.
+	// environment holds SessionSpec.Environment overrides applied to the
+	// session's spawned process. Immutable after rememberSession.
 	environment map[string]string
+	// resume selects `--resume` over `--session-id` for the next spawn:
+	// set by ResumeSession and after every spawn (the id then exists in
+	// Claude Code's on-disk session store).
+	resume bool
 	// turnActive reserves the session's single turn slot from the moment
-	// SendTurn accepts a turn until its fanout goroutine finishes.
-	turnActive    bool
-	currentCmd    *exec.Cmd
-	currentHandle containment.Handle
+	// SendTurn accepts a turn until the turn's result frame (or process
+	// death) releases it.
+	turnActive bool
+	// turnID identifies the active turn for event attribution.
+	turnID string
+	// turnDone is closed when the active turn ends; InterruptTurn waits on
+	// it. Recreated by each SendTurn.
+	turnDone chan struct{}
+	// proc is the session's live persistent process, nil before the first
+	// SendTurn and after process death.
+	proc *proc
 }
 
 func (s *session) ID() string      { return s.id }
@@ -441,6 +567,72 @@ func (s *session) workingDir() string {
 		return s.wdOverride
 	}
 	return s.projectDir
+}
+
+// proc bundles a session's persistent claude process: the containment
+// handle and the stream-json stdin.
+type proc struct {
+	handle containment.Handle
+	stdin  io.WriteCloser
+	// writeMu serializes stdin writers (SendTurn vs SteerTurn vs
+	// InterruptTurn) so JSONL lines never interleave.
+	writeMu   sync.Mutex
+	stdinDone bool
+}
+
+// writeUserMessage writes one stream-json user-message line:
+//
+//	{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}
+func (p *proc) writeUserMessage(text string) error {
+	msg := map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "text", "text": text},
+			},
+		},
+	}
+	return p.writeLine(msg)
+}
+
+// writeControlRequest writes one control_request line, e.g. subtype
+// "interrupt":
+//
+//	{"type":"control_request","request_id":"…","request":{"subtype":"interrupt"}}
+func (p *proc) writeControlRequest(requestID, subtype string) error {
+	msg := map[string]any{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request":    map[string]any{"subtype": subtype},
+	}
+	return p.writeLine(msg)
+}
+
+func (p *proc) writeLine(msg any) error {
+	buf, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	buf = append(buf, '\n')
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if p.stdinDone {
+		return errors.New("stdin closed")
+	}
+	_, err = p.stdin.Write(buf)
+	return err
+}
+
+// closeStdin closes the process's stdin exactly once, letting claude exit
+// cleanly on its own before the containment handle escalates.
+func (p *proc) closeStdin() {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if !p.stdinDone {
+		p.stdinDone = true
+		_ = p.stdin.Close()
+	}
 }
 
 // turn is the runtime.Turn implementation for claude turns.
