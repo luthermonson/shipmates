@@ -91,8 +91,12 @@ All notable changes to Shipmates are documented here. This project follows
   `codexapp.StartOptions` (transport, credential isolation) that the
   base config cannot carry. Codex-native commands already call
   `factory.NewCodexWith(ctx, opts)` directly.
-- Sail, Fleet, and Server remain unix-only (Linux + WSL) for this
-  release; the runtime interface does not lift that gate on its own.
+- Sail, Fleet, and Server remain unix-only for this release; the runtime
+  interface does not lift that gate on its own. Sail runs on Linux and
+  macOS (returns a clean unix-only error on Windows). Fleet and Server
+  remain Linux-supported for M1-M3 operations; they compile on macOS via
+  the `//go:build unix` gate but macOS is not an exercised deployment
+  target for Fleet — see [Platform support](docs/platform-support.md).
 - The release workflow now produces Linux, macOS, and Windows binaries
   (`amd64` + `arm64` each) alongside the source archive; the archive
   bundles `README.md`, `LICENSE`, `CHANGELOG.md`, `docs/platform-support.md`,
