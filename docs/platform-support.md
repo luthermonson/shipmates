@@ -13,9 +13,9 @@ and why.
 | `policy`, `render`, `routing` | ✅ | ✅ | ✅ | Pure Go. |
 | `beads` | ✅ | ✅ | ✅ | Requires external `bd` binary on `PATH`. |
 | `plan` | ✅ | ✅ | ✅ | Planning subsystem (voyage plan validation). |
-| `open`, `ask`, `live` | ✅ | ✅ | ⚠️ | Codex CLI required; on Windows, works only if Codex CLI is installed. |
+| `open`, `ask`, `live` | ✅ | ✅ | ⚠️ | The selected runtime's CLI must be installed and authenticated. Windows: `sail` is unavailable but these dispatch commands work when the runtime CLI is present. |
 | `tell`, `feed`, `interrupt` | ✅ | ✅ | ⚠️ | Same as `ask` — depend on the local server. |
-| `fanout`, `drain`, `drain-many`, `autonomous` | ✅ | ✅ | ⚠️ | Codex-native execution. |
+| `fanout`, `drain`, `drain-many`, `autonomous` | ✅ | ✅ | ⚠️ | Codex-native execution in this release; will follow the runtime interface migration. |
 | `sail` | ✅ | ✅ | ❌ | PID-file dispatch locks + unix signal semantics; returns a clear error on Windows. |
 | `fleet`, `ship`, `server` | ✅ | ❌ | ❌ | Fleet Commander M1-M3; unix-only because of `openat`, `O_NOFOLLOW`, `flock`. Absent from the CLI on non-unix. |
 

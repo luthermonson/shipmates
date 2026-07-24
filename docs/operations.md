@@ -1,12 +1,14 @@
 # Operations guide
 
-This guide covers normal Linux operation, verification, service lifecycle,
-recovery, upgrades, and Fleet deployment.
+This guide covers normal Shipmates operation, verification, service
+lifecycle, recovery, upgrades, and Fleet deployment. The binary is
+cross-platform; Sail, Fleet, and Server remain unix-only. See
+[Platform support](platform-support.md).
 
 ## Packaged runtime installation
 
-For released Linux binaries, the single offline runtime entry point is
-`sudo shipmates install`. Use `--dry-run --json` to inspect the fixed manifest
+For released Linux binaries, the single offline system-runtime entry
+point is `sudo shipmates install`. Use `--dry-run --json` to inspect the fixed manifest
 and platform composition before changing files. The installer is idempotent,
 refuses drift, never starts a unit or qualification, and retains its journal,
 credentials, authority, and state when `--uninstall` removes Shipmates-owned
@@ -67,6 +69,8 @@ turns for one persona. Shipmates serializes each persona to protect continuity.
 
 ## Preflight
 
+Run the preflight for the runtime you configured. Codex path:
+
 ```bash
 command -v shipmates
 command -v codex
@@ -76,8 +80,21 @@ shipmates list
 shipmates policy validate backend
 ```
 
-The Codex login belongs to the OS user running Shipmates. Services need a usable
-`PATH`, Codex home, and credentials. Never copy tokens into `shipmates.yaml`.
+Claude path:
+
+```bash
+command -v shipmates
+command -v claude
+claude --version
+git rev-parse --show-toplevel
+shipmates list
+shipmates policy validate backend
+```
+
+The runtime CLI's authentication (Codex login / Claude Code auth) belongs
+to the OS user running Shipmates. Services need a usable `PATH`, the
+runtime CLI's home directory, and its credentials. Never copy tokens into
+`shipmates.yaml`.
 
 ## Local server lifecycle
 
@@ -100,7 +117,8 @@ manifest, persona definitions, and policy are durable.
 
 ## Cancellation and shutdown
 
-Ctrl-C propagates cancellation, terminates and reaps Codex, and does not advance
+Ctrl-C propagates cancellation, terminates and reaps the runtime
+subprocess through its containment watcher, and does not advance
 continuity after failure. Dashboard `/detach` and EOF release the controller but
 do not interrupt work. Use `/interrupt` when termination is intended.
 
@@ -125,7 +143,10 @@ go vet ./...
 gofmt -l .
 ```
 
-The decisive Codex-only smoke check is:
+The decisive codex-native smoke check (`shipmates ask` today dispatches
+through the codex path regardless of `--runtime`; that will change as the
+runtime interface migration lands — see
+[Runtime interface plan](runtime-interface-plan.md)):
 
 ```bash
 tmp=$(mktemp -d)
@@ -133,23 +154,29 @@ cd "$tmp"
 git init -q
 shipmates init --crew backend
 test -f .codex/agents/backend.toml
-shipmates ask backend 'Do not modify files. Reply exactly: Codex-only smoke test passed.'
+shipmates ask backend 'Do not modify files. Reply exactly: Codex smoke test passed.'
 ```
 
-Inspect the generated tree as part of this gate. Native Windows/macOS builds
-and WSL setup are outside this repository's supported verification scope.
+Inspect the generated tree as part of this gate.
 
 ## Failure diagnosis
 
 ### Persona is not installed
 
-Run `shipmates list` and confirm `.codex/agents/<persona>.toml` is a regular
-managed file. Use `shipmates add <persona>`; do not hand-create a placeholder.
+Run `shipmates list` and confirm the installed artifact is a regular
+managed file: `.codex/agents/<persona>.toml` today (and, once the runtime
+interface migration lands, also `.claude/agents/<persona>.md` when the
+claude runtime is selected). Use `shipmates add <persona>`; do not
+hand-create a placeholder.
 
-### Codex cannot be started
+### Runtime CLI cannot be started
 
-Check `command -v codex`, version, login, and the service environment. Shipmates
-does not search for or fall back to another backend.
+Check `command -v codex` / `command -v claude`, the CLI version, the
+login/auth state, and the service environment. If a `runtimes.<name>.binary`
+override is set in `.shipmates/config.yaml`, verify it points at a real
+executable. Shipmates does not search for or automatically fall back
+between runtimes; the configured runtime must be reachable and
+authenticated, or dispatch fails closed with an actionable error.
 
 ### A turn is already active
 

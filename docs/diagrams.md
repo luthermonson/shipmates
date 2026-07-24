@@ -1,7 +1,16 @@
 # Runtime diagrams
 
-These diagrams describe only the shipped Codex-native runtime. Source Mermaid
-files live in [`docs/diagrams/`](diagrams/).
+**Runtime scope.** These diagrams describe the shipped codex-native
+command path — the production dispatcher for `ask`, `live`, `open`,
+`feed`, `tell`, `interrupt`, and `sail` in this release. The claude
+runtime implements the same `runtime.Runtime` interface and installs
+personas at `.claude/agents/<name>.md`, but the commands above are not
+yet migrated onto that interface; when they are, an equivalent
+claude-side dataflow replaces "Codex runtime" / "Codex app-server" in
+the sequence below with the claude adapter's stdio stream. See
+[`docs/runtime-interface-plan.md`](runtime-interface-plan.md).
+
+Source Mermaid files live in [`docs/diagrams/`](diagrams/).
 
 ## Local delegation and control
 

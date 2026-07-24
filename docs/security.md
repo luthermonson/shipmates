@@ -6,23 +6,45 @@ not make an untrusted repository or host safe.
 
 ## Trust boundaries
 
-The operator trusts the local OS account and filesystem, installed Shipmates and
-Codex binaries, project content exposed by the Codex sandbox, the configured
-OpenAI account, and any enabled Fleet authority. Persona separation provides
-distinct instructions, memory, policy, and continuity; it is not an OS security
-boundary.
+The operator trusts the local OS account and filesystem, the installed
+Shipmates binary, the installed agent-runtime CLI(s) that Shipmates drives
+(`claude` and/or `codex`), project content exposed by the runtime's
+sandbox, the account(s) those runtimes are authenticated against, and any
+enabled Fleet authority. Persona separation provides distinct instructions,
+memory, policy, and continuity; it is not an OS security boundary.
 
-## Codex execution
+## Runtime execution
 
-Shipmates starts known Codex entry points directly without shell interpolation.
-Persona configuration may select Codex model and reasoning effort, but cannot
-name an arbitrary executable. One-shot dispatch consumes structured JSON events;
-live dispatch uses a bounded app-server adapter.
+Shipmates starts a known agent-runtime CLI entry point directly, without
+shell interpolation, using argument arrays. Which CLI runs is decided by
+runtime selection (see [Configuration](configuration.md#runtime-selection-shipmatesconfigyaml)):
+codex CLI on the codex-native command path, or claude CLI when a command
+is dispatched through the runtime interface. Runtime binary lookup honors
+the operator's `runtimes.<name>.binary` override; persona configuration
+may select model and reasoning effort but cannot name an arbitrary
+executable.
 
-Raw frames, prompts, unrestricted tool arguments, credentials, and Codex stderr
-are excluded from public event projections. Unknown protocol shapes fail closed.
-The effective Codex sandbox and approvals still matter; review them before work
-in repositories containing secrets or production credentials.
+### Codex execution (current production path)
+
+One-shot dispatch consumes structured JSON events; live dispatch uses a
+bounded app-server adapter. Raw frames, prompts, unrestricted tool
+arguments, credentials, and Codex stderr are excluded from public event
+projections. Unknown protocol shapes fail closed. The effective Codex
+sandbox and approvals still matter; review them before work in
+repositories containing secrets or production credentials.
+
+### Claude execution (runtime interface)
+
+The `runtime.claude` adapter spawns `claude -p --session-id
+<uuid> --output-format stream-json` per turn and parses the JSONL event
+stream into the normalized `runtime.Event` channel. Session state is
+scoped to the runtime and cleaned up on `Close`. As with the codex path,
+the persona instructions never enter a shell, and only normalized events
+are exposed to feeds and Fleet.
+
+Shipmates does not silently fall back from one runtime to another. If the
+configured runtime's CLI is missing or unauthenticated, dispatch fails
+closed with an actionable error rather than trying the other runtime.
 
 ## Filesystem ownership
 
@@ -156,7 +178,7 @@ credential path; M3 must introduce those as a new reviewed boundary.
 | Approval replay | Exact request and lease binding | Re-issue from the current dashboard |
 | Fleet replay | Expiry, scope, deduplication, audit | Revoke identity and inspect authority audit |
 | Secret leakage in events | Closed normalized projections | Treat raw protocol exposure as an incident |
-| Orphaned Codex child | Cancellation and reaping | Verify process owner before cleanup |
+| Orphaned runtime child (codex or claude) | Cancellation and reaping via the runtime adapter's containment watcher | Verify process owner before cleanup |
 
 ## Deliberate non-features
 

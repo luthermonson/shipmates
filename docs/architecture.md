@@ -1,7 +1,20 @@
 # Architecture
 
-Shipmates is a Codex-native persona runtime with persistent project memory. The
-public product consists of six deliberately separate planes.
+Shipmates is a persona runtime with persistent project memory. It sits
+between the human captain and an underlying agent runtime — Claude Code or
+OpenAI Codex — and adds durable memory, local policy, delegation,
+voyages, a local dashboard, and narrow Fleet observation. The public
+product consists of six deliberately separate planes.
+
+**Runtime scope.** The `internal/runtime` package defines a shared
+interface with `claude` and `codex` implementations, selected by
+`.shipmates/config.yaml` / `--runtime`. In this release the production
+command surface (`ask`, `open`, `live`, `feed`, `tell`, `interrupt`,
+`sail`, `fleet`, `ship`, `server`) still dispatches through the
+codex-native code path — the sections below describe that path.
+See [Runtime interface plan](runtime-interface-plan.md) for the
+migration onto the runtime interface, and
+[Platform support](platform-support.md) for what runs where.
 
 For installation and command usage, see [Getting started](getting-started.md)
 and the [CLI reference](cli-reference.md); this document records ownership and
@@ -15,7 +28,8 @@ preserves strategic memory and constraints.
 
 | Path | Purpose |
 |---|---|
-| `.codex/agents/<persona>.toml` | Installed Codex persona definition |
+| `.codex/agents/<persona>.toml` | Installed Codex persona definition (`shipmates init` writes this today) |
+| `.claude/agents/<persona>.md` | Claude Code persona definition — written by `runtime.claude.InstallPersona`; the CLI's `init` will emit it once the persona installer is migrated onto the runtime interface |
 | `.shipmates/memory/<persona>/` | User-owned durable project memory |
 | `.shipmates/policies/<persona>.yaml` | Project-local execution policy |
 | `.shipmates/sessions/` | Bounded Codex continuity and local discovery state |
@@ -25,8 +39,10 @@ preserves strategic memory and constraints.
 
 Catalog installation is conservative: missing memory seeds may be added, but
 normal updates do not replace learned memory. Managed file conflicts require an
-explicit keep/take decision. Persona inventory is derived from canonical Codex
-artifacts, not legacy directories.
+explicit keep/take decision. Persona inventory is currently derived from
+canonical Codex artifacts, not legacy directories; a runtime-neutral
+canonical persona format lives at `catalog/<persona>/persona.md` and both
+runtimes' installers translate from it.
 
 ## Voyage plane
 

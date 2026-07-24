@@ -1,5 +1,15 @@
 # Fleet architecture
 
+**Runtime and platform scope.** Fleet Commander (`fleet`, `ship`,
+`server`) is unix-only in this release — the delegation mailbox and M3
+provisioning validator depend on `openat`, `O_NOFOLLOW`, `flock`, and
+Linux-specific `/proc` + cgroup delegation. Fleet is codex-native today:
+it observes and controls one already-active Codex turn per operation.
+Migrating Fleet onto the `runtime.Runtime` interface (so the same
+observer + exact-turn semantics work against a claude-driven turn) is
+tracked in [Runtime interface plan](runtime-interface-plan.md); see
+[Platform support](platform-support.md) for the per-command matrix.
+
 Shipmates Fleet observes projects and controls one already-active Codex turn. It
 is deliberately narrower than a remote orchestration platform.
 

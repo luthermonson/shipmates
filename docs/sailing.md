@@ -1,5 +1,15 @@
 # Sailing projects
 
+**Runtime scope.** Sail is codex-native for this release. It launches the
+`codex app-server` transport, uses PID-file dispatch locks with unix
+signal semantics, and mediates every turn through the managed Codex
+adapter. The claude runtime cannot yet drive Sail; when the voyage
+executor is migrated onto the `runtime.Runtime` interface (see
+[Runtime interface plan](runtime-interface-plan.md)), the same commands
+below will accept `--runtime claude`. Until then, `shipmates sail` on
+Windows returns a clear unix-only error rather than hanging; see
+[Platform support](platform-support.md).
+
 Phase 2 reserves **captain** for the human operator. The **skipper** is the
 human-facing execution lead, the **quartermaster** preserves strategic memory
 and constraints, and specialist personas perform implementation and review.
