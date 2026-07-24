@@ -1,26 +1,40 @@
 # Shipmates
 
-Shipmates runs persistent, project-scoped AI personas through Codex. It installs
-Codex persona definitions, keeps durable project memory, applies local policy,
-and provides one-shot delegation, live sessions, a local dashboard, and narrow
-authenticated Fleet observation and exact-turn control.
+Shipmates runs persistent, project-scoped AI personas on top of an agent
+runtime — Claude Code or OpenAI Codex — with durable per-project memory,
+local policy enforcement, one-shot delegation, live sessions, a local
+dashboard, and narrow authenticated Fleet observation and exact-turn control.
 
-The supported runtime is Linux. WSL is acceptable because it supplies Linux;
-WSL setup and native Windows/macOS support are outside this repository.
+The runtime is selectable per-project via `.shipmates/config.yaml`
+(`runtime: claude` or `runtime: codex`) or per-invocation with `--runtime`
+(env `SHIPMATES_RUNTIME`). The `runtime` interface, config loader, and both
+runtime adapters ship in this release; the individual command surface
+(`ask`, `open`, `sail`, `plan`, …) is being migrated onto that interface
+incrementally. Today the codex-native command path remains the production
+dispatch path; the claude runtime is available in-package and via the
+factory. See [`docs/runtime-interface-plan.md`](docs/runtime-interface-plan.md)
+and [`docs/platform-support.md`](docs/platform-support.md) for scope.
+
+The Shipmates binary now compiles on Linux, macOS, and Windows. Codex-native
+subsystems (Sail voyages, Fleet Commander M1-M3) currently require Linux or
+WSL; see [`docs/platform-support.md`](docs/platform-support.md).
 
 ## Requirements
 
-- Linux (including WSL).
 - Go 1.26.5 or newer when building from source.
-- An installed and authenticated Codex CLI, available as `codex` on `PATH`.
+- One of:
+  - **Claude Code CLI** on `PATH`, authenticated (`claude auth`), for the
+    `claude` runtime. Cross-platform (Linux, macOS, Windows).
+  - **Codex CLI** on `PATH`, authenticated (`codex login`), for the
+    default codex-native command path. Full Sail/Fleet features on Linux.
 - A Git repository for the project.
 
 ## Quick start
 
-For a released Linux binary, download the appropriate asset from the
+For a released binary, download the appropriate OS/arch asset from the
 [latest release](https://github.com/luthermonson/shipmates/releases/latest),
-verify its published checksum, place `shipmates` on `PATH`, and install the
-optional Shipmates-owned runtime assets offline:
+verify its published checksum, and place `shipmates` on `PATH`. On Linux,
+install the optional Shipmates-owned system runtime assets offline:
 
 ```bash
 sudo shipmates install --dry-run --json
@@ -50,15 +64,26 @@ The source installer script remains a development bootstrap for the project
 binary. It is not the M3 runtime installer; released operators use
 `sudo shipmates install`.
 
-Authenticate Codex before the first delegation:
+Authenticate the runtime CLI before the first delegation. For the codex
+path:
 
 ```bash
 codex login
 codex login status
 ```
 
+For the claude path:
+
+```bash
+claude auth
+```
+
 Initialization creates `.codex/agents/`, `.shipmates/policies/`,
 `.shipmates/memory/`, `.shipmates/manifest.json`, and private session state.
+The claude runtime's persona installer writes `.claude/agents/<persona>.md`
+plus a `SessionStart` memory hook when driven directly through the runtime
+package; migration of `shipmates init` onto that interface is tracked in
+[`docs/runtime-interface-plan.md`](docs/runtime-interface-plan.md).
 See [Getting started](docs/getting-started.md) for the canonical setup guide.
 
 ## Core workflows
@@ -82,8 +107,8 @@ and `update` for project lifecycle maintenance.
 
 ## A deterministic control plane
 
-Shipmates keeps project judgment in Codex while moving orchestration mechanics
-into the Go binary. The Skipper helps the Captain define scope, resolve
+Shipmates keeps project judgment in the agent runtime while moving orchestration
+mechanics into the Go binary. The Skipper helps the Captain define scope, resolve
 ambiguity, consult specialists, and produce an approved voyage. Go then owns
 dependency scheduling, concurrency, persona isolation, model escalation,
 timeouts, retries, cancellation, policy enforcement, and durable resume. Crew
@@ -108,8 +133,8 @@ shipmates beads ready --json
 
 ## Runtime boundaries
 
-`ask`, queue workflows, `live`, and `open` use the managed Codex app-server
-boundary. Local images are existing, validated PNG/JPEG/GIF/WebP files inside
+On the codex path, `ask`, queue workflows, `live`, and `open` use the managed
+Codex app-server boundary. Local images are existing, validated PNG/JPEG/GIF/WebP files inside
 the project and are passed only to the starting turn. Fleet observes bounded
 state and can steer or interrupt one exact active turn with separate
 capabilities. Fleet cannot start work, approve requests, upload files, open
@@ -119,6 +144,8 @@ terminals, or run generic commands.
 
 - [Getting started](docs/getting-started.md) — installation and first delegation
 - [Installer and platform contract](docs/installer-platforms.md) — offline runtime installation, fallback, packaging, and M3 boundaries
+- [Platform support](docs/platform-support.md) — command availability by OS and runtime
+- [Runtime interface plan](docs/runtime-interface-plan.md) — claude/codex runtimes, config, and migration phases
 - [CLI reference](docs/cli-reference.md) — commands and flags
 - [Sailing projects](docs/sailing.md) — plan, approval, execution, and Beads
 - [Configuration and state](docs/configuration.md) — project files and generated state

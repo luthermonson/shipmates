@@ -35,10 +35,10 @@ All notable changes to Shipmates are documented here. This project follows
 
 ### Changed
 
-- **Cross-platform build.** Shipmates now compiles on Linux and Windows;
-  the release workflow ships binaries for both. macOS builds from source
-  are partially supported (see Notes for operators). Prior to this
-  release, the release workflow was Linux-only.
+- **Cross-platform build.** Shipmates now compiles on Linux, macOS, and
+  Windows; the release workflow ships binaries for all three
+  (`amd64` + `arm64` each). Prior to this release, the release workflow
+  was Linux-only.
 - **Fleet Commander (M1-M3) is unix-only.** `Fleet`, `Ship`, and `Server`
   commands are gated `//go:build unix` because the underlying durable
   mailbox + delegation validator depend on filesystem primitives
@@ -70,27 +70,42 @@ All notable changes to Shipmates are documented here. This project follows
 
 ### Notes for operators
 
-- The release workflow now produces Linux and Windows binaries
+- **Two agent runtimes are now first-class peers in the codebase.** The
+  `internal/runtime` package defines the interface, and both `claude`
+  (default) and `codex` are wired through `internal/runtime/factory`. The
+  runtime is selected by `.shipmates/config.yaml` (`runtime: claude` or
+  `runtime: codex`), by `~/.shipmates/config.yaml`, or by the global
+  `--runtime <name>` CLI flag / `SHIPMATES_RUNTIME` env var. Precedence:
+  CLI flag > project > user > default (`claude`).
+- **Command migration is incremental.** The command surface
+  (`ask`, `open`, `live`, `feed`, `tell`, `interrupt`, `sail`, `plan`,
+  `fleet`, `ship`, `server`) still dispatches through the codex-native
+  code path in this release, so the `--runtime` flag is currently plumbing
+  in front of that path. The claude runtime is fully constructable via
+  `factory.NewFromResolved` / `claude.New`, installs personas as
+  `.claude/agents/<name>.md`, wires the `SessionStart` memory hook, and
+  is unit-tested; migrating the command surface onto the runtime
+  interface is tracked in `docs/runtime-interface-plan.md` (Phase 4+).
+- When `env.Selector` is asked for codex, it returns a pointing
+  `runtime.ErrNotConfigured` because the codex adapter needs
+  `codexapp.StartOptions` (transport, credential isolation) that the
+  base config cannot carry. Codex-native commands already call
+  `factory.NewCodexWith(ctx, opts)` directly.
+- Sail, Fleet, and Server remain unix-only (Linux + WSL) for this
+  release; the runtime interface does not lift that gate on its own.
+- The release workflow now produces Linux, macOS, and Windows binaries
   (`amd64` + `arm64` each) alongside the source archive; the archive
   bundles `README.md`, `LICENSE`, `CHANGELOG.md`, `docs/platform-support.md`,
   `docs/installer-platforms.md`, `docs/security.md`, `docs/cli-reference.md`.
-- **macOS is not yet in the release workflow.** Two files use Linux-only
-  syscalls that don't cross-compile to darwin: `internal/fleetconfig/config.go`
-  uses `unix.O_PATH` (part of the M3 credential-open path), and
-  `internal/codexapp/process_unix.go` uses `unix.PidfdOpen` /
-  `unix.PidfdSendSignal` for atomic process handles. Both need a
-  darwin-native port (kqueue / EVFILT_PROC for process handles; a
-  descriptor-only open dance for the M3 openat chain) before darwin can
-  be added to `.goreleaser.yml`. Tracked as a follow-up.
-- Codex remains selectable in config, but `env.Selector` returns a
-  pointing error for codex: it requires `codexapp.StartOptions`
-  (transport, credential isolation) that the base config cannot carry.
-  Use `factory.NewCodexWith(ctx, opts)` directly, as the existing
-  codex-native commands (`ask`, `live`, `sail`, `fleet`, `ship`,
-  `server`) already do.
-- Codex remains selectable in config, but `env.Selector` returns a
-  pointing error for codex: it requires `codexapp.StartOptions`
-  (transport, credential isolation) that the base config cannot carry.
-  Use `factory.NewCodexWith(ctx, opts)` directly, as the existing
-  codex-native commands (`ask`, `live`, `sail`, `fleet`, `ship`,
-  `server`) already do.
+- **macOS non-Linux syscall shims.** Two paths that previously used
+  Linux-only syscalls now dispatch by build tag: `internal/codexapp`
+  extracted `process_identity_linux.go` (real `PidfdOpen` /
+  `PidfdSendSignal`) with a sibling `process_identity_other.go` that
+  uses raw PID + `syscall.Kill(pid, sig)` for non-Linux unix; and
+  `internal/fleetconfig` replaced the inline `unix.O_PATH` in
+  `openDirNoFollow` with a per-platform `dirOpenFlags` constant
+  (`O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` on Linux;
+  `O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` elsewhere). The
+  security-critical `O_NOFOLLOW` remains on every platform; the
+  darwin fallback loses only `O_PATH`'s belt-and-braces confinement
+  of what the fd can do post-open.
