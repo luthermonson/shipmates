@@ -76,6 +76,16 @@ func TestFleetBootstrapRejectsUnsafeSecretOutputs(t *testing.T) {
 	if _, err := runFleetBootstrap(t, "init", "--authority-store", authority, "--fleet-id", "flt_0123456789abcdef"); err != nil {
 		t.Fatal(err)
 	}
+	// rejectRepositoryPath resolves the project via FindRoot from the
+	// process working directory, so establish a real shipmates project
+	// there. (Previously this leaned on os.Getwd() — the package source
+	// dir — being inside a shipmates project, which is only true when a
+	// shipmates.yaml happens to exist above the checkout.)
+	projectDir := t.TempDir()
+	t.Chdir(projectDir)
+	if err := os.WriteFile("shipmates.yaml", []byte("crew: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +93,9 @@ func TestFleetBootstrapRejectsUnsafeSecretOutputs(t *testing.T) {
 	inside := filepath.Join(wd, ".fleet-secret-test")
 	if _, err := runFleetBootstrap(t, "enrollment", "create", "--authority-store", authority, "--fleet-id", "flt_0123456789abcdef", "--output", inside); err == nil {
 		t.Fatal("repository-relative output unexpectedly accepted")
+	}
+	if _, err := os.Lstat(inside); !os.IsNotExist(err) {
+		t.Fatalf("rejected output was still created: %v", err)
 	}
 	link := filepath.Join(root, "link")
 	target := filepath.Join(root, "target")
