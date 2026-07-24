@@ -179,7 +179,7 @@ func (c *Client) Complete(ctx context.Context, id, summary string) error {
 		return errors.New("invalid Beads issue id")
 	}
 	if summary = strings.TrimSpace(summary); summary != "" {
-		if _, err := c.Run(ctx, "comments", "add", id, bounded(summary, 4096), "--author=shipmates"); err != nil {
+		if _, err := c.Run(ctx, "comments", "add", id, "--author=shipmates", "--", bounded(summary, 4096)); err != nil {
 			return err
 		}
 	}
@@ -192,7 +192,7 @@ func (c *Client) Block(ctx context.Context, id, reason string) error {
 		return errors.New("invalid Beads issue id")
 	}
 	if reason = strings.TrimSpace(reason); reason != "" {
-		if _, err := c.Run(ctx, "comments", "add", id, bounded(reason, 2048), "--author=shipmates"); err != nil {
+		if _, err := c.Run(ctx, "comments", "add", id, "--author=shipmates", "--", bounded(reason, 2048)); err != nil {
 			return err
 		}
 	}

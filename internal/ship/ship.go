@@ -171,15 +171,11 @@ func runCaptain(ctx context.Context, exe, dir string, env []string) error {
 	}
 	cmd.WaitDelay = 10 * time.Second
 
-	logPath := filepath.Join(dir, ".shipmates", "sessions", "server.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err == nil {
-		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
-			defer f.Close()
-			cmd.Stdout = f
-			cmd.Stderr = f
-		}
-	}
-	if cmd.Stdout == nil {
+	if f, err := projectstate.OpenServerLog(dir); err == nil {
+		defer f.Close()
+		cmd.Stdout = f
+		cmd.Stderr = f
+	} else {
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 	}
@@ -293,10 +289,10 @@ func AddProject(path, dir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0o644)
+	return os.WriteFile(path, out, 0o600)
 }
 
 // ProjectStatus is one supervised project's probe result.

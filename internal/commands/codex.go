@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
@@ -144,7 +145,7 @@ func dispatchCodexExecInstalledImages(ctx context.Context, installed *project.In
 			return fmt.Errorf("codex turn canceled: %w", ctx.Err())
 		}
 		if reportedErr != "" {
-			return fmt.Errorf("codex: %s", reportedErr)
+			return fmt.Errorf("codex: %s", scrubTerminalControl(reportedErr))
 		}
 		return err
 	}
@@ -301,6 +302,22 @@ func parseCodexEvent(line []byte) (threadID, finalText, eventErr, activity strin
 		}
 	}
 	return threadID, finalText, eventErr, activity
+}
+
+// scrubTerminalControl strips control characters and BiDi override runes from
+// a string so an attacker-influenced field (e.g. a Codex-reported error
+// message) cannot rewrite the operator's terminal via ANSI escapes.
+func scrubTerminalControl(s string) string {
+	s = strings.ToValidUTF8(s, "?")
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return ' '
+		}
+		if unicode.IsControl(r) || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 func safeActivity(itemType string) string {
