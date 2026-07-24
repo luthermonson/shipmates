@@ -1,0 +1,155 @@
+# Brig policy template — the kernel-enforced subset of the Ship's Articles.
+#
+# `shipmates brig install` merges these rules into each installed persona's
+# overlay at .shipmates/policies/<persona>.yaml, wrapped in shipmates-owned
+# marker comments so re-running the command replaces this block verbatim
+# and leaves the rest of the overlay alone.
+#
+# The shipmates policy loader matches on exact command strings — it does
+# not glob. The entries below enumerate the most-common literal
+# invocations for each Article; extend them in your persona overlay as
+# new patterns show up in your operator log.
+#
+# Ordering conventions:
+#   - `deny` rules appear in Article order (7, 8, 10, 14, 15).
+#   - `ask` rules appear in Article order (6, 9, 13).
+#   - `allow` is intentionally empty — the Brig is a restrictive overlay.
+#
+# Article 11 (No Lies About Failure) has no entries — it's prompt-only.
+# Article 12 (Respect the Freeze) is enforced via `.shipmates/freeze` and
+# has no `command_exact` entries here.
+#
+# Rule IDs follow the pattern: brig_a<article>_<slug>.
+version: 1
+allow: []
+ask:
+  # Article 6 — No Prod DB
+  - id: brig_a6_psql_prod
+    kind: process.exec
+    match: { command_exact: "psql production" }
+    reason: Article 6 — connecting to a database named production requires operator confirmation
+  - id: brig_a6_mysql_prod
+    kind: process.exec
+    match: { command_exact: "mysql -u root production" }
+    reason: Article 6 — connecting to a database named production requires operator confirmation
+  - id: brig_a6_mongo_prod
+    kind: process.exec
+    match: { command_exact: "mongo production" }
+    reason: Article 6 — connecting to a database named production requires operator confirmation
+  # Article 9 — Verify Every Package (slopsquatting defense)
+  - id: brig_a9_npm_install
+    kind: process.exec
+    match: { command_exact: "npm install" }
+    reason: Article 9 — package installs must be operator-confirmed to prevent slopsquatting
+  - id: brig_a9_yarn_add
+    kind: process.exec
+    match: { command_exact: "yarn add" }
+    reason: Article 9 — package installs must be operator-confirmed to prevent slopsquatting
+  - id: brig_a9_pip_install
+    kind: process.exec
+    match: { command_exact: "pip install" }
+    reason: Article 9 — package installs must be operator-confirmed to prevent slopsquatting
+  - id: brig_a9_pipx_install
+    kind: process.exec
+    match: { command_exact: "pipx install" }
+    reason: Article 9 — package installs must be operator-confirmed to prevent slopsquatting
+  - id: brig_a9_go_get
+    kind: process.exec
+    match: { command_exact: "go get" }
+    reason: Article 9 — package installs must be operator-confirmed to prevent slopsquatting
+  - id: brig_a9_cargo_add
+    kind: process.exec
+    match: { command_exact: "cargo add" }
+    reason: Article 9 — package installs must be operator-confirmed to prevent slopsquatting
+  - id: brig_a9_gem_install
+    kind: process.exec
+    match: { command_exact: "gem install" }
+    reason: Article 9 — package installs must be operator-confirmed to prevent slopsquatting
+  - id: brig_a9_brew_install
+    kind: process.exec
+    match: { command_exact: "brew install" }
+    reason: Article 9 — package installs must be operator-confirmed to prevent slopsquatting
+  # Article 13 — Confirm Before Destroying
+  - id: brig_a13_rm_rf
+    kind: process.exec
+    match: { command_exact: "rm -rf" }
+    reason: Article 13 — recursive delete requires operator confirmation
+  - id: brig_a13_rm_r
+    kind: process.exec
+    match: { command_exact: "rm -r" }
+    reason: Article 13 — recursive delete requires operator confirmation
+  - id: brig_a13_rm_rf_dot
+    kind: process.exec
+    match: { command_exact: "rm -rf ." }
+    reason: Article 13 — recursive delete requires operator confirmation
+deny:
+  # Article 7 — No Destructive Git
+  - id: brig_a7_push_force
+    kind: process.exec
+    match: { command_exact: "git push --force" }
+    reason: Article 7 — force-push rewrites shared history and is refused by the Brig
+  - id: brig_a7_push_f
+    kind: process.exec
+    match: { command_exact: "git push -f" }
+    reason: Article 7 — force-push rewrites shared history and is refused by the Brig
+  - id: brig_a7_push_force_with_lease
+    kind: process.exec
+    match: { command_exact: "git push --force-with-lease" }
+    reason: Article 7 — force-push (even with lease) rewrites shared history
+  - id: brig_a7_reset_hard_origin
+    kind: process.exec
+    match: { command_exact: "git reset --hard origin/main" }
+    reason: Article 7 — hard reset to a shared ref discards local work silently
+  - id: brig_a7_reset_hard_upstream
+    kind: process.exec
+    match: { command_exact: "git reset --hard upstream/main" }
+    reason: Article 7 — hard reset to a shared ref discards local work silently
+  - id: brig_a7_branch_capital_d
+    kind: process.exec
+    match: { command_exact: "git branch -D" }
+    reason: Article 7 — force branch delete drops work regardless of merge status
+  - id: brig_a7_clean_fdx
+    kind: process.exec
+    match: { command_exact: "git clean -fdx" }
+    reason: Article 7 — git clean -fdx removes ignored files including .env
+  - id: brig_a7_clean_fx
+    kind: process.exec
+    match: { command_exact: "git clean -fx" }
+    reason: Article 7 — git clean -fx removes ignored files including .env
+  - id: brig_a7_filter_repo
+    kind: process.exec
+    match: { command_exact: "git filter-repo" }
+    reason: Article 7 — filter-repo rewrites history at scale
+  - id: brig_a7_filter_branch
+    kind: process.exec
+    match: { command_exact: "git filter-branch" }
+    reason: Article 7 — filter-branch rewrites history at scale
+  - id: brig_a7_tag_force
+    kind: process.exec
+    match: { command_exact: "git tag -f" }
+    reason: Article 7 — reassigning a tag moves signed history
+  - id: brig_a7_rebase_interactive
+    kind: process.exec
+    match: { command_exact: "git rebase -i" }
+    reason: Article 7 — interactive rebase requires a human editor and rewrites history
+  # Article 10 — No Piped Execution
+  - id: brig_a10_curl_pipe_sh
+    kind: process.exec
+    match: { command_exact: "curl | sh" }
+    reason: Article 10 — never pipe network fetches into a shell interpreter
+  - id: brig_a10_curl_pipe_bash
+    kind: process.exec
+    match: { command_exact: "curl | bash" }
+    reason: Article 10 — never pipe network fetches into a shell interpreter
+  - id: brig_a10_wget_pipe_sh
+    kind: process.exec
+    match: { command_exact: "wget | sh" }
+    reason: Article 10 — never pipe network fetches into a shell interpreter
+  - id: brig_a10_wget_pipe_bash
+    kind: process.exec
+    match: { command_exact: "wget | bash" }
+    reason: Article 10 — never pipe network fetches into a shell interpreter
+  - id: brig_a10_iex_irm
+    kind: process.exec
+    match: { command_exact: "iex(irm)" }
+    reason: Article 10 — PowerShell iex(irm ...) pipes remote script into the interpreter

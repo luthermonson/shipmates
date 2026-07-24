@@ -102,6 +102,26 @@ func (c *Catalog) HasPolicyFile(name string) bool {
 	return err == nil
 }
 
+// BrigPolicyTemplate returns the raw bytes of catalog/brig.policy.yaml — the
+// kernel-enforced Brig policy template merged into persona overlays by
+// `shipmates brig install`.
+func (c *Catalog) BrigPolicyTemplate() ([]byte, error) {
+	return fs.ReadFile(c.fsys, path.Join("catalog", "brig.policy.yaml"))
+}
+
+// FleetBrigDefault returns the raw bytes of catalog/fleet-brig.default.yaml
+// — the fleet-wide un-overridable subset written by `shipmates brig install
+// --fleet`.
+func (c *Catalog) FleetBrigDefault() ([]byte, error) {
+	return fs.ReadFile(c.fsys, path.Join("catalog", "fleet-brig.default.yaml"))
+}
+
+// ArticlesDoc returns the raw bytes of catalog/ARTICLES.md — the canonical
+// operator-facing Articles document.
+func (c *Catalog) ArticlesDoc() ([]byte, error) {
+	return fs.ReadFile(c.fsys, path.Join("catalog", "ARTICLES.md"))
+}
+
 // MemorySeeds returns the starter memory files for a persona, keyed by base
 // filename. Returns an empty map if the persona ships no seeds.
 func (c *Catalog) MemorySeeds(name string) (map[string][]byte, error) {

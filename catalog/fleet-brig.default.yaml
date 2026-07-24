@@ -1,0 +1,41 @@
+# Fleet Brig defaults — the un-overridable subset of the Ship's Articles.
+#
+# `shipmates brig install --fleet` writes this file to ~/.shipmates/brig.yaml
+# if it doesn't already exist. The fleet baseline names the rules the
+# admiral treats as *never* project-waivable — force-push to primary
+# branches, secret writes, root-filesystem writes, filter-repo.
+#
+# Consumers should merge this baseline with a project overlay when composing
+# the effective policy; per-persona overlays cannot loosen a `deny` shipped
+# here (that is the policy loader's precedence contract: `deny > ask > allow`).
+version: 1
+allow: []
+ask: []
+deny:
+  # Article 7 — destructive git against the primary branches
+  - id: brig_a7_push_force
+    kind: process.exec
+    match: { command_exact: "git push --force origin main" }
+    reason: Fleet Brig — no force-push to origin main under any project overlay
+  - id: brig_a7_push_force_master
+    kind: process.exec
+    match: { command_exact: "git push --force origin master" }
+    reason: Fleet Brig — no force-push to origin master under any project overlay
+  - id: brig_a7_filter_repo
+    kind: process.exec
+    match: { command_exact: "git filter-repo" }
+    reason: Fleet Brig — filter-repo rewrites history at scale, fleet-wide deny
+  # Article 8 — secrets writes (representative literal invocations)
+  - id: brig_a8_write_dotenv
+    kind: process.exec
+    match: { command_exact: "touch .env" }
+    reason: Fleet Brig — creating a bare .env in a project is an ergonomic secrets mistake
+  # Article 15 — writes outside project root (representative)
+  - id: brig_a15_write_etc
+    kind: process.exec
+    match: { command_exact: "sudo tee /etc/hosts" }
+    reason: Fleet Brig — writes to /etc are refused under any project overlay
+  - id: brig_a15_write_ssh
+    kind: process.exec
+    match: { command_exact: "chmod 600 ~/.ssh/authorized_keys" }
+    reason: Fleet Brig — writes to ~/.ssh are refused under any project overlay
