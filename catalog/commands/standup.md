@@ -20,8 +20,9 @@ Do NOT fall back to scraping `--web` HTML — the JSON output is the source of t
 ## 2. Group by worker
 
 The bucket labels are the **active crew** for this project: read the persona
-names from `shipmates.yaml` (the `crew:` map, or the personas present in
-`.codex/agents/`). Bucket every issue and PR by its matching fleet label.
+names from `shipmates.yaml` (the `crew:` map) or from `shipmates list`
+output, which enumerates every installed persona in a runtime-neutral way.
+Bucket every issue and PR by its matching fleet label.
 
 An item with no fleet label goes in a final **Unowned** bucket so it's visible —
 those are recruitment candidates or stale claims. If an item has multiple fleet

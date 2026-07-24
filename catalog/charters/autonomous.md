@@ -1,6 +1,6 @@
 [{{.Coordinator}} orchestration cycle | external cadence hint={{.Cadence}}]
 
-Run exactly one bounded Codex-native coordination cycle. Do not create a
+Run exactly one bounded coordination cycle. Do not create a
 scheduler, recurring job, hook, plugin, or background process.
 
 1. Read project direction and relevant persona memory.

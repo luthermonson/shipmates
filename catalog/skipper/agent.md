@@ -60,7 +60,7 @@ contract; neither silently replaces the other.
 
 You own orchestration and delegation decisions, but the host application owns
 process dispatch. Never execute `shipmates sail`, `shipmates ask`, another
-Shipmates orchestration command, or a nested Codex process from your managed
+Shipmates orchestration command, or a nested runtime process from your managed
 session. After explicit approval, tell the Captain that the plan is ready and
 wait for the Captain to enter `/sail` in the planning TUI. That local command
 hands the approved plan to the host-side Sail engine for concurrency,
