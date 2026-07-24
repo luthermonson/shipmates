@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -53,6 +54,9 @@ func Sail() *cli.Command {
 }
 
 func runSail(ctx context.Context, c *cli.Command) error {
+	if runtime.GOOS == "windows" {
+		return errors.New("shipmates sail is unix-only in v0.4: the voyage executor depends on PID-file dispatch locks + signal semantics not yet ported to Windows")
+	}
 	if os.Getenv(codexapp.ManagedSessionEnvironment) == "1" {
 		return errors.New("sail cannot run inside a managed Shipmates persona session; the Captain must use /sail from the planning TUI or run shipmates sail from a normal terminal")
 	}
