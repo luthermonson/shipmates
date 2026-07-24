@@ -1,6 +1,11 @@
 # Runtime interface plan
 
-Owner: @luthermonson · Started: 2026-07-23
+Owner: @luthermonson · Started: 2026-07-23 · Status: Phase 3 landed
+in [PR #14](https://github.com/luthermonson/shipmates/pull/14) — the
+`runtime` interface, both `claude` and `codex` adapters, the containment
+watcher, the config loader (`.shipmates/config.yaml`), the factory, and
+the global `--runtime` CLI flag are on `feat/runtime-interface`. The
+command surface migration (Phase 4+) is not yet done.
 
 ## Why this exists
 
@@ -127,22 +132,44 @@ catalog/
 
 Each phase ships independently.
 
-- [x] **Phase 0 — this commit**: design doc + skeleton `internal/runtime`
-      package with the interface. Two Linux-only files (`delegation`,
+- [x] **Phase 0**: design doc + skeleton `internal/runtime` package with
+      the interface. Two Linux-only files (`delegation`,
       `fleetcommandermailbox/store`) got `//go:build unix` build tags so
-      their intent is documented, but the full cross-platform build fix
-      cascaded deeper than expected and is deferred to Phase 5.
-- [ ] **Phase 1**: refactor `codexapp.Adapter` to implement `runtime.Runtime`.
-      No behavior change on Linux; commands still work.
-- [ ] **Phase 2**: restore Claude Code integration as `runtime/claude`
-      implementing the same interface. Recover the removed code from
-      `origin/main` history and adapt it.
-- [ ] **Phase 3**: config loader + `--runtime` flag + factory that returns
-      the right implementation.
-- [ ] **Phase 4**: introduce canonical persona format + per-runtime
-      translators.
-- [ ] **Phase 5**: cgroup containment stubs for darwin/windows so the whole
-      binary compiles cleanly on all three OSes.
+      their intent is documented; the full cross-platform build fix
+      cascaded deeper than expected and landed in Phase 5.
+- [x] **Phase 1**: `codexapp.Adapter` now implements `runtime.Runtime`
+      via `internal/runtime/codex`. Codex-native command dispatch is
+      unchanged.
+- [x] **Phase 2**: Claude Code integration restored as
+      `internal/runtime/claude`, with stdio streaming, event
+      normalization, persona install (`.claude/agents/<name>.md`), and
+      the `SessionStart` memory hook.
+- [x] **Phase 3**: config loader (`.shipmates/config.yaml` +
+      `~/.shipmates/config.yaml`), the global `--runtime` CLI flag /
+      `SHIPMATES_RUNTIME` env var, and the `internal/runtime/factory`
+      that returns the right implementation. `env.Selector` is the
+      command-side entry point; codex returns `ErrNotConfigured` from
+      the selector because it needs `codexapp.StartOptions` that the
+      config file cannot reasonably carry.
+- [ ] **Phase 4**: introduce canonical persona format (`persona.md`) +
+      per-runtime translators, and migrate `shipmates init` / `add` /
+      `update` / `render` onto the runtime interface so `init` emits
+      both `.codex/agents/*.toml` and `.claude/agents/*.md` per the
+      selected runtime.
+- [ ] **Phase 5**: cgroup containment stubs for darwin/windows so the
+      whole binary compiles cleanly on all three OSes. (Cross-platform
+      build achieved by the release workflow via `//go:build unix`
+      gating of Sail + Fleet Commander M1-M3 instead — see
+      [`docs/platform-support.md`](platform-support.md).)
+- [ ] **Phase 6**: migrate the dispatch commands (`ask`, `open`, `live`,
+      `feed`, `tell`, `interrupt`) onto `env.Selector` /
+      `factory.NewFromResolved`, so `--runtime claude` actually flips
+      the runtime that a `shipmates ask` turn runs on. Today those
+      commands still call the codex-native dispatcher directly.
+- [ ] **Phase 7**: migrate Sail + Fleet onto the interface, once the
+      unix-only dependencies (PID-file dispatch locks, `openat`,
+      `flock`, `/proc`) are abstracted; see
+      [Platform support](platform-support.md).
 
 ## Non-goals
 
