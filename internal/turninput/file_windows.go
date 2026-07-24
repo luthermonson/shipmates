@@ -154,16 +154,54 @@ func revalidateFile(_ *capturedRoot, d *FileDescriptorV1) error {
 	return nil
 }
 
-// sniffHandle takes ownership of h, reads the bounded classification prefix,
+// readValidated re-opens the leaf by absolute path with reparse points
+// still refused, requires the file object to still be the exact one that was
+// validated, reads the whole file, and re-checks identity afterwards so a
+// write that raced the read is caught.
+func readValidated(_ *capturedRoot, d *FileDescriptorV1) ([]byte, error) {
+	h, id, e := openWin(d.absolute, false)
+	if e != nil {
+		return nil, errors.New("unreadable")
+	}
+	if id != d.identity {
+		windows.CloseHandle(h)
+		return nil, errors.New("changed")
+	}
+	raw, e := readHandle(h, d.absolute, int(id.size))
+	if e != nil {
+		return nil, e
+	}
+	verify, after, e := openWin(d.absolute, false)
+	if e != nil {
+		return nil, errors.New("unreadable")
+	}
+	windows.CloseHandle(verify)
+	if after != d.identity {
+		return nil, errors.New("changed")
+	}
+	return raw, nil
+}
+
+// sniffHandle takes ownership of h and reads the bounded classification
+// prefix.
+func sniffHandle(h windows.Handle, name string) ([]byte, error) {
+	return readHandle(h, name, sniffBytes)
+}
+
+// readHandle takes ownership of h, reads up to limit bytes from offset 0,
 // and always releases the handle exactly once (os.File owns it after
 // NewFile, so the raw handle must not be closed separately).
-func sniffHandle(h windows.Handle, name string) ([]byte, error) {
+func readHandle(h windows.Handle, name string, limit int) ([]byte, error) {
 	f := os.NewFile(uintptr(h), name)
 	if f == nil {
 		windows.CloseHandle(h)
 		return nil, errors.New("unreadable")
 	}
-	buf := make([]byte, sniffBytes)
+	if limit < 0 {
+		f.Close()
+		return nil, errors.New("unreadable")
+	}
+	buf := make([]byte, limit)
 	n, readErr := f.ReadAt(buf, 0)
 	closeErr := f.Close()
 	if (readErr != nil && readErr != io.EOF) || closeErr != nil {

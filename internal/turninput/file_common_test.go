@@ -164,6 +164,35 @@ func TestFileRevalidateRefusesReplacedContent(t *testing.T) {
 	}
 }
 
+func TestFileBytesReadsAndRefusesSwappedContent(t *testing.T) {
+	root := t.TempDir()
+	body := []byte("attachment body with é and 雪\n")
+	writeFileFixture(t, root, "notes.md", body)
+	batch, err := ValidateFiles(root, []string{"notes.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer batch.Close()
+	d := batch.Files()[0]
+	raw, err := d.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	if !bytes.Equal(raw, body) {
+		t.Fatalf("Bytes=%q want %q", raw, body)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes.md"), []byte("swapped for something else entirely"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Bytes(); err == nil {
+		t.Fatal("Bytes accepted swapped content")
+	}
+	var zero FileDescriptorV1
+	if _, err := zero.Bytes(); err == nil {
+		t.Fatal("Bytes accepted an unvalidated descriptor")
+	}
+}
+
 func TestClassifyContentBoundedPrefix(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

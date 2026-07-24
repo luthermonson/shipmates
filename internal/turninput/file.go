@@ -129,6 +129,29 @@ func (d FileDescriptorV1) revalidationLimit() uint64 {
 	return d.limit
 }
 
+// Bytes revalidates the descriptor and returns the file's contents. This is
+// the only supported way to read an attachment: it re-resolves the path
+// through the same symlink/reparse-refusing walk used at validation time,
+// requires the file object to still be the exact one that was validated,
+// and re-checks identity after the read, so a file swapped or rewritten
+// between validation and use is refused instead of sent to a model.
+func (d FileDescriptorV1) Bytes() ([]byte, error) {
+	if d.root == nil {
+		return nil, errors.New("file_descriptor_invalid")
+	}
+	if err := revalidateFile(d.root, &d); err != nil {
+		return nil, errors.New("file_changed")
+	}
+	raw, err := readValidated(d.root, &d)
+	if err != nil {
+		return nil, errors.New("file_" + err.Error())
+	}
+	if uint64(len(raw)) != d.Size {
+		return nil, errors.New("file_changed")
+	}
+	return raw, nil
+}
+
 // RevalidateDescriptors re-opens every descriptor and refuses the batch if
 // any file's identity, kind, or format changed since validation. Runtimes
 // must call this immediately before reading the bytes.

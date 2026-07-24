@@ -55,12 +55,11 @@ func (r *capturedRoot) close() {
 	}
 }
 
-// validateFile walks the path one component at a time with openat +
-// O_NOFOLLOW from the captured root fd, so no symlink anywhere in the chain
-// can escape the project, then fstats the leaf, sniffs a bounded prefix for
-// the content kind, and re-fstats to prove the file did not change between
-// the first stat and the read (TOCTOU).
-func validateFile(r *capturedRoot, raw string, maxBytes uint64) (FileDescriptorV1, error) {
+// openLeaf walks the path one component at a time with openat + O_NOFOLLOW
+// from the captured root fd, so no symlink anywhere in the chain can escape
+// the project, and returns an fd on the leaf regular file. The caller owns
+// the returned fd.
+func openLeaf(r *capturedRoot, raw string) (int, leafInfo, error) {
 	abs := raw
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(r.path, raw)
@@ -68,12 +67,12 @@ func validateFile(r *capturedRoot, raw string, maxBytes uint64) (FileDescriptorV
 	abs = filepath.Clean(abs)
 	rel, e := filepath.Rel(r.path, abs)
 	if e != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == "." {
-		return FileDescriptorV1{}, errors.New("outside_project")
+		return -1, leafInfo{}, errors.New("outside_project")
 	}
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	fd, e := unix.Dup(r.fd)
 	if e != nil {
-		return FileDescriptorV1{}, e
+		return -1, leafInfo{}, e
 	}
 	ancestorKey := r.identity.rootKey()
 	current := r.path
@@ -82,12 +81,12 @@ func validateFile(r *capturedRoot, raw string, maxBytes uint64) (FileDescriptorV
 		next, x := unix.Openat(fd, p, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		unix.Close(fd)
 		if x != nil {
-			return FileDescriptorV1{}, classifyUnixPathFailure(current)
+			return -1, leafInfo{}, classifyUnixPathFailure(current)
 		}
 		var dst unix.Stat_t
 		if unix.Fstat(next, &dst) != nil || dst.Mode&unix.S_IFMT != unix.S_IFDIR {
 			unix.Close(next)
-			return FileDescriptorV1{}, errors.New("not_regular")
+			return -1, leafInfo{}, errors.New("not_regular")
 		}
 		ancestorKey += "/" + unixIdentity(&dst, "").keyFull()
 		fd = next
@@ -96,22 +95,44 @@ func validateFile(r *capturedRoot, raw string, maxBytes uint64) (FileDescriptorV
 	leaf, e := unix.Openat(fd, parts[len(parts)-1], unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	unix.Close(fd)
 	if e != nil {
-		return FileDescriptorV1{}, classifyUnixPathFailure(leafPath)
+		return -1, leafInfo{}, classifyUnixPathFailure(leafPath)
 	}
-	defer unix.Close(leaf)
 	var st unix.Stat_t
 	if unix.Fstat(leaf, &st) != nil {
-		return FileDescriptorV1{}, errors.New("unreadable")
+		unix.Close(leaf)
+		return -1, leafInfo{}, errors.New("unreadable")
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		return FileDescriptorV1{}, errors.New("not_regular")
+		unix.Close(leaf)
+		return -1, leafInfo{}, errors.New("not_regular")
 	}
 	if st.Mode&0o444 == 0 {
-		return FileDescriptorV1{}, errors.New("unreadable")
+		unix.Close(leaf)
+		return -1, leafInfo{}, errors.New("unreadable")
 	}
 	if st.Size == 0 {
-		return FileDescriptorV1{}, errors.New("empty")
+		unix.Close(leaf)
+		return -1, leafInfo{}, errors.New("empty")
 	}
+	return leaf, leafInfo{abs: abs, rel: filepath.ToSlash(rel), ancestorKey: ancestorKey, stat: st}, nil
+}
+
+// leafInfo is the per-platform result of resolving a leaf safely.
+type leafInfo struct {
+	abs, rel, ancestorKey string
+	stat                  unix.Stat_t
+}
+
+// validateFile resolves the leaf, caps its size, sniffs a bounded prefix for
+// the content kind, and re-fstats to prove the file did not change between
+// the first stat and the read (TOCTOU).
+func validateFile(r *capturedRoot, raw string, maxBytes uint64) (FileDescriptorV1, error) {
+	leaf, info, e := openLeaf(r, raw)
+	if e != nil {
+		return FileDescriptorV1{}, e
+	}
+	defer unix.Close(leaf)
+	st := info.stat
 	if uint64(st.Size) > maxBytes {
 		return FileDescriptorV1{}, errors.New("too_large")
 	}
@@ -125,8 +146,41 @@ func validateFile(r *capturedRoot, raw string, maxBytes uint64) (FileDescriptorV
 	if unix.Fstat(leaf, &after) != nil || unixIdentity(&st, "") != unixIdentity(&after, "") {
 		return FileDescriptorV1{}, errors.New("changed")
 	}
-	id := unixIdentity(&st, ancestorKey)
-	return FileDescriptorV1{absolute: abs, display: filepath.ToSlash(rel), Kind: kind, Format: format, Size: uint64(st.Size), limit: maxBytes, identity: id, root: r}, nil
+	id := unixIdentity(&st, info.ancestorKey)
+	return FileDescriptorV1{absolute: info.abs, display: info.rel, Kind: kind, Format: format, Size: uint64(st.Size), limit: maxBytes, identity: id, root: r}, nil
+}
+
+// readValidated re-resolves the descriptor's leaf through the same
+// symlink-refusing walk, requires the file object to still be the exact one
+// that was validated, reads the whole file, and re-fstats afterwards so a
+// write that raced the read is caught.
+func readValidated(r *capturedRoot, d *FileDescriptorV1) ([]byte, error) {
+	leaf, info, e := openLeaf(r, d.absolute)
+	if e != nil {
+		return nil, e
+	}
+	defer unix.Close(leaf)
+	st := info.stat
+	if unixIdentity(&st, info.ancestorKey) != d.identity {
+		return nil, errors.New("changed")
+	}
+	buf := make([]byte, st.Size)
+	read := 0
+	for read < len(buf) {
+		n, err := unix.Pread(leaf, buf[read:], int64(read))
+		if err != nil {
+			return nil, errors.New("unreadable")
+		}
+		if n == 0 {
+			return nil, errors.New("changed")
+		}
+		read += n
+	}
+	var after unix.Stat_t
+	if unix.Fstat(leaf, &after) != nil || unixIdentity(&after, info.ancestorKey) != d.identity {
+		return nil, errors.New("changed")
+	}
+	return buf, nil
 }
 
 // revalidateFile re-pins the project root, then re-runs the full validation
