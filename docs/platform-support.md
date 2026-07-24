@@ -15,6 +15,7 @@ and why.
 | `plan` | ✅ | ✅ | ✅ | Planning subsystem (voyage plan validation). |
 | `open`, `ask`, `live` | ✅ | ✅ | ⚠️ | The selected runtime's CLI must be installed and authenticated. Windows: `sail` is unavailable but these dispatch commands work when the runtime CLI is present. |
 | `tell`, `feed`, `interrupt` | ✅ | ✅ | ⚠️ | Same as `ask` — depend on the local server. |
+| `show` | ✅ | ✅ | ⚠️ | Same as `ask`. File validation is platform-specific but complete on all three: `openat` + `O_NOFOLLOW` on unix, `FILE_FLAG_OPEN_REPARSE_POINT` refusal on Windows. Delivery into a running live turn needs the local server, so it shares `live`'s constraints; without one it falls back to a one-shot turn. |
 | `fanout`, `drain`, `drain-many`, `autonomous` | ✅ | ✅ | ⚠️ | Codex-native execution in this release; will follow the runtime interface migration. |
 | `sail` | ✅ | ✅ | ❌ | PID-file dispatch locks + unix signal semantics; returns a clear error on Windows. |
 | `fleet`, `ship`, `server` | ✅ | ❌ | ❌ | Fleet Commander M1-M3; unix-only because of `openat`, `O_NOFOLLOW`, `flock`. Absent from the CLI on non-unix. |
@@ -67,21 +68,30 @@ watchdog additionally programs kernel-enforced Job Object caps for
 
 | Runtime | Linux | macOS | Windows |
 |---|---|---|---|
-| `claude` (via `--runtime=claude`, honored by `ask`) | ✅ | ✅ | ✅ |
+| `claude` (via `--runtime=claude`, honored by `ask`, `show`, and live sessions) | ✅ | ✅ | ✅ |
 | `codex` (via CLI-native commands, the default) | ✅ | ✅ | ⚠️ requires codex CLI |
 | `codex` (via `env.Selector`) | ❌ | ❌ | ❌ requires `NewCodexWith` |
 
 The Claude runtime is cross-platform because it drives the Claude Code
-CLI via stdio (`claude -p --session-id --output-format stream-json`) —
-no OS-specific primitives. `ask` honors `--runtime` / config; the other
-dispatch commands are codex-native pending migration.
+CLI via stdio (`claude -p --input-format stream-json --output-format
+stream-json`) — no OS-specific primitives. `ask`, `show`, and the
+live-session surface honor `--runtime` / config; `open`, `sail`, `plan`,
+and the queue workflows are codex-native pending migration.
 
 ## Where to next
 
-- Migrate the remaining dispatch surface (`open`, `sail`, `plan`, …)
-  onto the runtime interface; `ask` landed as the first consumer. Once
-  done, the same commands work with either runtime on any platform where
-  the underlying CLI is installed.
+- Migrate the remaining dispatch surface (`open`, `sail`, `plan`, the
+  queue workflows) onto the runtime interface. `ask` landed first, then
+  `show` and the live-session surface (`live`, `tell`, `feed`,
+  `interrupt`). Once done, the same commands work with either runtime on
+  any platform where the underlying CLI is installed.
+- Wire approval mediation for the claude runtime. `ResolveApproval`
+  returns `ErrUnsupported` there today, so a claude live session cannot
+  mediate a tool-approval request; the gap is surfaced as a
+  runtime-scoped error rather than silently allowed.
+- Carry attachments on a codex mid-turn steer. Shipmates sends codex
+  steer input as text only, so `show` into a *running* codex turn
+  references images by path instead of attaching them.
 - Land the cgroup watcher adapter as a real Linux enterprise
   containment mode (currently degrades to watchdog).
 - Extract sail's dispatch-lock + signal handling into a platform

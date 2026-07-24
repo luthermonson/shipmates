@@ -102,17 +102,28 @@ Shipmates' validated plan and voyage state.
 
 ## Dispatch plane
 
-Local raster-image input is a turn-start primitive, not an attachment store.
-`ask --image` and managed live turns map validated descriptors to text-first
-app-server `localImage` inputs. Validation
-bounds count and size, verifies magic bytes, pins filesystem identity, refuses
-links and out-of-project paths, and revalidates immediately before handoff.
-Only `image_count` may enter normalized events.
+Local file input is a turn primitive, not an attachment store. `shipmates
+show` and the dashboard's image selection map validated descriptors onto the
+transport the runtime actually supports: a text-first app-server
+`localImage` input on codex, a base64 image content block on claude.
+Validation bounds count and size, sniffs content kind from the bytes rather
+than the extension, pins filesystem identity, refuses links and
+out-of-project paths, and revalidates immediately before handoff. Only
+`image_count` may enter normalized events — never a path, a name, or file
+content.
 
-There is no upload endpoint, inbox, attachment ID, URL fetch, byte transport,
-thumbnail, retention state, remote image capability, or mid-turn image
-steering. Dashboard selection exists only in the attached local controller and
-applies atomically to its next exact idle turn.
+Non-image files never reach a runtime as opaque bytes. Text is inlined into
+the turn text, bounded and truncated with a notice; binary files, including
+PDFs, are referenced by project-relative path with size and detected kind so
+the agent reads them with its own file tool. Nothing arbitrary is
+base64-encoded into a prompt.
+
+Attachments may now be injected into an already-running turn (`show` into a
+live session), which is a turn-scoped message on the exact captured tuple —
+not an upload. There is still no upload endpoint, inbox, attachment ID, URL
+fetch, byte transport, thumbnail, retention state, or remote image
+capability. Dashboard selection exists only in the attached local controller
+and applies atomically to its next exact idle turn.
 
 Synchronous `ask`, `fanout`, and drain operations load the installed persona,
 validate its immutable policy snapshot, and use the managed Codex app-server
@@ -122,17 +133,31 @@ resume the same Codex thread. `--fresh` creates a new one.
 
 ## Live control plane
 
-`live` and `open` use a managed `codex app-server --stdio` child. The adapter
-accepts bounded protocol frames and projects them into closed event categories;
-raw prompts, tool payloads, credentials, and unrestricted diagnostics are not
-published.
+`live` and `open` run on whichever runtime the project resolves to. The
+live-session owner talks to a narrow `Backend` seam: `codexapp.Adapter`
+satisfies it directly (a managed `codex app-server --stdio` child), and a
+runtime-backed adapter satisfies it for any `runtime.Runtime` — claude
+today, driven as a persistent `claude -p --input-format stream-json`
+session. Either way the adapter accepts bounded protocol frames and projects
+them into closed event categories; raw prompts, tool payloads, credentials,
+and unrestricted diagnostics are not published.
+
+Identity is mapped, not reinvented. Codex is thread+turn and claude is
+session+turn; both land on the existing (session, thread, turn) tuple with
+the runtime session id in the thread slot, so exact-turn targeting on `tell`
+and `interrupt` behaves identically on both — a stale tuple fails closed and
+is never redirected. Capability gaps are surfaced rather than faked: a
+runtime that does not report steer, interrupt or attachments answers with a
+runtime-scoped error and the call never reaches the transport. Each runtime
+keeps its own live continuity marker, so a runtime switch cannot resume the
+other one's thread.
 
 The local server binds an ephemeral loopback address. Its supported routes are:
 
 - lifecycle: `GET /health`, authenticated `POST /shutdown`;
 - controller: `POST /api/live/{persona}` with `attach`, `release`, `heartbeat`,
-  `sync`, `action`, `approval`, `tell`, and `interrupt` operations, plus the
-  authenticated feed; and
+  `sync`, `action`, `approval`, `tell`, `show`, and `interrupt` operations,
+  plus the authenticated feed; and
 - exact local Fleet adapters for already-active steer and interrupt targets.
 
 Controller attachment is a lease, not a bearer permission to arbitrary state.

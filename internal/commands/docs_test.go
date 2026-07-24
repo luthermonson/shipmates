@@ -14,7 +14,7 @@ func TestPublicCommandsAreDocumented(t *testing.T) {
 
 	commands := []string{
 		"init", "policy", "add", "list", "remove", "update", "render",
-		"routing", "open", "ask", "live", "tell", "feed", "interrupt",
+		"routing", "open", "ask", "live", "tell", "show", "feed", "interrupt",
 		"fanout", "drain", "drain-many", "autonomous", "plan", "sail", "fleet", "server", "ship",
 	}
 	for _, command := range commands {

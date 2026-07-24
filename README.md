@@ -97,6 +97,7 @@ shipmates open backend
 shipmates live backend "Investigate the failure."
 shipmates feed backend --follow
 shipmates tell backend SESSION THREAD TURN "Check the edge case."
+shipmates show backend ./screenshot.png --caption "This is the broken layout."
 shipmates interrupt backend SESSION THREAD TURN
 
 shipmates plan
@@ -137,11 +138,15 @@ shipmates beads ready --json
 ## Runtime boundaries
 
 On the codex path, `ask`, queue workflows, `live`, and `open` use the managed
-Codex app-server boundary. Local images are existing, validated PNG/JPEG/GIF/WebP files inside
-the project and are passed only to the starting turn. Fleet observes bounded
-state and can steer or interrupt one exact active turn with separate
-capabilities. Fleet cannot start work, approve requests, upload files, open
-terminals, or run generic commands.
+Codex app-server boundary; selecting the claude runtime routes `ask`, `live`,
+`tell`, `feed`, `interrupt`, and `show` through the runtime interface
+instead. Attachments are existing, validated files inside the project:
+`shipmates show` passes images to the turn natively, inlines text bounded
+and truncated with a notice, and references binary files by path rather than
+base64-encoding them into a prompt. Fleet observes bounded state and can
+steer or interrupt one exact active turn with separate capabilities. Fleet
+cannot start work, approve requests, upload files, open terminals, or run
+generic commands.
 
 ## Documentation map
 

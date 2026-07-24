@@ -67,10 +67,19 @@ Notes:
   [Runtime interface plan](runtime-interface-plan.md).
 
 The command surface is being migrated onto the runtime interface
-incrementally: `ask` honors `--runtime` / `SHIPMATES_RUNTIME` / the
-`runtime:` config key (resolving `claude` dispatches the turn through the
-runtime interface; resolving `codex` uses the codex-native dispatcher
-unchanged). All other commands are codex-native pending migration.
+incrementally. Honoring `--runtime` / `SHIPMATES_RUNTIME` / the `runtime:`
+config key today: `ask`, `show`, and the live-session surface (`live`,
+`tell`, `feed`, `interrupt`, and the `show`-into-a-live-turn path).
+Resolving `claude` routes through the runtime interface; resolving `codex`
+uses the codex-native transport unchanged. `open`, `sail`, `plan`, `fanout`,
+`drain`, `drain-many`, and `autonomous` are still codex-native.
+
+Live sessions have one wrinkle: the coordination server is a separate
+process, so the client-side `--runtime` flag on `shipmates live` does not
+reach it. The server resolves its own runtime from `SHIPMATES_RUNTIME` in
+its environment and from `.shipmates/config.yaml`. Each runtime keeps a
+separate live continuity marker under `.shipmates/sessions/`, so switching
+runtimes starts a fresh thread rather than resuming the other runtime's.
 
 ## Runtime assets
 

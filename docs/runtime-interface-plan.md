@@ -164,14 +164,34 @@ Each phase ships independently.
       gating of Sail + Fleet Commander M1-M3 instead — see
       [`docs/platform-support.md`](platform-support.md).)
 - [~] **Phase 6 (in progress)**: migrate the dispatch commands onto
-      `env.Selector` / `factory.NewFromResolved`. **`ask` landed as the
-      first consumer**: it resolves the runtime via the Selector,
-      dispatches through the runtime interface when the selection is
-      claude (with session persistence in
-      `.shipmates/sessions/<persona>.claude.session`), and falls back to
-      the codex-native dispatcher when the selection is codex (the
-      default). Remaining: `open`, `live`, `feed`, `tell`, `interrupt` —
-      those still call the codex-native dispatcher directly.
+      `env.Selector` / `factory.NewFromResolved`.
+      - `ask` landed first: it resolves the runtime via the Selector,
+        dispatches through the runtime interface when the selection is
+        claude (with session persistence in
+        `.shipmates/sessions/<persona>.claude.session`), and falls back
+        to the codex-native dispatcher when the selection is codex (the
+        default).
+      - `show` (restored, all-file) uses the same routing, and adds
+        attachment delivery: images natively, text inlined and bounded,
+        binary referenced by path.
+      - **The live-session surface landed**: `internal/livesession` now
+        consumes `runtime.Runtime` through a narrow `Backend` seam that
+        `*codexapp.Adapter` satisfies structurally (so the codex path is
+        unchanged) and a `runtimeBackend` adapter satisfies for any
+        `runtime.Runtime`. `live`, `tell`, `feed`, `interrupt`, and
+        `show`-into-a-running-turn therefore work on claude. Codex is
+        thread+turn and claude is session+turn; both map onto the
+        existing (session, thread, turn) tuple with the runtime session
+        id in the thread slot, so exact-turn targeting is preserved
+        verbatim. Continuity markers are per-backend.
+      - Known gaps on the claude live path: `ResolveApproval` returns
+        `ErrUnsupported` (approval mediation is Phase 4 hook plumbing),
+        and no claude event maps to `KindApprovalNeeded` yet, so an
+        approval-needing tool call cannot be mediated there.
+      - Remaining: `open` (the terminal dashboard) still assumes the
+        codex-native controller surface, and the queue workflows
+        (`fanout`, `drain`, `drain-many`, `autonomous`) plus `sail` and
+        `plan` still call the codex-native dispatcher directly.
 - [ ] **Phase 7**: migrate Sail + Fleet onto the interface, once the
       unix-only dependencies (PID-file dispatch locks, `openat`,
       `flock`, `/proc`) are abstracted; see
@@ -180,7 +200,12 @@ Each phase ships independently.
 ## Non-goals
 
 - Perfect API parity between Codex and Claude. Some capabilities (e.g.
-  Refusal) may return `not supported` on Claude. That's fine. (Steer and
-  Interrupt landed on Claude via the persistent stream-json transport.)
+  Refusal, ResolveApproval) return `not supported` on Claude. That's
+  fine — the gap is surfaced as a runtime-scoped error, never faked or
+  silently no-opped. (Steer, Interrupt, and Attachments landed on Claude
+  via the persistent stream-json transport.) Symmetrically, shipmates
+  sends codex mid-turn steer input as text only, so a `show` into a
+  running codex turn references images by path instead of attaching
+  them.
 - Runtime auto-switching mid-session. Config-time selection is enough.
 - Cross-runtime session migration. Sessions are runtime-scoped.

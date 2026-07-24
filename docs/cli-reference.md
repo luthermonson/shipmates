@@ -99,14 +99,12 @@ honors `--runtime` / `SHIPMATES_RUNTIME` / the `runtime:` config key:
 resolving `claude` dispatches through the runtime interface (session ids
 persist to `.shipmates/sessions/<persona>.claude.session` so later asks
 resume), resolving `codex` — the default — uses the codex-native path
-unchanged. `--fresh` starts a new session/thread, `--timeout <duration>`
-bounds it, and repeatable `--image <path>` flags attach validated
-project-local raster images (codex path only for now; the claude path
-rejects `--image` until attachments are wired).
+unchanged. `--fresh` starts a new session/thread and `--timeout
+<duration>` bounds it. `--image` was removed; use
+`shipmates show` (below), which attaches any file on either runtime.
 
 ```bash
 shipmates ask security --timeout 15m 'Review the current diff.'
-shipmates ask frontend --image ./screen.png 'Check this layout.'
 ```
 
 Only the final response is written to stdout. Cancellation and timeout reap the
@@ -184,9 +182,19 @@ lease. `--plain` supports constrained terminals and logs.
 
 ### `shipmates live <persona> <prompt>`
 
-Starts a managed Codex app-server turn and reports session, thread, and turn
-identifiers. It accepts `--fresh` and repeatable `--image` flags. This
-command is codex-native today.
+Starts a managed live turn and reports session, thread, and turn
+identifiers. It accepts `--fresh`. `--image` was removed; use
+`shipmates show` (below).
+
+The live session runs on whichever runtime the project resolves to. Because
+the coordination server is a separate process, the client-side `--runtime`
+flag does not reach it: set `SHIPMATES_RUNTIME` in the server's environment
+or `runtime:` in `.shipmates/config.yaml`. On codex the transport is the
+app-server thread; on claude it is a persistent `claude -p
+--input-format stream-json` session, with the runtime session id occupying
+the thread slot of the session/thread/turn tuple. Each runtime keeps its own
+live continuity marker, so switching runtimes never resumes the other one's
+thread.
 
 ### `shipmates feed <persona> [--follow] [--after <sequence>]`
 
@@ -196,7 +204,45 @@ after a known sequence.
 ### `shipmates tell <persona> <session> <thread> <turn> <message>`
 
 Steers one exact active turn with text. A stale tuple fails closed and is never
-redirected to newer work.
+redirected to newer work. Works on both runtimes; a runtime that does not
+report the steer capability refuses with a runtime-scoped error rather than
+silently dropping the message.
+
+### `shipmates show <persona> <file-path>... [--caption <text>]`
+
+Attaches one or more in-project files to a persona. Any file works —
+screenshot, log, diff, PDF, source file — not just images. Repeat the path
+argument to send several at once (up to 8 per batch).
+
+Delivery depends on what the persona is doing:
+
+- **A turn is already running** — the attachment is injected into that
+  turn, so the crew member sees it without waiting for the turn to end.
+- **The live session is idle** — it starts a new turn on that session.
+- **No live session (or no server)** — it dispatches a one-shot turn, the
+  same shape `ask` produces. `--fresh` and `--timeout` apply to that case.
+
+How each file travels depends on what it is, sniffed from the bytes rather
+than the extension:
+
+| Detected kind | How it is delivered |
+| --- | --- |
+| Image (PNG, JPEG, GIF, WebP) | Attached to the turn natively: a `localImage` input on a codex turn, a base64 image content block on claude. The one exception is a **codex mid-turn** injection — shipmates only sends codex steer input as text, so images are referenced by project-relative path there instead, and the message says so. |
+| Text (valid UTF-8, no NUL bytes) | Inlined into the turn text, bounded at 64 KiB per file and 128 KiB per batch, with an explicit truncation notice naming the path. |
+| Binary (everything else, including PDFs and archives) | **Never** base64-encoded into the prompt. Referenced by project-relative path with its size and detected kind, so the agent reads it with its own file tool. |
+
+Validation is the same on every path: confined to the project root,
+symlinks and Windows reparse points refused, regular files only, size-capped
+(20 MiB per image, 10 MiB per other file, 64 MiB per batch), and revalidated
+immediately before the bytes are read, so a file swapped after validation is
+refused rather than sent. When a server is running it revalidates every path
+against its own project root — the client's check is for error messages, not
+authority.
+
+```bash
+shipmates show frontend ./screenshot.png --caption 'The layout breaks here.'
+shipmates show security ./build.log ./patch.diff
+```
 
 ### `shipmates interrupt <persona> <session> <thread> <turn>`
 

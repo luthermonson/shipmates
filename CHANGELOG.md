@@ -38,6 +38,30 @@ All notable changes to Shipmates are documented here. This project follows
   macOS uses `Setpgid` + a `ps` subprocess for RSS/CPU (malformed `ps`
   output now surfaces as a skipped, logged sample instead of a silent
   0.0).
+- **`shipmates show <persona> <file-path>... [--caption <text>]`.**
+  Restored from v0.4.0 and reimplemented for all files, not just images.
+  Attaches an in-project file — screenshot, log, diff, PDF, source — to a
+  persona. If the persona has a turn in flight the file is injected into
+  that running turn; if its live session is idle it starts a turn there;
+  with no live session it dispatches a one-shot turn. Works on both
+  runtimes.
+- **Attachment handling by detected kind.** Content kind is sniffed from
+  a bounded prefix of the bytes, never from the extension. Images
+  (PNG/JPEG/GIF/WebP) ride natively — a `localImage` input on a codex
+  turn, a base64 image content block on claude. Text (valid UTF-8, no
+  NUL) is inlined into the turn text, bounded at 64 KiB per file and
+  128 KiB per batch with an explicit truncation notice. Binary files,
+  including PDFs and archives, are **never** base64-encoded into a
+  prompt: they are referenced by project-relative path with size and
+  detected kind so the agent reads them with its own file tool.
+- **`live` works on the claude runtime.** `internal/livesession` now
+  consumes `runtime.Runtime` through a narrow `Backend` seam, so `live`,
+  `tell`, `feed`, `interrupt`, and `show` all work on either runtime.
+  Codex is thread+turn and claude is session+turn; both map onto the
+  existing (session, thread, turn) tuple with the runtime session id in
+  the thread slot, so exact-turn targeting on `tell` and `interrupt` is
+  preserved unchanged — a stale tuple still fails closed. Each runtime
+  keeps its own live continuity marker.
 - **`--runtime` CLI flag** and `runtime:` config block. Precedence:
   CLI flag > project `.shipmates/config.yaml` > user
   `~/.shipmates/config.yaml` > default (`codex`). `ask` honors the
@@ -52,6 +76,16 @@ All notable changes to Shipmates are documented here. This project follows
 
 ### Changed
 
+- **`internal/turninput` validates arbitrary files, not just images.**
+  `FileDescriptorV1` carries a sniffed kind (image/text/binary) alongside
+  the existing absolute path, project-relative display path, size and
+  content identity; `ImageDescriptorV1` and `ImageBatchV1` remain as
+  aliases. Every security property is unchanged on both platform
+  implementations: project-root confinement, `openat` + `O_NOFOLLOW` on
+  unix, `FILE_FLAG_OPEN_REPARSE_POINT` refusal on Windows, regular-file
+  checks, size caps (20 MiB per image, 10 MiB per other file, 64 MiB per
+  batch), and TOCTOU revalidation. Reads go through
+  `FileDescriptorV1.Bytes`, which revalidates before and after the read.
 - **Cross-platform build.** Shipmates now compiles on Linux, macOS, and
   Windows; the release workflow ships binaries for all three
   (`amd64` + `arm64` each). Prior to this release, the release workflow
@@ -65,6 +99,16 @@ All notable changes to Shipmates are documented here. This project follows
   executor depends on PID-file dispatch locks and unix signal semantics.
   Rather than hang, `shipmates sail` on Windows reports the platform
   limitation and points to the issue tracker.
+
+### Removed
+
+- **`--image` on `ask` and `live`.** Superseded by `shipmates show`,
+  which takes any file rather than only PNG/JPEG/GIF/WebP and works on
+  both runtimes rather than the codex path only. The flag is still
+  parsed but hidden, so typing it produces an error pointing at `show`
+  rather than urfave/cli's bare "flag provided but not defined"; no turn
+  is dispatched. `live` no longer forwards an `images` array to the
+  coordination server.
 
 ### CI
 
@@ -94,6 +138,9 @@ All notable changes to Shipmates are documented here. This project follows
 - `TestSailCancellationReturnsTaskToPending` no longer hangs the
   Windows test suite; the sail tests are gated `//go:build unix` to
   match the underlying subsystem.
+- Windows attachment revalidation no longer double-closes a file handle.
+  It wrapped the raw handle in an `os.File` and then closed both, which
+  could close an unrelated handle the OS had already reused.
 
 ### Documentation
 
@@ -113,8 +160,20 @@ All notable changes to Shipmates are documented here. This project follows
   `runtime: codex`), by `~/.shipmates/config.yaml`, or by the global
   `--runtime <name>` CLI flag / `SHIPMATES_RUNTIME` env var. Precedence:
   CLI flag > project > user > default (`codex`).
-- **`ask` honors `--runtime` / config; other commands are codex-native
-  pending migration.** When the selection resolves to `claude`,
+- **The live-session server resolves its own runtime.** It is a separate
+  process, so the client-side `--runtime` flag on `shipmates live` does
+  not reach it: set `SHIPMATES_RUNTIME` in the server's environment or
+  `runtime:` in `.shipmates/config.yaml`.
+- **Known gaps on the claude live path.** `ResolveApproval` returns
+  `ErrUnsupported`, so a claude live session cannot mediate a
+  tool-approval request; the gap surfaces as a runtime-scoped error
+  rather than being silently allowed. Shipmates also sends codex
+  mid-turn steer input as text only, so `show` into a *running* codex
+  turn references images by project-relative path instead of attaching
+  them (a codex turn started by `show` attaches them natively).
+- **`ask`, `show`, and the live-session surface honor `--runtime` /
+  config; `open`, `sail`, `plan` and the queue workflows are
+  codex-native pending migration.** When the selection resolves to `claude`,
   `shipmates ask` dispatches the turn through the runtime interface
   (StartSession/ResumeSession → SendTurn → streamed events) and persists
   the claude session id under

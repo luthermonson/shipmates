@@ -117,15 +117,31 @@ There is no generic terminal, file upload, arbitrary hook, graph mutation,
 credential manager, or catch-all process execution endpoint. Loopback is not a
 substitute for request authentication.
 
-## Image input
+## File input
 
-Images are accepted only at local turn start. They must be regular PNG, JPEG,
-GIF, or WebP files inside the canonical project root. Shipmates bounds count and
-size, rejects links and escape, checks magic bytes, pins filesystem identity,
-and revalidates before handoff.
+Attachments are accepted only from the local filesystem, only inside the
+canonical project root, and only as regular files. Shipmates bounds count
+(8 per batch) and size (20 MiB per image, 10 MiB per other file, 64 MiB per
+batch), rejects symlinks, Windows reparse points, and path escape, pins
+filesystem identity, and revalidates immediately before the bytes are read —
+so a file swapped between validation and use is refused rather than sent.
 
-There is no URL fetch, attachment store, remote image capability, arbitrary file
-input, or mid-turn image steering. Events may report only image count.
+Content kind is sniffed from a bounded prefix of the bytes, never inferred
+from the extension. Images are recognized by magic bytes; text is valid
+UTF-8 with no NUL in that prefix; everything else is binary. Binary files are
+never base64-encoded into a prompt — they are referenced by project-relative
+path with size and detected kind, so an arbitrary byte stream never enters
+the model context. Inlined text is bounded and truncated with a notice.
+
+`shipmates show` may inject an attachment into an already-running turn. That
+is a turn-scoped message on the exact tuple captured under the session lock,
+so it cannot land on a different turn than the one observed. There is still
+no URL fetch, attachment store, upload endpoint, or remote image capability.
+Events may report only image count — never a path, a name, or content.
+
+When a coordination server is running it revalidates every supplied path
+against its own project root before reading a byte; the client's validation
+exists to produce good error messages and carries no authority.
 
 ## Fleet separation
 
