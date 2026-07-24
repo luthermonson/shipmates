@@ -143,10 +143,11 @@ go vet ./...
 gofmt -l .
 ```
 
-The decisive codex-native smoke check (`shipmates ask` today dispatches
-through the codex path regardless of `--runtime`; that will change as the
-runtime interface migration lands — see
-[Runtime interface plan](runtime-interface-plan.md)):
+The decisive codex-native smoke check (`shipmates ask` honors
+`--runtime` / config: resolving `claude` dispatches through the runtime
+interface, while the default `codex` selection — used below — takes the
+codex-native path; other commands are codex-native pending migration —
+see [Runtime interface plan](runtime-interface-plan.md)):
 
 ```bash
 tmp=$(mktemp -d)

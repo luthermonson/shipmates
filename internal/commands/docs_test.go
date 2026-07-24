@@ -24,7 +24,12 @@ func TestPublicCommandsAreDocumented(t *testing.T) {
 	}
 }
 
-func TestDocumentationSetAndCodexOnlyLanguage(t *testing.T) {
+// TestDocumentationSet verifies the core documentation set exists and is
+// readable. The codex-adaptation era additionally banned "claude"/
+// "anthropic" language here; that ban is retired on purpose — the runtime
+// interface makes Claude Code a first-class peer runtime again, and the
+// docs describe both runtimes.
+func TestDocumentationSet(t *testing.T) {
 	root := documentationRoot(t)
 	files := []string{
 		"README.md",
@@ -38,14 +43,13 @@ func TestDocumentationSetAndCodexOnlyLanguage(t *testing.T) {
 		"docs/fleet-architecture.md",
 		"docs/diagrams.md",
 		"docs/PHILOSOPHY.md",
+		"docs/platform-support.md",
+		"docs/runtime-interface-plan.md",
 	}
 
 	for _, name := range files {
-		body := strings.ToLower(readDocumentation(t, filepath.Join(root, name)))
-		for _, removed := range []string{"anthropic", "claude"} {
-			if strings.Contains(body, removed) {
-				t.Errorf("%s contains removed product language %q", name, removed)
-			}
+		if body := readDocumentation(t, filepath.Join(root, name)); len(strings.TrimSpace(body)) == 0 {
+			t.Errorf("%s is empty", name)
 		}
 	}
 }

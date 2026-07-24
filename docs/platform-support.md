@@ -54,28 +54,34 @@ PID-file dispatch locks + signal semantics not yet ported to Windows
 
 ### Cgroup containment mode
 
-The `cgroup` containment mode is Linux-only. On other platforms
-selecting `containment: mode: cgroup` in config transparently degrades
-to `watchdog`, so operators who opted-in optimistically still get
-bounded processes.
+The cgroup watcher adapter is not implemented yet, so selecting
+`containment: mode: cgroup` in config degrades to `watchdog` on every
+platform and logs a warning
+(`containment mode cgroup requested; cgroup adapter not yet implemented,
+degrading to watchdog`), so operators who opted-in optimistically still
+get bounded processes and can see the weaker posture. On Windows the
+watchdog additionally programs kernel-enforced Job Object caps for
+`memory_limit_mb` and `max_processes`.
 
 ## Runtime × platform matrix
 
 | Runtime | Linux | macOS | Windows |
 |---|---|---|---|
-| `claude` (via `--runtime=claude`) | ✅ | ✅ | ✅ |
-| `codex` (via CLI-native commands) | ✅ | ✅ | ⚠️ requires codex CLI |
+| `claude` (via `--runtime=claude`, honored by `ask`) | ✅ | ✅ | ✅ |
+| `codex` (via CLI-native commands, the default) | ✅ | ✅ | ⚠️ requires codex CLI |
 | `codex` (via `env.Selector`) | ❌ | ❌ | ❌ requires `NewCodexWith` |
 
 The Claude runtime is cross-platform because it drives the Claude Code
 CLI via stdio (`claude -p --session-id --output-format stream-json`) —
-no OS-specific primitives.
+no OS-specific primitives. `ask` honors `--runtime` / config; the other
+dispatch commands are codex-native pending migration.
 
 ## Where to next
 
-- Migrate `ask`, `open`, `sail`, `plan` command surface onto the runtime
-  interface. Once done, the same commands work with either runtime on
-  any platform where the underlying CLI is installed.
+- Migrate the remaining dispatch surface (`open`, `sail`, `plan`, …)
+  onto the runtime interface; `ask` landed as the first consumer. Once
+  done, the same commands work with either runtime on any platform where
+  the underlying CLI is installed.
 - Land the cgroup watcher adapter as a real Linux enterprise
   containment mode (currently degrades to watchdog).
 - Extract sail's dispatch-lock + signal handling into a platform
@@ -83,3 +89,9 @@ no OS-specific primitives.
   primitive (e.g. `LockFileEx`).
 - Design a Windows/macOS equivalent for the delegation mailbox to
   unlock Fleet Commander (M1-M3) on those platforms.
+- Shrink the Windows CI exclusion list in
+  `.github/workflows/test.yml`: gate unix-only test files with build
+  tags (dashboard, delegation, fleetcommandermailbox, fleetconfig,
+  installer) and port the suites that assume unix permission/fsync/
+  daemon semantics (client, codexapp, fleetidentity, fleetinterrupt,
+  livesession, project, recovery, server, voyage).

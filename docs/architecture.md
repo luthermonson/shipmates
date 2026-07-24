@@ -8,10 +8,12 @@ product consists of six deliberately separate planes.
 
 **Runtime scope.** The `internal/runtime` package defines a shared
 interface with `claude` and `codex` implementations, selected by
-`.shipmates/config.yaml` / `--runtime`. In this release the production
-command surface (`ask`, `open`, `live`, `feed`, `tell`, `interrupt`,
-`sail`, `fleet`, `ship`, `server`) still dispatches through the
-codex-native code path — the sections below describe that path.
+`.shipmates/config.yaml` / `--runtime`. `ask` honors that selection —
+resolving `claude` dispatches the turn through the runtime interface,
+resolving `codex` (the default) uses the codex-native dispatcher. The
+rest of the production command surface (`open`, `live`, `feed`, `tell`,
+`interrupt`, `sail`, `fleet`, `ship`, `server`) is codex-native pending
+migration — the sections below describe that path.
 See [Runtime interface plan](runtime-interface-plan.md) for the
 migration onto the runtime interface, and
 [Platform support](platform-support.md) for what runs where.

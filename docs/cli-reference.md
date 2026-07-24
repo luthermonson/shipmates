@@ -22,15 +22,16 @@ The following flags apply to every subcommand:
   `codex`. Overrides `.shipmates/config.yaml` and `~/.shipmates/config.yaml`.
   Also readable from the `SHIPMATES_RUNTIME` environment variable.
 
-The default when nothing is set is `claude`. Precedence is:
+The default when nothing is set is `codex`. Precedence is:
 `--runtime` (or `SHIPMATES_RUNTIME`) > project `.shipmates/config.yaml` >
 user `~/.shipmates/config.yaml` > built-in default.
 
 The runtime interface lives in `internal/runtime` and is wired through
-`internal/runtime/factory`. The individual commands below are being
-migrated onto that interface incrementally; in this release the codex-
-native command path remains the production dispatch path, and the
-sections that describe Codex behavior below apply to that path. See
+`internal/runtime/factory`. `ask` honors `--runtime` / config: resolving
+`claude` dispatches the turn through the runtime interface, and resolving
+`codex` uses the codex-native dispatcher unchanged. All other commands
+are codex-native pending migration, and the sections that describe Codex
+behavior below apply to that path. See
 [Runtime interface plan](runtime-interface-plan.md).
 
 ## Runtime installation
@@ -93,10 +94,15 @@ the result is printed. Export targets do not become runtime authority.
 
 ### `shipmates ask <persona> <prompt>`
 
-Runs one synchronous persona turn against the configured runtime (currently
-the codex-native path in this release). `--fresh` starts a new thread,
-`--timeout <duration>` bounds it, and repeatable `--image <path>` flags attach
-validated project-local raster images.
+Runs one synchronous persona turn against the configured runtime. `ask`
+honors `--runtime` / `SHIPMATES_RUNTIME` / the `runtime:` config key:
+resolving `claude` dispatches through the runtime interface (session ids
+persist to `.shipmates/sessions/<persona>.claude.session` so later asks
+resume), resolving `codex` — the default — uses the codex-native path
+unchanged. `--fresh` starts a new session/thread, `--timeout <duration>`
+bounds it, and repeatable `--image <path>` flags attach validated
+project-local raster images (codex path only for now; the claude path
+rejects `--image` until attachments are wired).
 
 ```bash
 shipmates ask security --timeout 15m 'Review the current diff.'

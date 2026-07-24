@@ -1,11 +1,13 @@
 # Runtime interface plan
 
-Owner: @luthermonson · Started: 2026-07-23 · Status: Phase 3 landed
-in [PR #14](https://github.com/luthermonson/shipmates/pull/14) — the
-`runtime` interface, both `claude` and `codex` adapters, the containment
-watcher, the config loader (`.shipmates/config.yaml`), the factory, and
-the global `--runtime` CLI flag are on `feat/runtime-interface`. The
-command surface migration (Phase 4+) is not yet done.
+Owner: @luthermonson · Started: 2026-07-23 · Status: Phase 3 landed,
+Phase 6 started, in [PR #14](https://github.com/luthermonson/shipmates/pull/14)
+— the `runtime` interface, both `claude` and `codex` adapters, the
+containment watcher, the config loader (`.shipmates/config.yaml`), the
+factory, and the global `--runtime` CLI flag are on
+`feat/runtime-interface`, and `ask` is the first command dispatching
+through the Selector. The rest of the command surface migration
+(Phase 4+) is not yet done.
 
 ## Why this exists
 
@@ -87,7 +89,7 @@ Project-level `.shipmates/config.yaml`, user-level `~/.shipmates/config.yaml`
 fallback. `--runtime` CLI flag overrides both.
 
 ```yaml
-runtime: claude   # default; users flip to codex per project
+runtime: claude   # built-in default is codex; set claude per project to opt in
 
 runtimes:
   claude:
@@ -161,11 +163,15 @@ Each phase ships independently.
       build achieved by the release workflow via `//go:build unix`
       gating of Sail + Fleet Commander M1-M3 instead — see
       [`docs/platform-support.md`](platform-support.md).)
-- [ ] **Phase 6**: migrate the dispatch commands (`ask`, `open`, `live`,
-      `feed`, `tell`, `interrupt`) onto `env.Selector` /
-      `factory.NewFromResolved`, so `--runtime claude` actually flips
-      the runtime that a `shipmates ask` turn runs on. Today those
-      commands still call the codex-native dispatcher directly.
+- [~] **Phase 6 (in progress)**: migrate the dispatch commands onto
+      `env.Selector` / `factory.NewFromResolved`. **`ask` landed as the
+      first consumer**: it resolves the runtime via the Selector,
+      dispatches through the runtime interface when the selection is
+      claude (with session persistence in
+      `.shipmates/sessions/<persona>.claude.session`), and falls back to
+      the codex-native dispatcher when the selection is codex (the
+      default). Remaining: `open`, `live`, `feed`, `tell`, `interrupt` —
+      those still call the codex-native dispatcher directly.
 - [ ] **Phase 7**: migrate Sail + Fleet onto the interface, once the
       unix-only dependencies (PID-file dispatch locks, `openat`,
       `flock`, `/proc`) are abstracted; see

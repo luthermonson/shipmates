@@ -99,7 +99,9 @@ runtime: claude   # or codex; overridden by --runtime / SHIPMATES_RUNTIME
 ```
 
 The base `Resolve` precedence is: `--runtime` flag > project > user
-(`~/.shipmates/config.yaml`) > default (`claude`).
+(`~/.shipmates/config.yaml`) > default (`codex`). `ask` honors this
+selection (resolving `claude` dispatches through the runtime interface);
+all other commands are codex-native pending migration.
 
 Memory is copied only when missing. Managed edits are preserved and update
 conflicts require an explicit choice. Beads is not required; initialize the

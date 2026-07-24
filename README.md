@@ -7,12 +7,13 @@ dashboard, and narrow authenticated Fleet observation and exact-turn control.
 
 The runtime is selectable per-project via `.shipmates/config.yaml`
 (`runtime: claude` or `runtime: codex`) or per-invocation with `--runtime`
-(env `SHIPMATES_RUNTIME`). The `runtime` interface, config loader, and both
-runtime adapters ship in this release; the individual command surface
-(`ask`, `open`, `sail`, `plan`, …) is being migrated onto that interface
-incrementally. Today the codex-native command path remains the production
-dispatch path; the claude runtime is available in-package and via the
-factory. See [`docs/runtime-interface-plan.md`](docs/runtime-interface-plan.md)
+(env `SHIPMATES_RUNTIME`); the built-in default is `codex`. The `runtime`
+interface, config loader, and both runtime adapters ship in this release,
+and `ask` honors the selection: resolving `claude` dispatches the turn
+through the runtime interface, resolving `codex` uses the codex-native
+dispatcher. The rest of the command surface (`open`, `sail`, `plan`, …)
+is codex-native pending migration. See
+[`docs/runtime-interface-plan.md`](docs/runtime-interface-plan.md)
 and [`docs/platform-support.md`](docs/platform-support.md) for scope.
 
 The Shipmates binary now compiles on Linux, macOS, and Windows. Codex-native
@@ -81,8 +82,10 @@ claude auth
 Initialization creates `.codex/agents/`, `.shipmates/policies/`,
 `.shipmates/memory/`, `.shipmates/manifest.json`, and private session state.
 The claude runtime's persona installer writes `.claude/agents/<persona>.md`
-plus a `SessionStart` memory hook when driven directly through the runtime
-package; migration of `shipmates init` onto that interface is tracked in
+and wires a `SessionStart` memory hook into `.claude/settings.json` that
+runs the hidden `shipmates hook load-memory` subcommand to inject the
+persona's `.shipmates/memory/` files into each session; migration of
+`shipmates init` onto that interface is tracked in
 [`docs/runtime-interface-plan.md`](docs/runtime-interface-plan.md).
 See [Getting started](docs/getting-started.md) for the canonical setup guide.
 

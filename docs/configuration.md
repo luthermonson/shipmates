@@ -14,7 +14,8 @@ highest to lowest precedence:
 1. `--runtime <name>` CLI flag (or `SHIPMATES_RUNTIME` env var).
 2. Project `.shipmates/config.yaml` (`runtime:` key).
 3. User `~/.shipmates/config.yaml` (`runtime:` key).
-4. Built-in default: `claude`.
+4. Built-in default: `codex` (the command surface is codex-native today;
+   claude is an explicit opt-in).
 
 A minimal project override:
 
@@ -40,6 +41,8 @@ runtimes:
 containment:
   mode: watchdog            # watchdog | cgroup | none
   memory_limit_mb: 8192     # 0 = uncapped
+  cpu_limit_seconds: 0      # 0 = uncapped; enforced by the poll loop
+  max_processes: 0          # 0 = uncapped; kernel-enforced on Windows
   poll_interval_ms: 500
   graceful_timeout_ms: 2000
 ```
@@ -49,19 +52,25 @@ Notes:
 - `runtime` values are lower-cased and trimmed before comparison.
 - Runtime `settings` are taken from the *first* file that specifies them
   (project, then user) and are **not** merged.
-- `containment.mode` accepts `watchdog` (default; kernel-primitive-backed),
-  `cgroup` (Linux enterprise; currently degrades to `watchdog`), and
-  `none` (escape hatch).
+- `containment.mode` accepts `watchdog` (default; kernel-primitive-backed:
+  Windows Job Objects enforce `memory_limit_mb` and `max_processes` in the
+  kernel, the poll loop covers CPU everywhere), `cgroup` (Linux
+  enterprise), and `none` (escape hatch). The cgroup watcher adapter is
+  not implemented yet: selecting `cgroup` degrades to `watchdog` and logs
+  `containment mode cgroup requested; cgroup adapter not yet implemented,
+  degrading to watchdog` at warn level so the weaker posture is visible.
 - The `codex` runtime, when requested through `env.Selector`, returns a
   pointing `runtime.ErrNotConfigured` because the codex adapter needs
-  `codexapp.StartOptions`. Existing codex-native commands still call
-  `factory.NewCodexWith(ctx, opts)` directly. See
+  `codexapp.StartOptions`. Codex-native commands call
+  `factory.NewCodexWith(ctx, opts)` directly; `ask` treats that answer as
+  "use the codex-native dispatcher". See
   [Runtime interface plan](runtime-interface-plan.md).
 
 The command surface is being migrated onto the runtime interface
-incrementally; in this release the codex-native command path remains the
-production dispatch path, so `runtime: claude` currently affects only
-callers that go through `env.Selector` / `factory.NewFromResolved`.
+incrementally: `ask` honors `--runtime` / `SHIPMATES_RUNTIME` / the
+`runtime:` config key (resolving `claude` dispatches the turn through the
+runtime interface; resolving `codex` uses the codex-native dispatcher
+unchanged). All other commands are codex-native pending migration.
 
 ## Runtime assets
 
@@ -227,11 +236,15 @@ form into its native on-disk shape:
 ```
 
 Today `shipmates init` and `shipmates add` write the codex TOML artifact
-directly. The claude Markdown writer plus a `SessionStart` memory hook
-(`.claude/settings.json`) are implemented in `internal/runtime/claude`
-and exercised in unit tests; the CLI's `init`/`add` will emit them once
-they are migrated onto the runtime interface (see
-[Runtime interface plan](runtime-interface-plan.md)).
+directly. The claude Markdown writer is implemented in
+`internal/runtime/claude`; installing a claude persona also wires a
+`SessionStart` memory hook by modifying the project's
+`.claude/settings.json` to run the hidden `shipmates hook load-memory`
+subcommand, which prints the persona's `.shipmates/memory/<persona>/`
+files into the session context at start (bounded, and it never fails a
+session — missing memory prints nothing). The CLI's `init`/`add` will
+emit the claude artifacts once they are migrated onto the runtime
+interface (see [Runtime interface plan](runtime-interface-plan.md)).
 
 Persona names must match `^[a-z][a-z0-9_-]*$`.
 

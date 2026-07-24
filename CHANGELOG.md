@@ -15,16 +15,33 @@ All notable changes to Shipmates are documented here. This project follows
   alongside Codex. The Claude runtime spawns `claude -p --session-id
   --output-format stream-json`, decodes the JSONL event stream, and
   installs personas as `.claude/agents/<name>.md` with a `SessionStart`
-  hook for durable memory.
+  hook for durable memory. The hook runs the new hidden
+  `shipmates hook load-memory` subcommand, which prints the persona's
+  `.shipmates/memory/<persona>/` files into the session context (the
+  runtime exports `SHIPMATES_PERSONA` to the spawned process so the hook
+  knows which persona is starting; the hook is bounded and never fails a
+  session). `SessionSpec.Environment` overrides are applied to every
+  claude spawn; the codex transport cannot carry them and rejects them
+  with `ErrUnsupported` (`Caps.Environment`).
 - **Containment watcher.** Cross-platform process containment with three
-  modes: `watchdog` (default, kernel-primitive-backed), `cgroup` (Linux
-  enterprise, currently degrades to watchdog), and `none` (escape hatch).
-  Windows uses Job Objects (`JOB_OBJECT_LIMIT_JOB_MEMORY`,
-  `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`, `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`),
-  Linux reads `/proc/<pid>/statm` and uses `Setpgid` + `kill -PGID` for
-  tree-kill, macOS uses `Setpgid` + a `ps` subprocess for RSS.
+  modes: `watchdog` (default), `cgroup` (Linux enterprise; the adapter is
+  not yet implemented, so it degrades to watchdog with a warn-level log),
+  and `none` (escape hatch). Windows uses a Job Object per spawn:
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` always (atomic tree-kill), plus
+  kernel-enforced caps when configured — `JOB_OBJECT_LIMIT_JOB_MEMORY`
+  from `containment.memory_limit_mb` and
+  `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` from the new
+  `containment.max_processes`. CPU-seconds limits are enforced by the
+  polling watchdog on every platform (Job Objects don't express them this
+  way), which also keeps polling memory as defense in depth. Linux reads
+  `/proc/<pid>/statm` and uses `Setpgid` + `kill -PGID` for tree-kill,
+  macOS uses `Setpgid` + a `ps` subprocess for RSS/CPU (malformed `ps`
+  output now surfaces as a skipped, logged sample instead of a silent
+  0.0).
 - **`--runtime` CLI flag** and `runtime:` config block. Precedence:
-  CLI flag > project `.shipmates/config.yaml` > user `~/.shipmates/config.yaml` > default (`claude`).
+  CLI flag > project `.shipmates/config.yaml` > user
+  `~/.shipmates/config.yaml` > default (`codex`). `ask` honors the
+  selection; other commands are codex-native pending migration.
 - **Canonical persona catalog.** `internal/runtime/persona` reads and
   writes `persona.md` in a canonical form so the same persona definition
   can be installed for both Claude and Codex without drift.
@@ -49,8 +66,27 @@ All notable changes to Shipmates are documented here. This project follows
   Rather than hang, `shipmates sail` on Windows reports the platform
   limitation and points to the issue tracker.
 
+### CI
+
+- New `.github/workflows/test.yml` runs `go build`, `go vet`, and
+  `go test -race` on every push and pull request across ubuntu-latest and
+  windows-latest. The `fleetconfig`, `m3provision`, and `m3runtime` test
+  suites are excluded on Linux: they exercise the provisioned M3
+  authority/qualifier posture a stock runner does not provide and fail
+  closed by design. Windows runs the cross-platform product surface
+  (commands, runtime interface + adapters, containment, catalog, policy,
+  …); the unix-only subsystems whose tests are not yet portable are
+  excluded there with an explanation in the workflow — shrinking that
+  list is tracked in `docs/platform-support.md`.
+
 ### Fixed
 
+- `shipmates ask` now consumes the `--runtime` selection instead of
+  ignoring it (see Notes for operators below).
+- The claude runtime closes its event stream on `Close` (consumers
+  ranging over `Events()` no longer hang), guards session state against
+  a data race, and refuses a second concurrent turn on the same session
+  instead of orphaning the running process.
 - Windows build no longer fails on `containment.fd undefined` in
   `codexapp/adapter.go` — extracted `extractContainmentPidfd` helper
   into `containment_pidfd_linux.go` (returns the fd) and
@@ -71,21 +107,26 @@ All notable changes to Shipmates are documented here. This project follows
 ### Notes for operators
 
 - **Two agent runtimes are now first-class peers in the codebase.** The
-  `internal/runtime` package defines the interface, and both `claude`
-  (default) and `codex` are wired through `internal/runtime/factory`. The
+  `internal/runtime` package defines the interface, and both `codex`
+  (default) and `claude` are wired through `internal/runtime/factory`. The
   runtime is selected by `.shipmates/config.yaml` (`runtime: claude` or
   `runtime: codex`), by `~/.shipmates/config.yaml`, or by the global
   `--runtime <name>` CLI flag / `SHIPMATES_RUNTIME` env var. Precedence:
-  CLI flag > project > user > default (`claude`).
-- **Command migration is incremental.** The command surface
-  (`ask`, `open`, `live`, `feed`, `tell`, `interrupt`, `sail`, `plan`,
-  `fleet`, `ship`, `server`) still dispatches through the codex-native
-  code path in this release, so the `--runtime` flag is currently plumbing
-  in front of that path. The claude runtime is fully constructable via
-  `factory.NewFromResolved` / `claude.New`, installs personas as
-  `.claude/agents/<name>.md`, wires the `SessionStart` memory hook, and
-  is unit-tested; migrating the command surface onto the runtime
-  interface is tracked in `docs/runtime-interface-plan.md` (Phase 4+).
+  CLI flag > project > user > default (`codex`).
+- **`ask` honors `--runtime` / config; other commands are codex-native
+  pending migration.** When the selection resolves to `claude`,
+  `shipmates ask` dispatches the turn through the runtime interface
+  (StartSession/ResumeSession → SendTurn → streamed events) and persists
+  the claude session id under
+  `.shipmates/sessions/<persona>.claude.session` so later asks resume;
+  when it resolves to `codex` — the default — `ask` uses the codex-native
+  dispatcher unchanged. The rest of the command surface (`open`, `live`,
+  `feed`, `tell`, `interrupt`, `sail`, `plan`, `fleet`, `ship`, `server`)
+  still dispatches codex-native regardless of the flag; migrating it is
+  tracked in `docs/runtime-interface-plan.md` (Phase 4+). Installing a
+  claude persona through the runtime interface modifies the project's
+  `.claude/settings.json` to add the `SessionStart` memory hook
+  (`shipmates hook load-memory`).
 - When `env.Selector` is asked for codex, it returns a pointing
   `runtime.ErrNotConfigured` because the codex adapter needs
   `codexapp.StartOptions` (transport, credential isolation) that the
