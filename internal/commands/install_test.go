@@ -3,22 +3,36 @@ package commands
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
+	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
 )
 
-// skipIfNoPolicyLock skips tests that require withPolicyWriteLock, which
-// relies on unix flock via internal/project/policylock_unix.go and has no
-// Windows equivalent yet.
+// skipIfNoPolicyLock skips tests that require withPolicyWriteLock. Secure
+// policy mutation locking exists on unix (flock, policylock_unix.go) and on
+// Windows (LockFileEx, policylock_windows.go); it is gated on the same
+// capability flag the loader publishes so a platform with neither still
+// skips rather than fails.
 func skipIfNoPolicyLock(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("policy mutation locking is unix-only")
+	if !policy.SecureLoadSupported() {
+		t.Skip("secure policy mutation locking is unsupported on this platform")
+	}
+}
+
+// skipIfNoRoutingTransactions skips tests that drive `routing apply`, which
+// commits through an atomic directory-entry exchange (renameat2
+// RENAME_EXCHANGE on Linux, renamex_np on Darwin). Windows and the remaining
+// unix platforms have no equivalent primitive, and that gap is independent of
+// policy locking — see internal/project/routing_exchange_*.go.
+func skipIfNoRoutingTransactions(t *testing.T) {
+	t.Helper()
+	if !project.RoutingTransactionsSupported() {
+		t.Skip("atomic routing transactions are unsupported on this platform")
 	}
 }
 

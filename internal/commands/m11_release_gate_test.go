@@ -198,12 +198,17 @@ func m11InstallHostileRuntimeGuard(t *testing.T) {
 }
 
 func TestM11HostileLegacyRuntimeAndLegacyCanariesAreUnreachable(t *testing.T) {
+	skipIfNoPolicyLock(t)
 	if runtime.GOOS == "windows" {
-		// Init / Add / policy-mutating workflows call withPolicyWriteLock, which
-		// relies on unix flock (see policylock_unix.go). Until the Windows port
-		// lands (LockFileEx-based equivalent) the guarantees under test cannot
-		// be exercised here — the fleet-commander subsystem is unix-only.
-		t.Skip("policy mutation locking is unix-only; hostile-runtime guard cannot run on Windows")
+		// Policy mutation locking now works here; what still does not is the
+		// per-persona dispatch lock this test drives through ask/fanout/drain.
+		// project.AcquireDispatchLock releases by calling os.Remove on a path
+		// whose handle is still open, and Go opens files on Windows without
+		// FILE_SHARE_DELETE, so the unlink fails silently and the next
+		// dispatch finds a lock file naming this very much alive PID. That is
+		// the same unix-only dispatch-lock gap that keeps `sail` off Windows
+		// (see docs/platform-support.md), not a policy problem.
+		t.Skip("per-persona dispatch locks are unix-only; release cannot unlink an open lock file on Windows")
 	}
 	useLegacyCodexTestDispatcher(t)
 	root := t.TempDir()
