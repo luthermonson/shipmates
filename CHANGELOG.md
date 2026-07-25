@@ -7,6 +7,53 @@ All notable changes to Shipmates are documented here. This project follows
 
 ### Added
 
+- **The policy subsystem works on Windows.** `internal/policy` and the
+  policy write lock had no Windows implementation, which meant
+  `shipmates init` failed outright with "secure policy mutation locking
+  is unsupported on this platform", `ask --runtime claude` denied every
+  tool approval for want of a snapshot, and a batch of `internal/commands`
+  tests skipped. The new `loader_windows.go` +
+  `internal/project/policylock_windows.go` + `internal/winsec` hold the
+  same security contract as the unix path, primitive for primitive:
+  `FILE_FLAG_OPEN_REPARSE_POINT` with outright refusal in place of
+  `O_NOFOLLOW` (so junctions, which need no privilege to create, are
+  refused as well as symlinks); component-by-component descent that
+  holds every ancestor handle open *without* `FILE_SHARE_DELETE`, plus a
+  `GetFinalPathNameByHandle` equality check, in place of `openat`;
+  `LockFileEx` on `.shipmates/.policy.lock` in place of `flock` on the
+  directory descriptor; volume serial + file index + 128-bit `FileIdInfo`
+  + size + link count + write/creation/`ChangeTime` compared before and
+  after every read in place of `fstat`/`fstatat` on dev+ino+mtime+ctime;
+  and a protected DACL granting only the owner and LOCAL SYSTEM, written
+  and read back, in place of `0600`. Two properties are deliberately
+  stronger on Windows: a policy source with more than one hard link is
+  refused, and a rename or delete of a file the loader holds open is
+  refused by the kernel rather than merely detected. See
+  [Security → Policy snapshot capture](docs/security.md#policy-snapshot-capture).
+- **`internal/winsec`.** One place that knows how shipmates opens a
+  Windows path safely, identifies a file object, takes a byte-range lock,
+  and writes a private DACL. `internal/project`'s server-state code now
+  shares it.
+
+### Fixed
+
+- **`shipmates init` no longer leaves a half-created project behind.**
+  A failure part way through — the canonical case being a policy write
+  lock that could not be acquired — used to return an error but leave
+  populated `.shipmates/` and `.codex/` trees, so the operator saw an
+  initialized-looking project that was not. Init now rolls back every
+  directory and file it created, on every platform, and never touches
+  anything that predated the run.
+- **Windows private DACLs were never actually applied.** `privateWindowsDACL`
+  asked for `GENERIC_ALL` and then verified the read-back mask still
+  contained the generic bit, but Windows maps generic rights onto
+  `FILE_ALL_ACCESS` when an ACE is stored, so verification always failed;
+  separately, two callers passed handles Go had opened without
+  `WRITE_DAC`, so `SetSecurityInfo` returned access-denied first. Server
+  state files, the server log, and the new policy lock object are now
+  genuinely restricted to the owner and LOCAL SYSTEM, and the
+  round-trip is verified by test on Windows.
+
 - **Runtime interface.** New `internal/runtime` package introduces a
   `Runtime` interface with `claude` and `codex` as peer implementations,
   selected by config. Commands are being migrated onto the interface so
@@ -132,8 +179,8 @@ All notable changes to Shipmates are documented here. This project follows
   `open`, `sail`, `plan` and the queue workflows are codex-native pending
   migration.
 - **`policy.SecureLoadSupported()`.** Reports whether the immutable
-  policy snapshot can be captured on this platform. The loader needs
-  `openat`-class primitives and so is unix-only; callers that mediate
+  policy snapshot can be captured on this platform. It is true on unix
+  and, since the Windows port below, on Windows; callers that mediate
   runtime approvals consult it and fail closed (deny every request, with
   an explicit warning) rather than degrading silently.
 - **End-to-end harness for the claude runtime** at

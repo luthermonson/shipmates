@@ -271,8 +271,10 @@ real stream-json protocol, including `can_use_tool`. It resolves `--agent`
 the way the real binary does (by file name under `.claude/agents/`) and
 echoes the persona's own heading back, so a missing or empty definition is
 distinguishable from a loaded one. Nothing inside shipmates is stubbed.
-Unix only: the coordination server's state directory and the policy loader
-both need `openat`-class primitives.
+Unix only: the harness is a POSIX shell + Python fixture and the
+coordination server's state directory needs `openat`-class primitives.
+The policy loader is no longer part of that list — it captures a
+snapshot on Windows too.
 
 ## Migration order
 

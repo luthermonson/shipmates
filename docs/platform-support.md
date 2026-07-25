@@ -9,8 +9,8 @@ and why.
 
 | Command | Linux | macOS | Windows | Notes |
 |---|---|---|---|---|
-| `init`, `add`, `list`, `remove`, `update` | ✅ | ✅ | ✅ | Pure Go, no OS-specific primitives. |
-| `policy`, `render`, `routing` | ✅ | ✅ | ✅ | Pure Go. |
+| `init`, `add`, `list`, `remove`, `update` | ✅ | ✅ | ✅ | Every persona/policy mutation takes the project's policy write lock, which is `flock` on unix and `LockFileEx` on Windows. Windows before v0.4.1 failed here with "secure policy mutation locking is unsupported on this platform" and left a half-created project behind; both are fixed. |
+| `policy`, `render`, `routing` | ✅ | ✅ | ✅ | `policy validate` / `explain` capture a real snapshot on all three (`openat`+`O_NOFOLLOW` on unix, reparse-point refusal plus pinned directory handles on Windows). `routing apply` additionally needs an atomic directory-entry exchange and is Linux/macOS only — see below. |
 | `beads` | ✅ | ✅ | ✅ | Requires external `bd` binary on `PATH`. |
 | `plan` | ✅ | ✅ | ✅ | Planning subsystem (voyage plan validation). |
 | `open`, `ask`, `live` | ✅ | ✅ | ⚠️ | The selected runtime's CLI must be installed and authenticated. Windows: `sail` is unavailable but these dispatch commands work when the runtime CLI is present. |
@@ -21,6 +21,18 @@ and why.
 | `fleet`, `ship`, `server` | ✅ | ❌ | ❌ | Fleet Commander M1-M3; unix-only because of `openat`, `O_NOFOLLOW`, `flock`. Absent from the CLI on non-unix. |
 
 ## Why some things are unix-only
+
+### Routing apply — atomic directory-entry exchange
+
+`shipmates routing apply` commits through an atomic *exchange* of two
+directory entries (`renameat2(RENAME_EXCHANGE)` on Linux, `renamex_np`
+on macOS) so a persona file is never observable in a half-written state.
+Windows has no equivalent primitive — `ReplaceFileW` is close but not an
+exchange — and neither do the remaining unix platforms, so
+`project.RoutingTransactionsSupported()` reports false there and
+`routing apply` refuses with `atomic routing transactions are
+unsupported on this platform`. Everything else about routing (`routing
+show`, composition at `add`/`update` time) works everywhere.
 
 ### Fleet Commander (M1-M3) — `fleet`, `ship`, `server`
 
@@ -79,15 +91,15 @@ stream-json --permission-prompt-tool stdio`) — no OS-specific primitives.
 `open`, `sail`, `plan`, and the queue workflows are codex-native pending
 migration.
 
-One approval behavior does vary by platform. Mediating an approval needs
-an immutable policy snapshot, and the secure policy loader requires
-`openat`-class primitives, so it exists on unix only. On Windows and any
-other non-unix platform a `shipmates ask --runtime claude` turn still
-runs, but with no policy authority every tool permission request is
-denied and the degraded posture is printed to stderr. Live sessions are
-unaffected in principle — the mediation path is identical — but the
-coordination server's state directory is likewise unix-only, so `live`
-itself is not yet available on Windows.
+Mediating an approval needs an immutable policy snapshot, and shipmates
+now captures one on Windows as well as unix, so `shipmates ask --runtime
+claude` is mediated against real project policy on all three platforms.
+`policy.SecureLoadSupported()` still exists and still reports the
+capability; it returns false only on a platform with neither
+`openat`-class primitives nor the Win32 handle APIs, and callers still
+fail closed there (deny every request, say so on stderr) rather than
+degrade silently. The security properties of each implementation are
+described in [Security → Policy snapshot capture](security.md#policy-snapshot-capture).
 
 ## Where to next
 
@@ -96,11 +108,13 @@ itself is not yet available on Windows.
   `show` and the live-session surface (`live`, `tell`, `feed`,
   `interrupt`). Once done, the same commands work with either runtime on
   any platform where the underlying CLI is installed.
-- Make the policy loader portable so claude approvals can be mediated
-  against project policy on Windows too. The mediation path itself is
-  platform-independent; only `policy.Load` is unix-only, and
-  `policy.SecureLoadSupported` reports the gap so the non-unix posture is
-  a deliberate deny rather than an accident.
+- Port the per-persona dispatch lock to Windows. `project.AcquireDispatchLock`
+  releases by unlinking a path whose handle is still open, and Go opens
+  files on Windows without `FILE_SHARE_DELETE`, so the unlink fails
+  silently and the next dispatch for that persona finds a lock file
+  naming a live PID. This is the same gap that keeps `sail` off Windows.
+- Give `routing apply` a Windows/portable commit strategy so it does not
+  depend on an atomic directory-entry exchange.
 - Carry attachments on a codex mid-turn steer. Shipmates sends codex
   steer input as text only, so `show` into a *running* codex turn
   references images by path instead of attaching them.

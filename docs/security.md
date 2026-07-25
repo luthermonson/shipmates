@@ -114,6 +114,46 @@ commit boundary when possible.
 Memory is user-owned durable content. Ordinary removal preserves it; `--purge`
 is the explicit destructive boundary.
 
+## Policy snapshot capture
+
+Every approval decision is made against an immutable snapshot of three
+policy sources — `.shipmates/policy.yaml`, `.shipmates/policy.local.yaml`
+(optional), and `.shipmates/policies/<persona>.yaml`. The capture is the
+security boundary: a snapshot that mixes versions which never coexisted,
+or that reads a file an attacker substituted mid-load, is an authority
+forgery. Both supported platforms enforce the same five properties, with
+different primitives.
+
+| Property | unix (`loader_unix.go`) | Windows (`loader_windows.go`, `internal/winsec`) |
+|---|---|---|
+| No links anywhere in the path | `openat` + `O_NOFOLLOW` + `O_DIRECTORY` per component | `CreateFile` with `FILE_FLAG_OPEN_REPARSE_POINT` per component, then outright refusal when `FILE_ATTRIBUTE_REPARSE_POINT` is set — this covers junctions, which unlike symlinks need no privilege to create |
+| Ancestors cannot be swapped mid-walk | descend from a directory descriptor that was already validated | there is no `openat`; instead every ancestor handle is held open *without* `FILE_SHARE_DELETE`, which makes a validated directory un-renameable and un-deletable, and `GetFinalPathNameByHandle` must return the path that was asked for |
+| One atomic capture interval | `flock(LOCK_SH)` on the `.shipmates` directory descriptor; mutations take `LOCK_EX` | `LockFileEx` (shared for readers, `LOCKFILE_EXCLUSIVE_LOCK` for mutations) on `.shipmates/.policy.lock`. Windows cannot lock a directory handle, so this zero-length lock object is the one piece of state the platform must create; it is never read or written, only locked |
+| TOCTOU detection | `fstat` before and after the read plus `fstatat(AT_SYMLINK_NOFOLLOW)` on the name, comparing dev, ino, size, mtime, ctime | `GetFileInformationByHandle` (volume serial, file index, size, link count, attributes, write and creation time), `GetFileInformationByHandleEx(FileBasicInfo)` for `ChangeTime` — the ctime analogue — and `FileIdInfo` for the ReFS-safe 128-bit id, compared before and after the read and again against a fresh open of the name |
+| Private permissions on what it creates | `0600` files, `0700` directories | a protected DACL granting only the process user and LOCAL SYSTEM, written *and read back* before the object is trusted; a lock object planted with a permissive ACL is repaired, not honored |
+
+Two Windows properties are deliberately stronger than the unix ones. A
+policy source with more than one hard link is refused outright, because a
+second directory entry is a rewrite path that never touches
+`.shipmates`. And because handles are held without `FILE_SHARE_DELETE`,
+an attempt to rename or delete a policy file the loader currently holds
+open is refused by the kernel rather than detected afterwards — the
+after-the-fact identity check is retained anyway.
+
+All the same properties apply to the mutation side
+(`project.AcquirePolicyWriteLock`), which holds the exclusive lock across
+the complete mutation including any rollback.
+
+`policy.SecureLoadSupported()` reports whether this platform has a real
+implementation. A platform with neither gets no snapshot, and callers
+that mediate runtime approvals refuse every request rather than waving
+any through.
+
+`shipmates init` is all-or-nothing for the artifacts it creates: if any
+step fails, every directory and file it created is removed, and anything
+that predated the run is left untouched. A failed init cannot leave a
+project that looks initialized and is not.
+
 ## Offline runtime installer
 
 `sudo shipmates install` is a closed, offline, manifest-verified operation. It

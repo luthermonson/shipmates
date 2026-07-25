@@ -141,9 +141,10 @@ snapshot decides alone — allow when a rule matches, deny otherwise — and
 the decision is printed to stderr as `approval: allowed by policy: …` or
 `approval: denied (no allow rule; ask cannot prompt): …`. A request is
 always answered; leaving one unanswered would stall the turn. Use
-`shipmates live` / `shipmates open` when a human should decide. Because
-the secure policy loader is unix-only, on other platforms `ask` runs with
-no authority and denies every request, saying so on stderr.
+`shipmates live` / `shipmates open` when a human should decide. The
+policy snapshot is captured securely on Linux, macOS, and Windows; on a
+platform with neither implementation `ask` runs with no authority and
+denies every request, saying so on stderr.
 
 ### `shipmates fanout <personas> <prompt>`
 

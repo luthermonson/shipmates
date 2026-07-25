@@ -349,10 +349,12 @@ match no shell-command rule, so they always fall through to `ask` and
 reach an operator. See
 [Security → Claude tool permissions](security.md#claude-tool-permissions).
 
-The secure policy loader is unix-only (it needs `openat`-class
-primitives). On other platforms `shipmates ask --runtime claude` runs
-without a policy snapshot and denies every tool permission request, saying
-so on stderr.
+The secure policy loader runs on Linux, macOS, and Windows —
+`openat`/`O_NOFOLLOW`/`flock` on unix, reparse-point refusal plus pinned
+directory handles and `LockFileEx` on Windows. On a platform with
+neither, `shipmates ask --runtime claude` runs without a policy snapshot
+and denies every tool permission request, saying so on stderr. See
+[Security → Policy snapshot capture](security.md#policy-snapshot-capture).
 
 ## Durable memory
 
