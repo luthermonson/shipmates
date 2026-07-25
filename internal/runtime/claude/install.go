@@ -48,15 +48,39 @@ func (r *Runtime) UninstallPersona(_ context.Context, projectDir, name string) e
 	return nil
 }
 
-// InstallMemoryHook writes a SessionStart hook block into
-// .claude/settings.json that runs `shipmates hook load-memory` before every
-// persona session. This is what lets each persona "read its memory first"
-// automatically — the operator doesn't have to remember to add the hook.
-//
-// The hook block is idempotent: re-running InstallMemoryHook adds the
-// entry only if it isn't already present, so this is safe to call
-// unconditionally at every `shipmates init`.
+// MemoryHookCommand is the command the SessionStart hook runs. It doubles
+// as the marker that makes installation idempotent.
+const MemoryHookCommand = "shipmates hook load-memory"
+
+// InstallMemoryHook implements runtime.Runtime by delegating to
+// InstallMemoryHookAt, which callers that only need the file (persona
+// install, project init) can use without constructing a Runtime.
 func (r *Runtime) InstallMemoryHook(_ context.Context, projectDir string) error {
+	return InstallMemoryHookAt(projectDir)
+}
+
+// InstallMemoryHookAt writes a SessionStart hook into
+// <projectDir>/.claude/settings.json that runs `shipmates hook load-memory`
+// before every session. That is what lets each persona read its durable
+// memory automatically instead of the operator remembering to paste it.
+//
+// The shape is Claude Code's matcher-group form, verified against claude
+// 2.1.153 with `--include-hook-events`:
+//
+//	{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"…"}]}]}}
+//
+// producing hook_started/hook_response frames named "SessionStart:startup".
+// The flatter {"SessionStart":[{"type":"command",…}]} spelling parses
+// without complaint and is then silently ignored — no hook event, no
+// injected context — so any such entry we previously wrote is migrated into
+// a group rather than left as dead configuration. The matcher is omitted on
+// purpose: memory should load on resumed sessions too, not just fresh ones.
+//
+// Existing settings are merged, never replaced: other hook events, other
+// SessionStart groups, and every unrelated key are preserved byte-for-byte
+// in value. Re-running is a no-op once the hook is present, so it is safe to
+// call on every install and update.
+func InstallMemoryHookAt(projectDir string) error {
 	dir := filepath.Join(projectDir, ".claude")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -66,8 +90,10 @@ func (r *Runtime) InstallMemoryHook(_ context.Context, projectDir string) error 
 	// Load existing settings if present.
 	var settings map[string]any
 	if raw, err := os.ReadFile(settingsPath); err == nil {
-		if err := json.Unmarshal(raw, &settings); err != nil {
-			return fmt.Errorf("claude: parse %s: %w", settingsPath, err)
+		if len(bytesTrimSpace(raw)) > 0 {
+			if err := json.Unmarshal(raw, &settings); err != nil {
+				return fmt.Errorf("claude: parse %s: %w", settingsPath, err)
+			}
 		}
 	} else if !os.IsNotExist(err) {
 		return err
@@ -81,27 +107,66 @@ func (r *Runtime) InstallMemoryHook(_ context.Context, projectDir string) error 
 		hooks = map[string]any{}
 	}
 	sessionStart, _ := hooks["SessionStart"].([]any)
-	// Guard against duplicate installs by checking for our marker command.
-	const marker = "shipmates hook load-memory"
+
+	groups := make([]any, 0, len(sessionStart)+1)
+	installed := false
 	for _, entry := range sessionStart {
-		if m, ok := entry.(map[string]any); ok {
-			if cmd, _ := m["command"].(string); cmd == marker {
-				return nil // already installed
-			}
+		m, ok := entry.(map[string]any)
+		if !ok {
+			groups = append(groups, entry)
+			continue
 		}
+		// Drop a legacy flat entry of ours; it never fired, and re-adding it
+		// below in group form is the migration.
+		if cmd, _ := m["command"].(string); cmd == MemoryHookCommand && m["hooks"] == nil {
+			continue
+		}
+		if groupHasCommand(m, MemoryHookCommand) {
+			installed = true
+		}
+		groups = append(groups, entry)
 	}
-	sessionStart = append(sessionStart, map[string]any{
-		"type":    "command",
-		"command": marker,
-	})
-	hooks["SessionStart"] = sessionStart
+	if !installed {
+		groups = append(groups, map[string]any{
+			"hooks": []any{map[string]any{"type": "command", "command": MemoryHookCommand}},
+		})
+	}
+	hooks["SessionStart"] = groups
 	settings["hooks"] = hooks
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(settingsPath, out, 0o644)
+	return os.WriteFile(settingsPath, append(out, '\n'), 0o644)
+}
+
+// groupHasCommand reports whether a SessionStart matcher group already runs
+// the given command.
+func groupHasCommand(group map[string]any, command string) bool {
+	inner, _ := group["hooks"].([]any)
+	for _, h := range inner {
+		m, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		if cmd, _ := m["command"].(string); cmd == command {
+			return true
+		}
+	}
+	return false
+}
+
+// bytesTrimSpace avoids pulling in bytes for one call.
+func bytesTrimSpace(b []byte) []byte {
+	i, j := 0, len(b)
+	for i < j && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r') {
+		i++
+	}
+	for j > i && (b[j-1] == ' ' || b[j-1] == '\t' || b[j-1] == '\n' || b[j-1] == '\r') {
+		j--
+	}
+	return b[i:j]
 }
 
 // writeClaudeAgent emits the frontmatter + body Claude Code expects.

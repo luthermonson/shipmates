@@ -217,6 +217,10 @@ func runUpdateLocked(cat *catalog.Catalog, only, accept string, m *project.Manif
 	if err := m.Save(); err != nil {
 		return err
 	}
+	// Re-assert the configured runtime's memory hook. `update` is how an
+	// operator picks up shipmates changes — including a runtime switch in
+	// the project config, or a settings.json an editor rewrote.
+	installMemoryHook()
 	slog.Info("update complete",
 		"updated", st.updated, "added", st.added, "kept", st.kept,
 		"conflicts", st.conflicts, "alreadyCurrent", st.skipped)

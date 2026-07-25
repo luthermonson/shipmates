@@ -44,18 +44,22 @@ func (r *Runtime) UninstallPersona(_ context.Context, projectDir, name string) e
 	return nil
 }
 
-// InstallMemoryHook wires codex's session-start memory injection.
-//
-// TODO(follow-up): codex has a distinct mechanism from Claude's
-// SessionStart hook (its agent config is JSON-driven with different fields).
-// The exact wiring lives in the codexapp adapter and the branch's
-// installer code — pulling it into a stable per-runtime seam is a
-// follow-up commit. For now we no-op instead of returning ErrUnsupported
-// so that shipmates init can call InstallMemoryHook on both runtimes
-// uniformly and only Claude will actually mutate settings on Phase 4.
-func (r *Runtime) InstallMemoryHook(context.Context, string) error {
-	return nil
+// InstallMemoryHook implements runtime.Runtime by delegating to
+// InstallMemoryHookAt.
+func (r *Runtime) InstallMemoryHook(_ context.Context, projectDir string) error {
+	return InstallMemoryHookAt(projectDir)
 }
+
+// InstallMemoryHookAt is codex's half of the "read memory on session start"
+// seam. Codex has no equivalent of Claude Code's SessionStart hook: memory
+// reaches a codex turn through the persona's developer instructions, which
+// `shipmates add`/`update` already render into .codex/agents/<persona>.md.
+// There is therefore nothing to install, and — importantly — nothing is
+// written: a codex-only project must not grow a .claude/ directory.
+//
+// It is a no-op rather than ErrUnsupported so callers can install the hook
+// for whichever runtime is configured without special-casing codex.
+func InstallMemoryHookAt(string) error { return nil }
 
 func writeCodexAgent(w io.Writer, p runtime.PersonaSpec) error {
 	type frontmatter struct {

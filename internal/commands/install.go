@@ -16,6 +16,8 @@ import (
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
+	runtimeconfig "github.com/luthermonson/shipmates/internal/runtime/config"
+	"github.com/luthermonson/shipmates/internal/runtime/factory"
 	"github.com/urfave/cli/v3"
 )
 
@@ -118,6 +120,9 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			if err := m.Save(); err != nil {
 				return err
 			}
+			// Before any persona is added, so a project initialized with an
+			// empty crew still has the hook waiting for its first session.
+			installMemoryHook()
 			slog.Info("initialized shipmates project")
 
 			if crew := c.String("crew"); crew != "" {
@@ -302,6 +307,49 @@ func stripRoutingBlock(b []byte) []byte {
 	return []byte(strings.TrimRight(out, "\n") + "\n")
 }
 
+// installMemoryHook wires the configured runtime's "read memory on session
+// start" mechanism into the project, so a persona's durable memory is
+// injected automatically from its very first session rather than only after
+// an operator remembers to configure it.
+//
+// It runs on `init`, `add` and `update` — every point where the project's
+// shipmates artifacts are (re)installed — and is idempotent, so repeating
+// any of them neither duplicates the hook nor disturbs an operator's own
+// settings.
+//
+// Only the runtime actually selected gets wired: a codex-only project must
+// never grow a .claude/ directory, and a claude-only project must never
+// grow codex configuration. Resolution follows the same precedence as every
+// other runtime decision (project config, then user config, then the
+// default) with no CLI override, because the hook is a property of the
+// project on disk, not of one invocation.
+//
+// A failure here is reported but never fatal: shipmates artifacts are
+// already installed by this point, and losing automatic memory injection
+// must not leave the project half-initialized.
+func installMemoryHook() {
+	projectFile, err := runtimeconfig.LoadProject(".")
+	if err != nil {
+		slog.Warn("memory hook: could not read project runtime config", "error", err)
+		return
+	}
+	userFile, err := runtimeconfig.LoadUser()
+	if err != nil {
+		slog.Warn("memory hook: could not read user runtime config", "error", err)
+		return
+	}
+	resolved, err := runtimeconfig.Resolve("", projectFile, userFile)
+	if err != nil {
+		slog.Warn("memory hook: could not resolve runtime", "error", err)
+		return
+	}
+	if err := factory.InstallMemoryHook(resolved.Runtime, "."); err != nil {
+		slog.Warn("memory hook: install failed", "runtime", resolved.Runtime, "error", err)
+		return
+	}
+	slog.Debug("memory hook installed", "runtime", resolved.Runtime, "source", resolved.Source)
+}
+
 // addPersona is the shared install routine used by `add` and `init --crew`.
 func addPersona(cat *catalog.Catalog, name string) error {
 	if !cat.Has(name) {
@@ -320,7 +368,11 @@ func addPersona(cat *catalog.Catalog, name string) error {
 	if err := requireManifestV2(m, "add"); err != nil {
 		return err
 	}
-	return withPolicyWriteLock(func() error { return addPersonaLocked(cat, name, m) })
+	if err := withPolicyWriteLock(func() error { return addPersonaLocked(cat, name, m) }); err != nil {
+		return err
+	}
+	installMemoryHook()
+	return nil
 }
 
 func addPersonaLocked(cat *catalog.Catalog, name string, m *project.Manifest) error {

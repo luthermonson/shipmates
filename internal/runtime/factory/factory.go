@@ -118,3 +118,28 @@ func containmentFor(c config.Containment) (containment.Watcher, containment.Limi
 
 // Names returns the runtime names this factory knows about.
 func Names() []string { return []string{"claude", "codex"} }
+
+// InstallMemoryHook wires the named runtime's "read memory on session
+// start" mechanism into projectDir.
+//
+// It exists separately from NewFromResolved because installing the hook is
+// a file operation: `shipmates init`, `add` and `update` must be able to do
+// it without starting a runtime transport (codex would need an app-server;
+// claude would need the CLI on PATH). Dispatching by name here is also what
+// keeps a project free of the other runtime's configuration — a codex-only
+// project never grows a .claude/ directory, and vice versa.
+//
+// An unknown runtime name is not an error: an operator who has selected a
+// runtime shipmates does not know about should not have `init` fail over a
+// hook.
+func InstallMemoryHook(name, projectDir string) error {
+	switch name {
+	case "claude":
+		return claude.InstallMemoryHookAt(projectDir)
+	case "codex":
+		return codex.InstallMemoryHookAt(projectDir)
+	default:
+		slog.Debug("no memory-hook mechanism for runtime", "runtime", name)
+		return nil
+	}
+}
