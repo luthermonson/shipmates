@@ -86,7 +86,7 @@ func Init(cat *catalog.Catalog) *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "crew", Usage: "comma-separated personas to add immediately"},
 		},
-		Action: func(ctx context.Context, c *cli.Command) error {
+		Action: func(ctx context.Context, c *cli.Command) (retErr error) {
 			m, err := project.LoadManifest()
 			if err != nil {
 				return err
@@ -94,6 +94,16 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			if err := requireManifestV2(m, "init"); err != nil {
 				return err
 			}
+			// Init is all-or-nothing for the artifacts it creates: everything
+			// scaffolded below is rolled back on any failure, so a project
+			// that could not be initialized is never left looking as if it
+			// had been. Only paths that did not already exist are registered.
+			scaffold := &initScaffold{}
+			defer func() {
+				if retErr != nil {
+					scaffold.undo()
+				}
+			}()
 			for _, d := range []string{
 				project.Dir,
 				filepath.Join(project.Dir, project.MemoryDirName),
@@ -101,7 +111,7 @@ func Init(cat *catalog.Catalog) *cli.Command {
 				project.PoliciesDir(),
 				project.CodexAgentsDir,
 			} {
-				if err := os.MkdirAll(d, 0o755); err != nil {
+				if err := scaffold.mkdirAll(d); err != nil {
 					return err
 				}
 			}
@@ -112,6 +122,7 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			}
 
 			if _, err := os.Stat(project.ConfigName); errors.Is(err, fs.ErrNotExist) {
+				scaffold.trackIfAbsent(project.ConfigName)
 				if err := os.WriteFile(project.ConfigName, []byte(defaultConfig(project.RepoName())), 0o644); err != nil {
 					return err
 				}
@@ -123,6 +134,10 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			}
 			// Before any persona is added, so a project initialized with an
 			// empty crew still has the hook waiting for its first session.
+			// The hook lands in the selected runtime's own directory, which
+			// init does not otherwise create, so register that for rollback
+			// too (.codex is already registered by the scaffold loop above).
+			scaffold.trackIfAbsent(".claude")
 			installMemoryHook()
 			slog.Info("initialized shipmates project")
 
