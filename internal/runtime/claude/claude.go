@@ -209,7 +209,7 @@ func (r *Runtime) CloseSession(ctx context.Context, id string) error {
 		delete(r.sessions, id)
 		p = s.proc
 	}
-	r.dropApprovalsLocked(func(pa *pendingApproval) bool { return pa.sessionID == id })
+	r.dropSessionApprovalsLocked(id)
 	r.sessMu.Unlock()
 	if p != nil {
 		p.closeStdin()
@@ -425,18 +425,17 @@ func denyMessage(d runtime.ApprovalDecision) string {
 	return "Denied by shipmates approval mediation."
 }
 
-// dropApprovalsLocked removes every pending approval matching a predicate
-// and returns them, so callers can decide whether to answer them. Caller
-// must hold sessMu.
-func (r *Runtime) dropApprovalsLocked(match func(*pendingApproval) bool) []*pendingApproval {
-	var dropped []*pendingApproval
+// dropSessionApprovalsLocked forgets every pending approval belonging to a
+// session. Answering them is pointless once their turn or their process is
+// gone — claude has stopped waiting — and keeping them would let a late
+// ResolveApproval claim success for a write nobody reads. Caller must hold
+// sessMu.
+func (r *Runtime) dropSessionApprovalsLocked(sessionID string) {
 	for id, p := range r.approvals {
-		if match(p) {
-			dropped = append(dropped, p)
+		if p.sessionID == sessionID {
 			delete(r.approvals, id)
 		}
 	}
-	return dropped
 }
 
 // Close implements runtime.Runtime. Tears down every open session's
@@ -601,9 +600,7 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 			s.turnActive = false
 			s.turnID = ""
 			close(s.turnDone)
-			// The turn is over; anything still unanswered can never be
-			// answered (claude has stopped waiting on it).
-			r.dropApprovalsLocked(func(p *pendingApproval) bool { return p.sessionID == s.id })
+			r.dropSessionApprovalsLocked(s.id)
 		}
 		r.sessMu.Unlock()
 		ev := decodeFrame(line, s.id, turnID)
@@ -638,7 +635,7 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 		s.turnID = ""
 		close(s.turnDone)
 	}
-	r.dropApprovalsLocked(func(pa *pendingApproval) bool { return pa.sessionID == s.id })
+	r.dropSessionApprovalsLocked(s.id)
 	r.sessMu.Unlock()
 
 	kind := runtime.KindSessionClosed

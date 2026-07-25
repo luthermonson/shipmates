@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -90,7 +91,10 @@ func InstallMemoryHookAt(projectDir string) error {
 	// Load existing settings if present.
 	var settings map[string]any
 	if raw, err := os.ReadFile(settingsPath); err == nil {
-		if len(bytesTrimSpace(raw)) > 0 {
+		// An empty or whitespace-only file is what an interrupted write or an
+		// editor can leave behind; treat it as absent rather than a parse
+		// error the operator has to clear by hand.
+		if len(bytes.TrimSpace(raw)) > 0 {
 			if err := json.Unmarshal(raw, &settings); err != nil {
 				return fmt.Errorf("claude: parse %s: %w", settingsPath, err)
 			}
@@ -155,18 +159,6 @@ func groupHasCommand(group map[string]any, command string) bool {
 		}
 	}
 	return false
-}
-
-// bytesTrimSpace avoids pulling in bytes for one call.
-func bytesTrimSpace(b []byte) []byte {
-	i, j := 0, len(b)
-	for i < j && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r') {
-		i++
-	}
-	for j > i && (b[j-1] == ' ' || b[j-1] == '\t' || b[j-1] == '\n' || b[j-1] == '\r') {
-		j--
-	}
-	return b[i:j]
 }
 
 // writeClaudeAgent emits the frontmatter + body Claude Code expects.
