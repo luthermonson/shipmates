@@ -327,9 +327,19 @@ func (b *runtimeBackend) translate(ev runtime.Event) (codexapp.Event, bool) {
 // unanswered stalls the turn forever.
 func (b *runtimeBackend) translateApproval(ev runtime.Event) (codexapp.Event, bool) {
 	out := codexapp.Event{ThreadID: ev.SessionID, TurnID: ev.TurnID}
+	// A runtime that already speaks the codex event shape (the codex runtime
+	// normalizes its adapter's events straight through) has done this work
+	// itself, snapshot binding included; pass it along untouched.
+	if native, ok := ev.Payload.(codexapp.Event); ok && native.Kind == codexapp.ApprovalRequested {
+		return native, true
+	}
 	req, ok := ev.Payload.(claude.ApprovalRequest)
 	if !ok || req.RequestID == "" {
-		slog.Warn("live session: unusable approval payload from runtime", "runtime", b.rt.Name(), "session", ev.SessionID, "turn", ev.TurnID)
+		// Unanswerable: there is no request id to reply to, so the turn will
+		// stall and there is nothing this backend can do about it. Say so
+		// loudly rather than dropping it silently.
+		slog.Error("live session: approval request cannot be answered; the turn will stall until the runtime gives up",
+			"runtime", b.rt.Name(), "session", ev.SessionID, "turn", ev.TurnID, "payload", fmt.Sprintf("%T", ev.Payload))
 		return out, false
 	}
 	b.mu.Lock()
