@@ -29,13 +29,35 @@ type fakeRuntime struct {
 	closed       bool
 	resumedIDs   []string
 	startedSpecs []runtime.SessionSpec
+	approvals    []fakeApproval
+	approvalCh   chan fakeApproval
+}
+
+// fakeApproval records one ResolveApproval call so tests can assert both
+// that an answer was delivered and what it said.
+type fakeApproval struct {
+	response runtime.ApprovalResponse
+	decision runtime.ApprovalDecision
 }
 
 func newFakeRuntime() *fakeRuntime {
 	return &fakeRuntime{
-		caps:      runtime.Caps{Streaming: true, Interrupt: true, Steer: true, Attachments: true},
-		events:    make(chan runtime.Event, 32),
-		sessionID: "claude-session-1",
+		caps:       runtime.Caps{Streaming: true, Interrupt: true, Steer: true, Attachments: true, Approvals: true},
+		events:     make(chan runtime.Event, 32),
+		sessionID:  "claude-session-1",
+		approvalCh: make(chan fakeApproval, 16),
+	}
+}
+
+// waitApproval blocks until the backend answers an approval.
+func (f *fakeRuntime) waitApproval(t *testing.T) fakeApproval {
+	t.Helper()
+	select {
+	case a := <-f.approvalCh:
+		return a
+	case <-time.After(10 * time.Second):
+		t.Fatal("runtime never received an approval answer")
+		return fakeApproval{}
 	}
 }
 
@@ -93,8 +115,19 @@ func (f *fakeRuntime) InterruptTurn(_ context.Context, sessionID, turnID string)
 	return nil
 }
 
-func (f *fakeRuntime) ResolveApproval(context.Context, runtime.ApprovalResponse, runtime.ApprovalDecision) (bool, error) {
-	return false, &runtime.ErrUnsupported{Runtime: "claude", Feature: "ResolveApproval"}
+func (f *fakeRuntime) ResolveApproval(_ context.Context, r runtime.ApprovalResponse, d runtime.ApprovalDecision) (bool, error) {
+	if !f.caps.Approvals {
+		return false, &runtime.ErrUnsupported{Runtime: "claude", Feature: "ResolveApproval"}
+	}
+	a := fakeApproval{response: r, decision: d}
+	f.mu.Lock()
+	f.approvals = append(f.approvals, a)
+	f.mu.Unlock()
+	select {
+	case f.approvalCh <- a:
+	default:
+	}
+	return true, nil
 }
 func (f *fakeRuntime) InstallPersona(context.Context, string, runtime.PersonaSpec) error { return nil }
 func (f *fakeRuntime) UninstallPersona(context.Context, string, string) error            { return nil }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/luthermonson/shipmates/internal/client"
 	"github.com/luthermonson/shipmates/internal/livesession"
+	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/runtime"
 	"github.com/luthermonson/shipmates/internal/runtime/claude"
@@ -157,10 +158,41 @@ func dispatchRuntimeTurn(ctx context.Context, rt runtime.Runtime, persona, promp
 		return fmt.Errorf("start %s session: %w", rt.Name(), err)
 	}
 
+	// A runtime that asks before running tools (claude's can_use_tool
+	// control protocol) blocks the turn until it gets an answer, and `ask`
+	// is one-shot: nobody is watching a feed and no controller holds a
+	// lease. The persona's immutable policy snapshot is therefore the only
+	// authority available, and it answers every request — allow when a rule
+	// says so, deny otherwise. Loading it here means a bad policy fails the
+	// turn before any prompt is sent, exactly like the codex path.
+	//
+	// Where the secure loader does not exist (non-unix), there is no
+	// authority at all: the turn still runs, but every request that reaches
+	// shipmates is refused. Nothing is silently waved through.
+	var snapshot *policy.Snapshot
+	if rt.Capabilities().Approvals {
+		if !policy.SecureLoadSupported() {
+			fmt.Fprintln(stderr, "approval: no secure policy loader on this platform; every tool permission request will be denied")
+		} else {
+			rootID, idErr := project.ScopeID(root)
+			if idErr != nil {
+				return errors.New("policy validation failed")
+			}
+			var diagnostics []policy.Diagnostic
+			snapshot, diagnostics = policy.Load(root, persona, rootID)
+			if snapshot == nil {
+				for _, d := range diagnostics {
+					fmt.Fprintf(stderr, "policy: %s %s\n", d.Code, d.Path)
+				}
+				return errors.New("policy validation failed")
+			}
+		}
+	}
+
 	if _, err := rt.SendTurn(ctx, session.ID(), runtime.TurnInput{Text: prompt, Attachments: attachments}); err != nil {
 		return fmt.Errorf("send turn: %w", err)
 	}
-	if err := streamRuntimeEvents(ctx, rt, stdout, stderr); err != nil {
+	if err := streamRuntimeEvents(ctx, rt, snapshot, stdout, stderr); err != nil {
 		return err
 	}
 	return project.WriteBackendSessionMeta(persona, rt.Name(), persona, session.ID(), fingerprint)
@@ -169,8 +201,9 @@ func dispatchRuntimeTurn(ctx context.Context, rt runtime.Runtime, persona, promp
 // streamRuntimeEvents consumes the runtime's normalized event stream until
 // the turn finishes. KindText goes to stdout; tool activity is summarized
 // on stderr (matching the codex path's "activity:" lines); KindError ends
-// the turn with a non-nil error.
-func streamRuntimeEvents(ctx context.Context, rt runtime.Runtime, stdout, stderr io.Writer) error {
+// the turn with a non-nil error. Approval requests are answered from the
+// turn's policy snapshot — see askApproval.
+func streamRuntimeEvents(ctx context.Context, rt runtime.Runtime, snapshot *policy.Snapshot, stdout, stderr io.Writer) error {
 	events := rt.Events()
 	for {
 		select {
@@ -194,18 +227,59 @@ func streamRuntimeEvents(ctx context.Context, rt runtime.Runtime, stdout, stderr
 				if tc, ok := ev.Payload.(claude.ToolCall); ok && tc.Name != "" {
 					fmt.Fprintln(stderr, "activity: "+tc.Name)
 				}
+			case runtime.KindApprovalNeeded:
+				askApproval(ctx, rt, snapshot, ev, stderr)
 			case runtime.KindTurnDone:
 				return nil
 			case runtime.KindError:
 				return fmt.Errorf("%s turn failed: %s", rt.Name(), formatRuntimeErrorPayload(ev.Payload))
 			default:
-				// KindToolResult / KindBackend / KindApprovalNeeded /
-				// KindSessionClosed are not part of the one-shot ask UX.
+				// KindToolResult / KindBackend / KindSessionClosed are not
+				// part of the one-shot ask UX.
 				slog.Debug("ask: ignored runtime event", "kind", ev.Kind)
 			}
 		}
 	}
 }
+
+// askApproval answers one approval request on the one-shot `ask` path.
+//
+// There is no operator to prompt and no controller lease to hold, so policy
+// is the whole decision: a `process.exec` rule whose effect is allow lets
+// the call through, anything else refuses it. An unanswered request would
+// hang the turn until the runtime's own timeout, so every request gets an
+// answer even when it cannot be evaluated. Use `shipmates live` when a
+// human should decide instead.
+func askApproval(ctx context.Context, rt runtime.Runtime, snapshot *policy.Snapshot, ev runtime.Event, stderr io.Writer) {
+	req, ok := ev.Payload.(claude.ApprovalRequest)
+	if !ok || req.RequestID == "" {
+		return
+	}
+	command, named := livesession.ApprovalCommandExact(req)
+	effect := policy.Ask
+	if named && snapshot != nil {
+		effect = policy.Evaluate(snapshot, policy.Request{Kind: policy.ProcessExec, CommandExact: command}).PolicyEffect
+	}
+	decision := runtime.ApprovalDecision{AllowFor: "once"}
+	if effect == policy.Allow {
+		decision.Allow = true
+		fmt.Fprintf(stderr, "approval: allowed by policy: %s\n", command)
+	} else {
+		decision.Rationale = "No shipmates policy rule allows this, and `ask` has no operator to approve it. Re-run under `shipmates live`, or add an allow rule."
+		fmt.Fprintf(stderr, "approval: denied (no allow rule; `ask` cannot prompt): %s\n", command)
+	}
+	answerCtx, cancel := context.WithTimeout(ctx, approvalAnswerTimeout)
+	defer cancel()
+	if _, err := rt.ResolveApproval(answerCtx, runtime.ApprovalResponse{
+		ID: req.RequestID, SessionID: ev.SessionID, TurnID: ev.TurnID, Kind: "tool_use",
+	}, decision); err != nil {
+		slog.Warn("ask: could not answer approval request", "runtime", rt.Name(), "request", req.RequestID, "error", err)
+	}
+}
+
+// approvalAnswerTimeout bounds a single approval write so a wedged runtime
+// cannot stall the ask event loop.
+const approvalAnswerTimeout = 5 * time.Second
 
 // formatRuntimeErrorPayload renders whatever a runtime put in an error
 // event as a scrubbed, single-line string safe for the terminal.

@@ -3,13 +3,19 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/runtime"
+	"github.com/luthermonson/shipmates/internal/runtime/claude"
 	"github.com/luthermonson/shipmates/internal/turninput"
 	"github.com/urfave/cli/v3"
 )
@@ -28,6 +34,9 @@ type fakeRuntime struct {
 	resumeCalls []string
 	sentTurns   []runtime.TurnInput
 	closed      bool
+	// approvals records every ResolveApproval call so the ask path's
+	// policy-driven answers can be asserted.
+	approvals []runtime.ApprovalDecision
 
 	sessionID string
 }
@@ -74,8 +83,9 @@ func (f *fakeRuntime) InterruptTurn(context.Context, string, string) error { ret
 func (f *fakeRuntime) SteerTurn(context.Context, string, string, string) error {
 	return &runtime.ErrUnsupported{Runtime: "fake", Feature: "SteerTurn"}
 }
-func (f *fakeRuntime) ResolveApproval(context.Context, runtime.ApprovalResponse, runtime.ApprovalDecision) (bool, error) {
-	return false, nil
+func (f *fakeRuntime) ResolveApproval(_ context.Context, _ runtime.ApprovalResponse, d runtime.ApprovalDecision) (bool, error) {
+	f.approvals = append(f.approvals, d)
+	return true, nil
 }
 func (f *fakeRuntime) InstallPersona(context.Context, string, runtime.PersonaSpec) error { return nil }
 func (f *fakeRuntime) UninstallPersona(context.Context, string, string) error            { return nil }
@@ -298,6 +308,153 @@ func TestRemovedImageFlagPointsAtShow(t *testing.T) {
 	}
 	if len(rt.sentTurns) != 0 {
 		t.Fatalf("a refused --image still dispatched a turn: %+v", rt.sentTurns)
+	}
+}
+
+// askApprovalScript is the event sequence a runtime that asks before
+// running a tool produces: a permission request, then the turn's end once
+// the request has been answered.
+func askApprovalScript(command string) []runtime.Event {
+	return []runtime.Event{
+		{Kind: runtime.KindApprovalNeeded, TurnID: "fake-turn", Payload: claude.ApprovalRequest{
+			RequestID: "ask-req-1",
+			ToolName:  "Bash",
+			InputJSON: json.RawMessage(`{"command":` + strconv.Quote(command) + `}`),
+		}},
+		{Kind: runtime.KindTurnDone},
+	}
+}
+
+// requireSecurePolicyLoader skips a test that needs a real policy snapshot
+// on platforms without the openat-based loader (everything but unix).
+func requireSecurePolicyLoader(t *testing.T) {
+	t.Helper()
+	if !policy.SecureLoadSupported() {
+		t.Skip("policy.Load is unix-only; approvals degrade to deny-all elsewhere")
+	}
+}
+
+// writeAskPolicy replaces the persona overlay installed by
+// installCodexPersona with a single rule.
+func writeAskPolicy(t *testing.T, persona, effect, id, command string) {
+	t.Helper()
+	body := "version: 1\nallow: []\nask: []\ndeny: []\n"
+	rule := "  - id: " + id + "\n    kind: process.exec\n    match:\n      command_exact: " + command + "\n    reason: test rule\n"
+	body = strings.Replace(body, effect+": []\n", effect+":\n"+rule, 1)
+	if err := os.WriteFile(filepath.Join(".shipmates", "policies", persona+".yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAskAnswersApprovalsFromPolicy proves `ask` never leaves a permission
+// request unanswered — an unanswered one wedges the turn until the runtime
+// times out — and that policy is the authority when there is no operator.
+func TestAskAnswersApprovalsFromPolicy(t *testing.T) {
+	requireSecurePolicyLoader(t)
+	for _, tc := range []struct {
+		name      string
+		effect    string
+		wantAllow bool
+		wantLog   string
+	}{
+		{"an allow rule lets the tool run", "allow", true, "approval: allowed by policy"},
+		{"no matching rule refuses, since ask cannot prompt", "deny", false, "approval: denied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			installCodexPersona(t, "security")
+			writeAskPolicy(t, "security", tc.effect, "gitstatus", "git status")
+			rt := newFakeRuntime(askApprovalScript("git status"))
+			rt.caps.Approvals = true
+			swapSelector(t, rt)
+
+			var stdout, stderr bytes.Buffer
+			if err := dispatchAskTo(context.Background(), "claude", "security", "check the tree", false, &stdout, &stderr); err != nil {
+				t.Fatalf("dispatchAskTo: %v (stderr: %s)", err, stderr.String())
+			}
+			if len(rt.approvals) != 1 {
+				t.Fatalf("approvals answered = %d, want 1", len(rt.approvals))
+			}
+			if rt.approvals[0].Allow != tc.wantAllow {
+				t.Errorf("Allow = %v, want %v", rt.approvals[0].Allow, tc.wantAllow)
+			}
+			if !tc.wantAllow && rt.approvals[0].Rationale == "" {
+				t.Error("denial carried no rationale")
+			}
+			if !strings.Contains(stderr.String(), tc.wantLog) {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tc.wantLog)
+			}
+		})
+	}
+}
+
+// TestAskDoesNotLoadPolicyForUnmediatedRuntimes keeps the ask path working
+// for a runtime that never asks: no policy is required and none is loaded.
+func TestAskDoesNotLoadPolicyForUnmediatedRuntimes(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installCodexPersona(t, "security")
+	if err := os.Remove(filepath.Join(".shipmates", "policy.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	rt := newFakeRuntime(turnScript("no tools here"))
+	rt.caps.Approvals = false
+	swapSelector(t, rt)
+
+	var stdout, stderr bytes.Buffer
+	if err := dispatchAskTo(context.Background(), "claude", "security", "hi", false, &stdout, &stderr); err != nil {
+		t.Fatalf("dispatchAskTo: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "no tools here") {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+// TestAskRefusesTurnOnInvalidPolicyForMediatedRuntime proves a mediated
+// runtime never gets a prompt when policy cannot be evaluated: shipmates
+// would have nothing to answer approvals with.
+func TestAskRefusesTurnOnInvalidPolicyForMediatedRuntime(t *testing.T) {
+	requireSecurePolicyLoader(t)
+	t.Chdir(t.TempDir())
+	installCodexPersona(t, "security")
+	if err := os.WriteFile(filepath.Join(".shipmates", "policy.yaml"), []byte("version: 1\nallow: [nope\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rt := newFakeRuntime(turnScript("never sent"))
+	rt.caps.Approvals = true
+	swapSelector(t, rt)
+
+	var stdout, stderr bytes.Buffer
+	err := dispatchAskTo(context.Background(), "claude", "security", "hi", false, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "policy validation failed") {
+		t.Fatalf("err = %v, want policy validation failed", err)
+	}
+	if len(rt.sentTurns) != 0 {
+		t.Fatalf("a turn was dispatched despite invalid policy: %+v", rt.sentTurns)
+	}
+}
+
+// TestAskWithoutSecurePolicyLoaderDeniesEverything covers the non-unix
+// posture: the turn still runs, but with no policy authority every request
+// is refused rather than waved through, and the operator is told why.
+func TestAskWithoutSecurePolicyLoaderDeniesEverything(t *testing.T) {
+	if policy.SecureLoadSupported() {
+		t.Skip("this platform has the secure loader; see TestAskAnswersApprovalsFromPolicy")
+	}
+	t.Chdir(t.TempDir())
+	installCodexPersona(t, "security")
+	rt := newFakeRuntime(askApprovalScript("git status"))
+	rt.caps.Approvals = true
+	swapSelector(t, rt)
+
+	var stdout, stderr bytes.Buffer
+	if err := dispatchAskTo(context.Background(), "claude", "security", "check the tree", false, &stdout, &stderr); err != nil {
+		t.Fatalf("dispatchAskTo: %v", err)
+	}
+	if len(rt.approvals) != 1 || rt.approvals[0].Allow {
+		t.Fatalf("approvals = %+v, want exactly one denial", rt.approvals)
+	}
+	if !strings.Contains(stderr.String(), "no secure policy loader on this platform") {
+		t.Errorf("stderr did not explain the degraded posture: %q", stderr.String())
 	}
 }
 
