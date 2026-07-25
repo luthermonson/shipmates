@@ -120,7 +120,12 @@ func TestFakeAppServerProcess(t *testing.T) {
 func fakeOptions(t *testing.T, scenario string) StartOptions {
 	t.Helper()
 	t.Setenv("UNRELATED_SECRET", secret)
-	return StartOptions{WorkingDirectory: t.TempDir(), Environment: map[string]string{"SHIPMATES_FAKE_APP_SERVER": "1", "SHIPMATES_FAKE_SCENARIO": scenario}, Command: []string{os.Args[0], "-test.run=^TestFakeAppServerProcess$"}, StartupTimeout: 2 * time.Second, ShutdownTimeout: 100 * time.Millisecond, MaxFrameBytes: 1024}
+	// StartupTimeout is a ceiling, not a target — the non-timeout scenarios
+	// finish in milliseconds. Under -race the fake child's os.Exit runs
+	// TSan's atexit path first, which alone costs ~1s, so a tight budget
+	// turns a contended runner into a spurious startup_timeout. Tests that
+	// assert on the timeout itself override this.
+	return StartOptions{WorkingDirectory: t.TempDir(), Environment: map[string]string{"SHIPMATES_FAKE_APP_SERVER": "1", "SHIPMATES_FAKE_SCENARIO": scenario}, Command: []string{os.Args[0], "-test.run=^TestFakeAppServerProcess$"}, StartupTimeout: 30 * time.Second, ShutdownTimeout: 100 * time.Millisecond, MaxFrameBytes: 1024}
 }
 
 func TestStartHandshakeAndIdempotentClose(t *testing.T) {
