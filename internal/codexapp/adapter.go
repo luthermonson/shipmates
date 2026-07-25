@@ -544,7 +544,13 @@ func (a *Adapter) readLoop() {
 			closing := a.closing
 			a.mu.Unlock()
 			if !closing {
-				if errors.Is(err, io.EOF) {
+				// A child that stops talking is observed through two independent
+				// events: stdout reaching EOF, and the reaper's cmd.Wait returning,
+				// which makes os/exec close the parent end of this pipe. Whichever
+				// wins the race, the meaning is identical, so a closed pipe must
+				// classify as EOF and never as a frame fault. Only the adapter ever
+				// closes this descriptor, so os.ErrClosed cannot come from the child.
+				if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
 					a.fail(failure(UnexpectedEOF))
 				} else {
 					a.fail(failure(MalformedFrame))

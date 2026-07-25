@@ -165,6 +165,27 @@ func TestStartupRefusalsAreSanitizedAndReaped(t *testing.T) {
 	}
 }
 
+// The reaper and the read loop observe child exit through independent events,
+// and os/exec closes the parent end of the stdout pipe once cmd.Wait returns.
+// When the reaper wins that race the read fails with os.ErrClosed rather than
+// io.EOF, and it must still be reported as an unexpected close.
+func TestReaperClosingStdoutIsClassifiedAsUnexpectedEOF(t *testing.T) {
+	// The write end is kept open by the pipe cleanup, so the loop can never see a
+	// genuine io.EOF here; the only possible termination is the closed descriptor.
+	stdout, _ := ioPipe(t)
+	a := &Adapter{stdout: stdout, nextID: 1, pending: make(map[int64]pendingCall), done: make(chan struct{}), maxFrame: 1024}
+	go a.readLoop()
+	_ = stdout.Close()
+	select {
+	case <-a.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read loop did not terminate")
+	}
+	if ErrorCode(a.terminal) != UnexpectedEOF {
+		t.Fatalf("terminal = %v, want %q", a.terminal, UnexpectedEOF)
+	}
+}
+
 func TestThreadParamsToollessReadOnly(t *testing.T) {
 	p := threadParams(ThreadOptions{WorkingDirectory: "/tmp/project", Model: "gpt-5.6-sol", ReadOnly: true, Toolless: true})
 	if p["sandbox"] != "read-only" || p["model"] != "gpt-5.6-sol" {
