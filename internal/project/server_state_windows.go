@@ -4,11 +4,13 @@ package project
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"unsafe"
 
+	"github.com/luthermonson/shipmates/internal/winsec"
 	"golang.org/x/sys/windows"
 )
 
@@ -34,55 +36,17 @@ func openWindowsStateDirHandle(path string, access uint32) (windows.Handle, erro
 	return h, nil
 }
 
+// privateWindowsDACL hardens one object to the current user plus LOCAL
+// SYSTEM. The implementation is shared with the policy subsystem so there is
+// exactly one place that knows how a private Windows DACL is written and how
+// it reads back — see internal/winsec.
+//
+// handle must carry READ_CONTROL|WRITE_DAC; every caller below asks for them
+// explicitly, because the generic access rights Go's os package requests do
+// not include WRITE_DAC and SetSecurityInfo then fails with access denied.
 func privateWindowsDACL(handle windows.Handle, inherit bool) error {
-	var token windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
-		return err
-	}
-	defer token.Close()
-	u, err := token.GetTokenUser()
-	if err != nil {
-		return err
-	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
-	if err != nil {
-		return err
-	}
-	inheritance := uint32(0)
-	if inherit {
-		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
-	}
-	entries := []windows.EXPLICIT_ACCESS{
-		{AccessPermissions: windows.GENERIC_ALL, AccessMode: windows.SET_ACCESS, Inheritance: inheritance, Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER, TrusteeValue: windows.TrusteeValueFromSID(u.User.Sid)}},
-		{AccessPermissions: windows.GENERIC_ALL, AccessMode: windows.SET_ACCESS, Inheritance: inheritance, Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_WELL_KNOWN_GROUP, TrusteeValue: windows.TrusteeValueFromSID(system)}},
-	}
-	acl, err := windows.ACLFromEntries(entries, nil)
-	if err != nil {
-		return err
-	}
-	if err = windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
-		return err
-	}
-	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		return err
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil || dacl == nil || dacl.AceCount != 2 {
-		return errors.New("server state DACL verification failed")
-	}
-	seenUser, seenSystem := false, false
-	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if windows.GetAce(dacl, i, &ace) != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask&windows.GENERIC_ALL == 0 {
-			return errors.New("server state DACL verification failed")
-		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		seenUser = seenUser || sid.Equals(u.User.Sid)
-		seenSystem = seenSystem || sid.Equals(system)
-	}
-	if !seenUser || !seenSystem {
-		return errors.New("server state DACL verification failed")
+	if err := winsec.PrivateDACL(handle, inherit); err != nil {
+		return fmt.Errorf("server state DACL verification failed: %w", err)
 	}
 	return nil
 }
@@ -190,12 +154,24 @@ func WriteServerStateFile(root, name string, raw []byte) error {
 	} else if !errors.Is(x, windows.ERROR_FILE_NOT_FOUND) {
 		return x
 	}
-	tmp, e := os.CreateTemp(d.path, ".server-ready-*")
+	staged, e := os.CreateTemp(d.path, ".server-ready-*")
 	if e != nil {
 		return e
 	}
-	tn := tmp.Name()
+	tn := staged.Name()
 	defer os.Remove(tn)
+	// Reopen the staged file asking for WRITE_DAC explicitly: os.CreateTemp
+	// requests only GENERIC_READ|GENERIC_WRITE, and SetSecurityInfo on such a
+	// handle fails with ERROR_ACCESS_DENIED.
+	e = staged.Close()
+	if e != nil {
+		return e
+	}
+	h, _, e := winsec.Open(tn, false, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL|windows.WRITE_DAC, windows.OPEN_EXISTING)
+	if e != nil {
+		return e
+	}
+	tmp := os.NewFile(uintptr(h), tn)
 	if e = privateWindowsDACL(windows.Handle(tmp.Fd()), false); e == nil {
 		e = tmp.Chmod(0o600)
 	}
@@ -249,7 +225,7 @@ func OpenServerLog(root string) (*os.File, error) {
 		return nil, e
 	}
 	defer d.close()
-	h, _, e := openWindowsStateLeaf(d, "server.log", windows.FILE_APPEND_DATA|windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_ATTRIBUTES, windows.OPEN_ALWAYS)
+	h, _, e := openWindowsStateLeaf(d, "server.log", windows.FILE_APPEND_DATA|windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC, windows.OPEN_ALWAYS)
 	if e != nil {
 		return nil, e
 	}
