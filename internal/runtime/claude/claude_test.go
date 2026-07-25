@@ -35,6 +35,13 @@ func TestMain(m *testing.M) {
 //	SHIPMATES_CLAUDE_FAKE_ECHO_ENV         name of an env var echoed as a text frame
 //	SHIPMATES_CLAUDE_FAKE_ECHO_ARGS        emit one "argv:…" text frame per process
 //	SHIPMATES_CLAUDE_FAKE_IGNORE_INTERRUPT ack control_requests but never end the turn
+//
+// A turn whose text starts with "approve:" additionally exercises the
+// permission control protocol: the fake emits a can_use_tool
+// control_request for `Bash` with the rest of the text as the command and
+// blocks the turn until a control_response arrives, exactly as claude
+// 2.1.153 does. The decision is echoed back as an "approval:<behavior>…"
+// text frame so tests can assert on it.
 func runFakeClaude() {
 	var outMu sync.Mutex
 	emit := func(v any) {
@@ -64,6 +71,12 @@ func runFakeClaude() {
 	var active bool
 	var interrupt chan struct{}
 	var wg sync.WaitGroup
+
+	// approvals correlates an emitted can_use_tool request_id to the
+	// goroutine blocked waiting for its control_response.
+	var approvalMu sync.Mutex
+	approvals := map[string]chan map[string]any{}
+	approvalSeq := 0
 
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -110,10 +123,12 @@ func runFakeClaude() {
 			active = true
 			intr := make(chan struct{}, 1)
 			interrupt = intr
+			approvalSeq++
+			reqID := fmt.Sprintf("fake-approval-%d", approvalSeq)
 			stateMu.Unlock()
 
 			wg.Add(1)
-			go func(intr chan struct{}, ms int) {
+			go func(intr chan struct{}, ms int, text, reqID string) {
 				defer wg.Done()
 				emit(map[string]any{
 					"type": "assistant",
@@ -123,6 +138,37 @@ func runFakeClaude() {
 				})
 				if name := os.Getenv("SHIPMATES_CLAUDE_FAKE_ECHO_ENV"); name != "" {
 					emit(textFrame(fmt.Sprintf("env %s=%s", name, os.Getenv(name))))
+				}
+				if command, ok := strings.CutPrefix(text, "approve:"); ok {
+					answer := make(chan map[string]any, 1)
+					approvalMu.Lock()
+					approvals[reqID] = answer
+					approvalMu.Unlock()
+					emit(map[string]any{
+						"type":       "control_request",
+						"request_id": reqID,
+						"request": map[string]any{
+							"subtype":      "can_use_tool",
+							"tool_name":    "Bash",
+							"display_name": "Bash",
+							"description":  "fake tool call",
+							"tool_use_id":  "toolu_fake",
+							"input":        map[string]any{"command": command, "description": "fake tool call"},
+							"permission_suggestions": []map[string]any{
+								{"type": "setMode", "mode": "acceptEdits", "destination": "session"},
+							},
+						},
+					})
+					select {
+					case body := <-answer:
+						behavior, _ := body["behavior"].(string)
+						message, _ := body["message"].(string)
+						emit(textFrame("approval:" + behavior + ":" + message))
+					case <-intr:
+						emit(textFrame("approval:interrupted:"))
+					case <-time.After(20 * time.Second):
+						emit(textFrame("approval:timeout:"))
+					}
 				}
 				result := map[string]any{"type": "result", "subtype": "success", "is_error": false}
 				select {
@@ -134,7 +180,24 @@ func runFakeClaude() {
 				active = false
 				stateMu.Unlock()
 				emit(result)
-			}(intr, ms)
+			}(intr, ms, text, reqID)
+		case "control_response":
+			var resp struct {
+				Response struct {
+					RequestID string         `json:"request_id"`
+					Response  map[string]any `json:"response"`
+				} `json:"response"`
+			}
+			if json.Unmarshal(sc.Bytes(), &resp) != nil {
+				continue
+			}
+			approvalMu.Lock()
+			ch := approvals[resp.Response.RequestID]
+			delete(approvals, resp.Response.RequestID)
+			approvalMu.Unlock()
+			if ch != nil {
+				ch <- resp.Response.Response
+			}
 		case "control_request":
 			if msg.Request.Subtype != "interrupt" {
 				continue

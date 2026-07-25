@@ -76,6 +76,9 @@ func (r *Runtime) Capabilities() runtime.Caps {
 		// environment (codexapp.ThreadOptions cannot carry one), so
 		// SessionSpec.Environment is unsupported — see StartSession.
 		Environment: false,
+		// The app-server issues item/commandExecution/requestApproval RPCs
+		// that the adapter surfaces and ResolveApproval answers.
+		Approvals: true,
 	}
 }
 

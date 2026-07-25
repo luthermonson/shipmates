@@ -97,6 +97,11 @@ type Caps struct {
 	// environments (codex app-server) report false and reject specs that
 	// set Environment with ErrUnsupported.
 	Environment bool
+	// Approvals: the runtime asks before running tool calls it cannot
+	// approve itself, emitting KindApprovalNeeded events that ResolveApproval
+	// answers. When false, ResolveApproval returns ErrUnsupported and callers
+	// must not present the runtime as mediated.
+	Approvals bool
 }
 
 // Session is a handle to an active or resumable runtime session.

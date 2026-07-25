@@ -26,6 +26,7 @@ import (
 //	{"type":"result","subtype":"error_during_execution","is_error":true,…}
 //	{"type":"control_response","response":{"subtype":"success","request_id":"…"}}
 //	{"type":"rate_limit_event",…}
+//	{"type":"control_request","request_id":"…","request":{"subtype":"can_use_tool",…}}
 //
 // Tool use / tool results are nested inside assistant/user message content
 // blocks; we also keep the legacy flat {"type":"tool_use"} handling for
@@ -44,6 +45,21 @@ type frame struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	// result-shaped
 	IsError bool `json:"is_error,omitempty"`
+	// control_request-shaped. request_id sits at the TOP level of the frame,
+	// not inside "request" — verified against claude 2.1.153.
+	RequestID string          `json:"request_id,omitempty"`
+	Request   json.RawMessage `json:"request,omitempty"`
+}
+
+// controlRequest is the body of a {"type":"control_request"} frame.
+type controlRequest struct {
+	Subtype     string          `json:"subtype"`
+	ToolName    string          `json:"tool_name"`
+	DisplayName string          `json:"display_name"`
+	Description string          `json:"description"`
+	ToolUseID   string          `json:"tool_use_id"`
+	Input       json.RawMessage `json:"input"`
+	Suggestions json.RawMessage `json:"permission_suggestions"`
 }
 
 // contentBlock is one element of message.content in assistant/user frames.
@@ -123,6 +139,16 @@ func decodeFrame(raw []byte, sessionID, turnID string) runtime.Event {
 			ev.Kind = runtime.KindTurnDone
 		}
 		ev.Payload = copyOfRaw
+	case "control_request":
+		// The only control_request Claude Code issues toward us is the
+		// permission prompt. Anything else stays backend noise.
+		if req, ok := extractApproval(f); ok {
+			ev.Kind = runtime.KindApprovalNeeded
+			ev.Payload = req
+		} else {
+			ev.Kind = runtime.KindBackend
+			ev.Payload = copyOfRaw
+		}
 	case "system":
 		ev.Kind = runtime.KindBackend
 		ev.Payload = copyOfRaw
@@ -219,4 +245,72 @@ type ToolCall struct {
 type ToolResult struct {
 	ToolUseID   string
 	ContentJSON json.RawMessage
+}
+
+// ApprovalRequest is the KindApprovalNeeded payload — one Claude Code
+// `can_use_tool` permission prompt, verbatim.
+//
+// Verified frame (claude 2.1.153, `--permission-prompt-tool stdio`):
+//
+//	{"type":"control_request","request_id":"ea418bbe-…","request":{
+//	  "subtype":"can_use_tool","tool_name":"Write","display_name":"Write",
+//	  "input":{"file_path":"…","content":"…"},"description":"probe-test.txt",
+//	  "permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],
+//	  "tool_use_id":"toolu_016nb…"}}
+//
+// InputJSON is retained verbatim because an "allow" answer must echo the
+// tool input back as `updatedInput` — claude 2.1.153 rejects an allow that
+// omits it.
+type ApprovalRequest struct {
+	RequestID   string
+	ToolName    string
+	DisplayName string
+	Description string
+	ToolUseID   string
+	InputJSON   json.RawMessage
+	// SuggestionsJSON holds `permission_suggestions` untouched. Shipmates
+	// never echoes them back (it grants "once" scope only), but consumers
+	// can display what Claude Code proposed.
+	SuggestionsJSON json.RawMessage
+}
+
+// Command extracts the shell command an approval is asking about, for the
+// tools that run one. The second result reports whether this request is a
+// shell execution at all — file writes, web fetches and the rest are not,
+// and callers must not present their arguments as a command line.
+func (a ApprovalRequest) Command() (string, bool) {
+	switch a.ToolName {
+	case "Bash", "PowerShell":
+	default:
+		return "", false
+	}
+	var in struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(a.InputJSON, &in) != nil || in.Command == "" {
+		return "", false
+	}
+	return in.Command, true
+}
+
+// extractApproval pulls a can_use_tool permission prompt out of a
+// control_request frame. A request without an id cannot be answered, so it
+// is rejected rather than surfaced as an unanswerable approval.
+func extractApproval(f frame) (ApprovalRequest, bool) {
+	if f.RequestID == "" || len(f.Request) == 0 {
+		return ApprovalRequest{}, false
+	}
+	var req controlRequest
+	if err := json.Unmarshal(f.Request, &req); err != nil || req.Subtype != "can_use_tool" {
+		return ApprovalRequest{}, false
+	}
+	return ApprovalRequest{
+		RequestID:       f.RequestID,
+		ToolName:        req.ToolName,
+		DisplayName:     req.DisplayName,
+		Description:     req.Description,
+		ToolUseID:       req.ToolUseID,
+		InputJSON:       req.Input,
+		SuggestionsJSON: req.Suggestions,
+	}, true
 }

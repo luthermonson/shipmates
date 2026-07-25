@@ -24,6 +24,13 @@
 //   - `--session-id <id>` may only be used for a session that does not
 //     exist yet ("Session ID … is already in use." otherwise); respawns and
 //     resumes must use `--resume <id>`, which keeps the same session id.
+//   - Approvals: with the (undocumented but stable) `--permission-prompt-tool
+//     stdio` flag, every tool call that the permission flow does not resolve
+//     on its own arrives as
+//     {"type":"control_request","request_id":"…","request":{"subtype":"can_use_tool",…}}
+//     and blocks the turn until we answer with
+//     {"type":"control_response","response":{"subtype":"success","request_id":"…","response":{…}}}.
+//     See ResolveApproval for the answer shapes and the empirical evidence.
 package claude
 
 import (
@@ -36,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,13 +83,28 @@ type Runtime struct {
 	// before closing the stream channel exactly once.
 	fanWG sync.WaitGroup
 
-	// sessMu guards sessions, closed, AND every session's mutable fields
-	// (turnActive, turnID, turnDone, proc, resume). One lock keeps the
-	// SendTurn/SteerTurn/InterruptTurn/Close interleavings easy to reason
-	// about.
+	// sessMu guards sessions, closed, approvals, AND every session's mutable
+	// fields (turnActive, turnID, turnDone, proc, resume). One lock keeps the
+	// SendTurn/SteerTurn/InterruptTurn/ResolveApproval/Close interleavings
+	// easy to reason about.
 	sessMu   sync.Mutex
 	closed   bool
 	sessions map[string]*session
+	// approvals holds every unanswered can_use_tool request, keyed by the
+	// claude-assigned request_id. Entries are registered by readLoop before
+	// the event reaches a consumer (so an immediate ResolveApproval always
+	// finds one) and dropped on answer, turn end, or session teardown.
+	approvals map[string]*pendingApproval
+}
+
+// pendingApproval is one unanswered can_use_tool request, plus everything
+// needed to answer it: the process to write to, the turn to attribute it
+// to, and the original tool input (which an "allow" must echo back).
+type pendingApproval struct {
+	sessionID string
+	turnID    string
+	proc      *proc
+	request   ApprovalRequest
 }
 
 // Config controls claude runtime construction.
@@ -123,6 +146,7 @@ func New(cfg Config) *Runtime {
 		stream:         make(chan runtime.Event, 64),
 		stopFan:        make(chan struct{}),
 		sessions:       map[string]*session{},
+		approvals:      map[string]*pendingApproval{},
 	}
 }
 
@@ -144,6 +168,7 @@ func (r *Runtime) Capabilities() runtime.Caps {
 		Refusal:     false, // claude surfaces refusals as regular text events
 		Containment: false,
 		Environment: true, // SessionSpec.Environment applied to every spawn
+		Approvals:   true, // can_use_tool control protocol, see ResolveApproval
 	}
 }
 
@@ -184,6 +209,7 @@ func (r *Runtime) CloseSession(ctx context.Context, id string) error {
 		delete(r.sessions, id)
 		p = s.proc
 	}
+	r.dropApprovalsLocked(func(pa *pendingApproval) bool { return pa.sessionID == id })
 	r.sessMu.Unlock()
 	if p != nil {
 		p.closeStdin()
@@ -328,13 +354,89 @@ func (r *Runtime) InterruptTurn(ctx context.Context, sessionID, _ string) error 
 	}
 }
 
-// ResolveApproval implements runtime.Runtime. Claude Code approvals arrive
-// through the SessionStart / PermissionRequest hook shipmates already
-// wires; that plumbing hooks in via InstallMemoryHook + a companion
-// permissions hook in later phases. Until then, we return
-// ErrUnsupported so callers know they must not rely on it.
-func (r *Runtime) ResolveApproval(context.Context, runtime.ApprovalResponse, runtime.ApprovalDecision) (bool, error) {
-	return false, &runtime.ErrUnsupported{Runtime: "claude", Feature: "ResolveApproval (Phase 4 hook plumbing)"}
+// ResolveApproval implements runtime.Runtime. It answers one pending
+// can_use_tool request on the session process's stdin and reports whether
+// the answer was written.
+//
+// Wire shapes, verified against claude 2.1.153 by driving the real binary
+// (see docs/runtime-interface-plan.md for the transcript):
+//
+//	allow: {"type":"control_response","response":{"subtype":"success",
+//	        "request_id":"…","response":{"behavior":"allow","updatedInput":{…}}}}
+//	deny:  {"type":"control_response","response":{"subtype":"success",
+//	        "request_id":"…","response":{"behavior":"deny","message":"…"}}}
+//
+// `updatedInput` is mandatory on allow for this version — an allow without
+// it is rejected as a validation error and the tool call is denied — so the
+// original tool input is echoed back verbatim. Shipmates never echoes
+// `permission_suggestions` back in `updatedPermissions`: decisions are
+// scoped to this one call, never persisted into the project's settings.
+//
+// An unknown, already-answered or misattributed request id is an error
+// rather than a silent success, so the mediation layer fails closed instead
+// of believing an answer landed. A decision of anything other than allow is
+// written as a deny; there is no third state on the wire.
+func (r *Runtime) ResolveApproval(ctx context.Context, resp runtime.ApprovalResponse, d runtime.ApprovalDecision) (bool, error) {
+	if resp.ID == "" {
+		return false, fmt.Errorf("claude: approval response carries no request id")
+	}
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	default:
+	}
+	r.sessMu.Lock()
+	p, ok := r.approvals[resp.ID]
+	if !ok {
+		r.sessMu.Unlock()
+		return false, fmt.Errorf("claude: no pending approval %q", resp.ID)
+	}
+	// Identity is checked only when the caller supplied it, so a mediator
+	// that tracks the tuple gets the correlation guarantee and one that
+	// doesn't is still able to answer.
+	if (resp.SessionID != "" && resp.SessionID != p.sessionID) || (resp.TurnID != "" && resp.TurnID != p.turnID) {
+		r.sessMu.Unlock()
+		return false, fmt.Errorf("claude: approval %q belongs to session %q turn %q", resp.ID, p.sessionID, p.turnID)
+	}
+	delete(r.approvals, resp.ID)
+	r.sessMu.Unlock()
+
+	body := map[string]any{"behavior": "deny", "message": denyMessage(d)}
+	if d.Allow {
+		input := p.request.InputJSON
+		if len(input) == 0 {
+			input = json.RawMessage(`{}`)
+		}
+		body = map[string]any{"behavior": "allow", "updatedInput": input}
+	}
+	if err := p.proc.writeControlResponse(resp.ID, body); err != nil {
+		return false, fmt.Errorf("claude: write approval response: %w", err)
+	}
+	return true, nil
+}
+
+// denyMessage is what the model sees when a tool call is refused. Claude
+// Code requires a non-empty message on deny and shows it to the model, so
+// the operator's rationale is passed through when there is one.
+func denyMessage(d runtime.ApprovalDecision) string {
+	if s := strings.TrimSpace(d.Rationale); s != "" {
+		return s
+	}
+	return "Denied by shipmates approval mediation."
+}
+
+// dropApprovalsLocked removes every pending approval matching a predicate
+// and returns them, so callers can decide whether to answer them. Caller
+// must hold sessMu.
+func (r *Runtime) dropApprovalsLocked(match func(*pendingApproval) bool) []*pendingApproval {
+	var dropped []*pendingApproval
+	for id, p := range r.approvals {
+		if match(p) {
+			dropped = append(dropped, p)
+			delete(r.approvals, id)
+		}
+	}
+	return dropped
 }
 
 // Close implements runtime.Runtime. Tears down every open session's
@@ -354,6 +456,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 			}
 		}
 		r.sessions = map[string]*session{}
+		r.approvals = map[string]*pendingApproval{}
 		r.sessMu.Unlock()
 		for _, p := range procs {
 			p.closeStdin()
@@ -392,6 +495,11 @@ func (r *Runtime) spawn(ctx context.Context, s *session) (*proc, error) {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
+		// Route every unresolved tool permission to us as a can_use_tool
+		// control_request instead of letting Claude Code decide alone. Without
+		// it the persona's prompts are invisible to shipmates and the
+		// operator can neither see nor answer them.
+		"--permission-prompt-tool", "stdio",
 	}
 	r.sessMu.Lock()
 	resume := s.resume
@@ -493,12 +601,27 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 			s.turnActive = false
 			s.turnID = ""
 			close(s.turnDone)
+			// The turn is over; anything still unanswered can never be
+			// answered (claude has stopped waiting on it).
+			r.dropApprovalsLocked(func(p *pendingApproval) bool { return p.sessionID == s.id })
 		}
 		r.sessMu.Unlock()
+		ev := decodeFrame(line, s.id, turnID)
+		if req, ok := ev.Payload.(ApprovalRequest); ok && ev.Kind == runtime.KindApprovalNeeded {
+			// Register before publishing so a consumer that answers
+			// synchronously always finds the pending entry.
+			r.sessMu.Lock()
+			if r.closed {
+				r.sessMu.Unlock()
+				return
+			}
+			r.approvals[req.RequestID] = &pendingApproval{sessionID: s.id, turnID: turnID, proc: p, request: req}
+			r.sessMu.Unlock()
+		}
 		select {
 		case <-r.stopFan:
 			return
-		case r.stream <- decodeFrame(line, s.id, turnID):
+		case r.stream <- ev:
 		}
 	}
 	// Stdout closed: the process is exiting. Wait for containment to
@@ -515,6 +638,7 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 		s.turnID = ""
 		close(s.turnDone)
 	}
+	r.dropApprovalsLocked(func(pa *pendingApproval) bool { return pa.sessionID == s.id })
 	r.sessMu.Unlock()
 
 	kind := runtime.KindSessionClosed
@@ -641,6 +765,23 @@ func (p *proc) writeControlRequest(requestID, subtype string) error {
 		"request":    map[string]any{"subtype": subtype},
 	}
 	return p.writeLine(msg)
+}
+
+// writeControlResponse answers one control_request. `body` is the
+// subtype-specific payload — for can_use_tool that is
+// {"behavior":"allow","updatedInput":{…}} or
+// {"behavior":"deny","message":"…"}:
+//
+//	{"type":"control_response","response":{"subtype":"success","request_id":"…","response":{…}}}
+func (p *proc) writeControlResponse(requestID string, body any) error {
+	return p.writeLine(map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+			"response":   body,
+		},
+	})
 }
 
 func (p *proc) writeLine(msg any) error {
