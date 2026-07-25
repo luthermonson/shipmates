@@ -240,15 +240,45 @@ the catalog reader). Each runtime installer translates the canonical
 form into its native on-disk shape:
 
 ```text
-.codex/agents/<persona>.toml    # codex — written by shipmates init today
-.claude/agents/<persona>.md     # claude — written by runtime.claude.InstallPersona
+.codex/agents/<persona>.toml    # always — also the persona inventory
+.claude/agents/<persona>.md     # only when runtime: claude
 ```
 
-Today `shipmates init` and `shipmates add` write the codex TOML artifact
-directly. The claude Markdown writer is implemented in
-`internal/runtime/claude` but is not yet called by the CLI; persona
-install moves onto the runtime interface in a later phase (see
-[Runtime interface plan](runtime-interface-plan.md)).
+`shipmates add` and `update` write both artifacts from the same composed
+catalog bytes, so a routing block or a catalog change reaches both.
+
+The codex TOML is written on **every** runtime: besides being what codex
+reads, it is shipmates' record of which personas are installed —
+`shipmates list`, `update` and `remove` consult it regardless of runtime.
+
+The claude Markdown file is written **only** when the project's configured
+runtime is claude, so a codex project never grows a `.claude/` directory.
+It is load-bearing: the claude runtime spawns `claude --agent <persona>`,
+and Claude Code loads the persona's role, instructions and constraints
+from exactly this file. Without it the turn runs as a generic Claude
+session with none of them.
+
+It carries only what Claude Code understands — `name`, `description`,
+optional `model` and `tools`, then the persona's Markdown body verbatim.
+Shipmates-only frontmatter (`byline`, `domainGlob`, `memoryDir`,
+`permissions`, `remoteControl`, `berth`) is elided; shipmates carries
+those out-of-band. Canonical capability names are translated to Claude
+Code's tool names (`read` → `Read, Glob, Grep`; `edit` → `Read, Edit,
+Write`; `bash` → `Bash`; `browse` → `WebFetch, WebSearch`), because Claude
+Code silently drops tool names it does not recognize — a persona listing
+the canonical spellings would start with *no* tools at all (verified
+against claude 2.1.153). A persona that declares no capabilities gets no
+`tools` key, which grants the full toolbox: shipmates governs tool use
+through policy and the approval path, not by amputating the toolbox. A
+name shipmates does not know is passed through verbatim, so a persona can
+name a Claude Code or MCP tool directly.
+
+Both artifacts are recorded in `.shipmates/manifest.json` and follow the
+same rules as every other managed file: a hand-edited
+`.claude/agents/backend.md` is preserved, a deleted one is re-added by
+`shipmates update`, and a second `update` changes nothing. Switching
+`runtime:` to claude and running `shipmates update` installs the claude
+artifacts for the personas already present.
 
 Persona names must match `^[a-z][a-z0-9_-]*$`.
 

@@ -86,6 +86,44 @@ YAML
 shipmates add quartermaster > "$E2E/add.log" 2>&1
 check "persona installed" "$(ls .codex/agents/quartermaster.toml 2>/dev/null)" "$(tail -3 "$E2E/add.log")"
 
+step "GAP 3: the claude subagent file is installed for the claude runtime"
+check "add wrote .claude/agents/quartermaster.md" \
+  "$(ls .claude/agents/quartermaster.md 2>/dev/null)" "$(tail -3 "$E2E/add.log")"
+check "it carries the persona's role, not just a name" \
+  "$(grep -F 'You are the **quartermaster**' .claude/agents/quartermaster.md)" \
+  "$(head -20 .claude/agents/quartermaster.md 2>/dev/null)"
+check "shipmates-only frontmatter is elided" \
+  "$([ -z "$(sed -n '2,/^---$/p' .claude/agents/quartermaster.md | grep -E '^(byline|memoryDir|permissions|domainGlob):')" ] && echo yes)" \
+  "$(sed -n '1,/^---$/p' .claude/agents/quartermaster.md)"
+check "the artifact is manifest-tracked" \
+  "$(grep -F '.claude/agents/quartermaster.md' .shipmates/manifest.json)" \
+  "$(cat .shipmates/manifest.json)"
+
+step "GAP 3: update preserves a hand-edited subagent file, and is idempotent"
+printf -- '---\nname: quartermaster\n---\n\nmy own instructions\n' > .claude/agents/quartermaster.md
+shipmates update --accept ours > "$E2E/update-ours.log" 2>&1
+check "a hand edit survives update --accept ours" \
+  "$(grep -F 'my own instructions' .claude/agents/quartermaster.md)" \
+  "$(cat .claude/agents/quartermaster.md)"
+# Same rule the canonical Codex artifact follows: when the operator edited the
+# file and the catalog has NOT moved, there is nothing to reconcile, so the
+# edit is kept whatever --accept says. Only a moved catalog makes it a conflict.
+shipmates update --accept theirs > "$E2E/update-theirs.log" 2>&1
+check "an edit against an unmoved catalog is kept even with --accept theirs" \
+  "$(grep -F 'my own instructions' .claude/agents/quartermaster.md)" \
+  "$(cat .claude/agents/quartermaster.md)"
+# Deleting a tracked artifact is how an operator asks for it back.
+rm .claude/agents/quartermaster.md
+shipmates update --accept theirs > "$E2E/update-readd.log" 2>&1
+check "a deleted-but-tracked agent file is re-added from the catalog" \
+  "$(grep -F 'You are the **quartermaster**' .claude/agents/quartermaster.md 2>/dev/null)" \
+  "$(tail -3 "$E2E/update-readd.log")"
+cp .claude/agents/quartermaster.md "$E2E/agent-before-idempotent.md"
+shipmates update --accept theirs > "$E2E/update-again.log" 2>&1
+check "a second update leaves the agent file byte-identical" \
+  "$(cmp -s "$E2E/agent-before-idempotent.md" .claude/agents/quartermaster.md && echo yes)" \
+  "$(diff "$E2E/agent-before-idempotent.md" .claude/agents/quartermaster.md)"
+
 count_hooks() {
   python3 - <<'PY'
 import json
@@ -252,6 +290,18 @@ check "ask allowed the tool from policy and finished" \
 shipmates --runtime claude ask quartermaster "approve:rm -rf /" > "$E2E/ask2.log" 2>&1
 check "ask denied an unruled tool instead of hanging" \
   "$(grep -F 'approval:deny:' "$E2E/ask2.log")" "$(tail -6 "$E2E/ask2.log")"
+
+step "GAP 3: the runtime spawns with --agent and finds the installed definition"
+# The fake resolves --agent the way the real binary does — by file name under
+# .claude/agents/ — and echoes the persona's own heading back, so a missing or
+# empty agent file is distinguishable from a loaded one. That the real claude
+# 2.1.153 honors this exact file is proven separately: with --agent it answers
+# as the quartermaster and names .shipmates/memory/quartermaster/, without it
+# it answers as a generic Claude agent.
+shipmates --runtime claude ask quartermaster "agent?" > "$E2E/ask-agent.log" 2>&1
+check "the runtime loaded the installed subagent definition" \
+  "$(grep -F 'agent:quartermaster:loaded:You are the **quartermaster**' "$E2E/ask-agent.log")" \
+  "$(tail -6 "$E2E/ask-agent.log")"
 
 step "teardown"
 stop_server

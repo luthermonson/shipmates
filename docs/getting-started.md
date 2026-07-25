@@ -81,11 +81,12 @@ shipmates list
 Initialization creates:
 
 - `shipmates.yaml` for project configuration;
-- `.codex/agents/<persona>.toml` for canonical Codex instructions
-  (`shipmates init` still writes only the codex artifact; a
-  `.claude/agents/<persona>.md` writer exists in `internal/runtime/claude`
-  and is exercised in tests, but is not yet invoked by `init` — tracked
-  in [Runtime interface plan](runtime-interface-plan.md));
+- `.codex/agents/<persona>.toml` for canonical Codex instructions — also
+  shipmates' record of which personas are installed, so it is written on
+  every runtime;
+- `.claude/agents/<persona>.md` when the project's runtime is claude; it
+  is what `claude --agent <persona>` loads the persona from (see
+  [Configuration → Canonical persona files](configuration.md#canonical-persona-files));
 - `.shipmates/policy.yaml` and persona policy overlays;
 - `.shipmates/memory/<persona>/` for durable project memory;
 - `.shipmates/manifest.json` for managed-file ownership;

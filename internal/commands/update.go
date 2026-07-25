@@ -205,6 +205,13 @@ func runUpdateLocked(cat *catalog.Catalog, only, accept string, m *project.Manif
 		if err := reconcileFile(m, st, codexPath, codexBytes, "Codex agent"); err != nil {
 			return err
 		}
+		// The configured runtime's own artifact, from the same composed
+		// bytes. Missing-and-untracked installs here rather than being
+		// skipped, so `update` is also how a project that switched to claude
+		// picks up its `.claude/agents/<persona>.md`.
+		if err := reconcileRuntimePersona(m, st, name, catBytes); err != nil {
+			return err
+		}
 		policy, err := catalogM5Policy(cat, name)
 		if err != nil {
 			return fmt.Errorf("read catalog policy %s: %w", name, err)

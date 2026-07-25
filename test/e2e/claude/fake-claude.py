@@ -16,6 +16,7 @@ Mirrors what claude 2.1.153 does on
 Turn text conventions used by the E2E script:
   approve:<command>   ask permission for Bash(<command>) before finishing
   sleepms:<n>         hold the turn open for n milliseconds
+  agent?              report the subagent definition --agent resolved to
 """
 import json
 import os
@@ -38,10 +39,33 @@ def text(s):
 
 
 session_id = "fake"
+agent = ""
 argv = sys.argv[1:]
 for i, a in enumerate(argv):
     if a in ("--session-id", "--resume") and i + 1 < len(argv):
         session_id = argv[i + 1]
+    elif a == "--agent" and i + 1 < len(argv):
+        agent = argv[i + 1]
+
+
+def agent_report():
+    """Resolve --agent the way the real binary does: by file name under
+    .claude/agents/ in the project directory. Reports the persona's own
+    heading so the harness can tell a loaded definition from an empty one."""
+    if not agent:
+        return "agent:none::"
+    path = os.path.join(".claude", "agents", agent + ".md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            body = f.read()
+    except OSError:
+        return "agent:%s:missing:" % agent
+    marker = ""
+    for line in body.splitlines():
+        if line.startswith("You are the"):
+            marker = line.strip()
+            break
+    return "agent:%s:loaded:%s" % (agent, marker)
 
 emit({"type": "system", "subtype": "init", "session_id": session_id,
       "claude_code_version": "fake-2.1.153", "argv": argv})
@@ -62,6 +86,8 @@ def blocks_of(msg):
 
 def run_turn(prompt, intr, req_id):
     text("fake hello")
+    if prompt.startswith("agent?"):
+        text(agent_report())
     if prompt.startswith("approve:"):
         command = prompt[len("approve:"):]
         answer = {}

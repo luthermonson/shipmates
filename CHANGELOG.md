@@ -44,6 +44,34 @@ All notable changes to Shipmates are documented here. This project follows
   dropped, and one-shot `ask` decides from policy alone (allow on a
   matching rule, deny otherwise) and prints the outcome to stderr.
   `runtime.Caps` grows an `Approvals` bit; both runtimes report true.
+- **Personas are actually installed for the claude runtime.**
+  `InstallPersona` had no production caller: `add` and `update` rendered
+  only the codex artifact, so `.claude/agents/<persona>.md` was never
+  written and `claude --agent <persona>` found no definition to load —
+  the persona's role, instructions and constraints were silently absent
+  and the turn ran as a generic Claude session. `add` and `update` now
+  install the configured runtime's persona artifact through
+  `factory.PersonaArtifact`, rendered from the same composed catalog
+  bytes as the codex artifact, and `remove` deletes it (memory preserved,
+  as before). Only the runtime in use gets one, so a codex project never
+  grows a `.claude/` directory; the canonical
+  `.codex/agents/<persona>.toml` is still written on every runtime
+  because it is also shipmates' persona inventory. The claude artifact is
+  manifest-tracked and obeys the same rules as every other managed file:
+  a hand edit is preserved, a deleted one is re-added, `update` is
+  idempotent, and a modified one refuses removal instead of being
+  destroyed. Switching `runtime:` to claude and running
+  `shipmates update` installs artifacts for the personas already present.
+  Frontmatter tool names are translated from shipmates' canonical
+  capability names to Claude Code's (`read` → `Read, Glob, Grep`, and so
+  on), which is load-bearing rather than cosmetic: verified against
+  claude 2.1.153, a subagent declaring `tools: [read, edit, bash]` comes
+  up with `"tools":[]` — no tools at all — while the translated names
+  yield exactly the expected set. A persona that declares no capabilities
+  gets no `tools` key and therefore the full toolbox, because shipmates
+  governs tool use through policy and the approval path. Canonical
+  parsing normalizes CRLF so a Windows checkout renders byte-identical
+  artifacts to a Linux one.
 - **The session-start memory hook is actually installed.** `init`, `add`
   and `update` now wire the configured runtime's memory mechanism —
   previously `InstallMemoryHook` had no caller at all, so a claude

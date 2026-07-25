@@ -18,6 +18,7 @@ import (
 	"github.com/luthermonson/shipmates/internal/project"
 	runtimeconfig "github.com/luthermonson/shipmates/internal/runtime/config"
 	"github.com/luthermonson/shipmates/internal/runtime/factory"
+	"github.com/luthermonson/shipmates/internal/runtime/persona"
 	"github.com/urfave/cli/v3"
 )
 
@@ -328,19 +329,8 @@ func stripRoutingBlock(b []byte) []byte {
 // already installed by this point, and losing automatic memory injection
 // must not leave the project half-initialized.
 func installMemoryHook() {
-	projectFile, err := runtimeconfig.LoadProject(".")
-	if err != nil {
-		slog.Warn("memory hook: could not read project runtime config", "error", err)
-		return
-	}
-	userFile, err := runtimeconfig.LoadUser()
-	if err != nil {
-		slog.Warn("memory hook: could not read user runtime config", "error", err)
-		return
-	}
-	resolved, err := runtimeconfig.Resolve("", projectFile, userFile)
-	if err != nil {
-		slog.Warn("memory hook: could not resolve runtime", "error", err)
+	resolved, ok := configuredRuntime("memory hook")
+	if !ok {
 		return
 	}
 	if err := factory.InstallMemoryHook(resolved.Runtime, "."); err != nil {
@@ -348,6 +338,72 @@ func installMemoryHook() {
 		return
 	}
 	slog.Debug("memory hook installed", "runtime", resolved.Runtime, "source", resolved.Source)
+}
+
+// configuredRuntime resolves the runtime this project's on-disk artifacts
+// belong to, following the same precedence as every other runtime decision
+// (project config, then user config, then the default) with no CLI override:
+// which files a project contains is a property of the project, not of one
+// invocation.
+//
+// Resolution failure is warned about under the caller's label and reported
+// as !ok rather than as an error, because the artifacts that depend on it
+// are enhancements — a project must never end up half-installed because a
+// config file could not be read.
+func configuredRuntime(what string) (runtimeconfig.Resolved, bool) {
+	projectFile, err := runtimeconfig.LoadProject(".")
+	if err != nil {
+		slog.Warn(what+": could not read project runtime config", "error", err)
+		return runtimeconfig.Resolved{}, false
+	}
+	userFile, err := runtimeconfig.LoadUser()
+	if err != nil {
+		slog.Warn(what+": could not read user runtime config", "error", err)
+		return runtimeconfig.Resolved{}, false
+	}
+	resolved, err := runtimeconfig.Resolve("", projectFile, userFile)
+	if err != nil {
+		slog.Warn(what+": could not resolve runtime", "error", err)
+		return runtimeconfig.Resolved{}, false
+	}
+	return resolved, true
+}
+
+// reconcileRuntimePersona installs the configured runtime's own persona
+// artifact — today that means Claude Code's `.claude/agents/<persona>.md`,
+// which `claude --agent <persona>` loads and without which a turn runs as a
+// generic session with none of the persona's role or instructions.
+//
+// It takes the same composed catalog bytes the canonical Codex artifact is
+// rendered from, so the routing block and every catalog edit reach both
+// artifacts, and it reconciles through the same manifest discipline: a
+// hand-edited `.claude/agents/backend.md` is preserved exactly like a
+// hand-edited `.codex/agents/backend.toml`, and re-running is a no-op.
+//
+// Only the configured runtime's artifact is written, so a codex project
+// never grows a `.claude/` directory. The canonical Codex artifact is not
+// routed through here: it is shipmates' persona inventory on every runtime
+// (see factory.PersonaArtifactPath) and is always written.
+func reconcileRuntimePersona(m *project.Manifest, st *updateState, name string, agent []byte) error {
+	resolved, ok := configuredRuntime("persona artifact")
+	if !ok {
+		return nil
+	}
+	canonical, err := persona.Parse(bytes.NewReader(agent))
+	if err != nil {
+		return fmt.Errorf("parse canonical persona %s: %w", name, err)
+	}
+	// The filename shipmates installs under is authoritative: `--agent
+	// <persona>` is looked up by file name, and the manifest keys on it.
+	canonical.Name = name
+	path, content, ok, err := factory.PersonaArtifact(resolved.Runtime, canonical)
+	if err != nil {
+		return fmt.Errorf("render %s persona %s: %w", resolved.Runtime, name, err)
+	}
+	if !ok {
+		return nil
+	}
+	return installOrReconcile(m, st, path, content, resolved.Runtime+" agent")
 }
 
 // addPersona is the shared install routine used by `add` and `init --crew`.
@@ -392,6 +448,14 @@ func addPersonaLocked(cat *catalog.Catalog, name string, m *project.Manifest) er
 	codexAgent := []byte(renderCodex(fm, body))
 	codexPath := project.CodexAgentPath(name)
 	if err := reconcileAddFile(m, codexPath, codexAgent, "Codex agent"); err != nil {
+		return err
+	}
+
+	// …and the configured runtime's own artifact from the same composed
+	// bytes, so a claude project gets the `.claude/agents/<persona>.md` that
+	// `--agent <persona>` loads.
+	addSt := &updateState{in: bufio.NewScanner(strings.NewReader(""))}
+	if err := reconcileRuntimePersona(m, addSt, name, agent); err != nil {
 		return err
 	}
 
@@ -480,17 +544,26 @@ func writeMissingPolicyFile(path string, content []byte) error {
 // baseline/conflict rules as update when a target already exists. Add has no
 // conflict-acceptance flag, so conflicts always preserve local content.
 func reconcileAddFile(m *project.Manifest, path string, shipped []byte, label string) error {
+	st := &updateState{in: bufio.NewScanner(strings.NewReader(""))}
+	return installOrReconcile(m, st, path, shipped, label)
+}
+
+// installOrReconcile writes a managed file that does not exist yet and
+// otherwise defers to reconcileFile's four-case logic. It is what lets one
+// routine serve both `add` (where the file is normally absent) and `update`
+// (where an artifact for a newly selected runtime is absent for the first
+// time, and must be installed rather than skipped as "never installed").
+func installOrReconcile(m *project.Manifest, st *updateState, path string, shipped []byte, label string) error {
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		if err := writeManaged(path, shipped); err != nil {
 			return err
 		}
 		m.Files[path] = project.SHA(shipped)
 		slog.Info("installed "+label, "path", path)
+		st.added++
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("inspect %s: %w", path, err)
 	}
-
-	st := &updateState{in: bufio.NewScanner(strings.NewReader(""))}
 	return reconcileFile(m, st, path, shipped, label)
 }

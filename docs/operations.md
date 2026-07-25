@@ -165,10 +165,11 @@ Inspect the generated tree as part of this gate.
 ### Persona is not installed
 
 Run `shipmates list` and confirm the installed artifact is a regular
-managed file: `.codex/agents/<persona>.toml` today (and, once the runtime
-interface migration lands, also `.claude/agents/<persona>.md` when the
-claude runtime is selected). Use `shipmates add <persona>`; do not
-hand-create a placeholder.
+managed file: `.codex/agents/<persona>.toml` on every runtime, and also
+`.claude/agents/<persona>.md` when the claude runtime is selected — a
+claude session without it runs with none of the persona's instructions.
+Use `shipmates add <persona>` (or `shipmates update` after switching
+`runtime:`); do not hand-create a placeholder.
 
 ### Runtime CLI cannot be started
 

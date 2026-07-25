@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/luthermonson/shipmates/internal/project"
+	"github.com/luthermonson/shipmates/internal/runtime/factory"
 	"github.com/urfave/cli/v3"
 )
 
@@ -128,7 +129,8 @@ func runRemoveLocked(name string, purge bool, m *project.Manifest) error {
 // preflightPersonaRemoval validates the complete managed target set before any
 // deletion, preventing a modified policy from causing a partial agent removal.
 func preflightPersonaRemoval(name string, m *project.Manifest) ([]string, error) {
-	managed := []string{project.CodexAgentPath(name), project.PolicyPath(name)}
+	managed := append([]string{project.CodexAgentPath(name), project.PolicyPath(name)},
+		trackedRuntimeArtifacts(name, m)...)
 	var targets []string
 	for _, path := range managed {
 		baseline, tracked := m.Files[path]
@@ -164,4 +166,35 @@ func preflightPersonaRemoval(name string, m *project.Manifest) ([]string, error)
 		return nil, fmt.Errorf("refusing to remove persona %q: canonical Codex agent is untracked", name)
 	}
 	return targets, nil
+}
+
+// trackedRuntimeArtifacts lists the per-runtime persona artifacts this
+// project actually has on the books — today that means Claude Code's
+// `.claude/agents/<persona>.md`.
+//
+// Every runtime is asked, not just the configured one: a project that
+// installed a persona under claude and later switched to codex must still
+// have its claude artifact removed with the persona rather than left behind
+// pointing at a persona that no longer exists.
+//
+// Only manifest-tracked paths are returned. An untracked file at the same
+// location is somebody else's — shipmates did not install it, and remove
+// neither deletes it nor refuses to proceed because of it. Tracked
+// artifacts go through the same preflight as every other managed target, so
+// a hand-edited one blocks the removal instead of being destroyed.
+func trackedRuntimeArtifacts(name string, m *project.Manifest) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, rt := range factory.Names() {
+		path, ok := factory.PersonaArtifactPath(rt, name)
+		if !ok || seen[path] {
+			continue
+		}
+		if _, tracked := m.Files[path]; !tracked {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	return out
 }

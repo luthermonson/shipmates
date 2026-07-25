@@ -61,6 +61,34 @@ func TestParse_NoFrontmatter(t *testing.T) {
 	}
 }
 
+// TestParse_NormalizesCRLF pins determinism across checkouts. The catalog is
+// embedded from the working tree, so on Windows it arrives with CRLF; a
+// runtime artifact rendered from it must be byte-identical to the one
+// rendered on Linux, because the install manifest hashes those bytes and a
+// stray \r would make every `update` look like a local edit.
+func TestParse_NormalizesCRLF(t *testing.T) {
+	lf := "---\nname: backend\ndescription: Backend review.\n---\n\n# Body\nline two\n"
+	crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+
+	a, err := Parse(strings.NewReader(lf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Parse(strings.NewReader(crlf))
+	if err != nil {
+		t.Fatalf("parse CRLF: %v", err)
+	}
+	if b.Body != a.Body {
+		t.Errorf("CRLF body = %q, want %q", b.Body, a.Body)
+	}
+	if strings.Contains(b.Body, "\r") {
+		t.Errorf("carriage return survived: %q", b.Body)
+	}
+	if b.Name != a.Name || b.Description != a.Description {
+		t.Errorf("CRLF frontmatter = %+v, want %+v", b, a)
+	}
+}
+
 func TestWrite_RoundTrip(t *testing.T) {
 	in := `---
 name: backend

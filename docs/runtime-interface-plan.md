@@ -193,16 +193,49 @@ catalog/
 │   └── memory-seeds/
 ```
 
-`InstallPersona` translates to the runtime's native format on install:
+Installation translates the canonical form to the runtime's native shape.
+`internal/runtime/persona` owns the canonical parse and `Canonical.Spec()`,
+the one place canonical vocabulary (`Tools`, `Body`) becomes interface
+vocabulary (`Capabilities`, `SystemPrompt`); shipmates-only fields stop
+there.
 
-- Claude: writes `.claude/agents/<name>.md`
-- Codex: writes `.codex/agents/<name>.md` (or wherever Codex reads personas)
+- Claude: `.claude/agents/<persona>.md`, written by `add` / `update` when
+  the project's configured runtime is claude.
+- Codex: `.codex/agents/<persona>.toml`, written on **every** runtime,
+  because it doubles as shipmates' persona inventory — `list`, `update`
+  and `remove` read it regardless of runtime. It is therefore deliberately
+  not dispatched through the per-runtime seam.
 
-Note that `shipmates add` / `update` still render the codex artifact
-(`.codex/agents/<persona>.toml`) directly rather than through
-`InstallPersona`; folding persona install onto the interface is Phase 4.
-`InstallMemoryHook` *is* wired: `init`, `add` and `update` call
-`factory.InstallMemoryHook` for the runtime the project selected.
+`add` / `update` do not call `Runtime.InstallPersona`, which writes
+unconditionally. They call `factory.PersonaArtifact`, which returns the
+path and bytes so the caller can reconcile them through
+`.shipmates/manifest.json` — that is what preserves a hand-edited
+`.claude/agents/backend.md`, re-adds a deleted one, and keeps `update`
+idempotent. `Runtime.InstallPersona` renders through the same
+`claude.RenderPersona`, so the two paths produce byte-identical artifacts
+(pinned by `TestRenderPersonaMatchesInstallPersona`). Same reasoning as
+`factory.InstallMemoryHook`: installing files must not require starting a
+runtime transport.
+
+**Tool names are not cosmetic.** Verified against claude 2.1.153: a
+subagent whose frontmatter lists the canonical spellings
+`tools: [read, edit, bash]` comes up with `"tools":[]` in its init frame —
+every unrecognized name is dropped, leaving the persona with no tools at
+all — while `tools: [Read, Glob, Grep, Bash]` comes up with exactly those
+four. The installer therefore translates `read` → `Read, Glob, Grep`,
+`edit` → `Read, Edit, Write`, `bash` → `Bash`, `browse` → `WebFetch,
+WebSearch`, passes unknown names through verbatim, and omits the key
+entirely when a persona declares no capabilities (the full toolbox, which
+is right because shipmates governs tools through policy and the approval
+path).
+
+**The file is genuinely loaded.** In a project where `shipmates add
+quartermaster` wrote the artifact, real claude 2.1.153 run as
+`claude -p --agent quartermaster --input-format stream-json
+--output-format stream-json --verbose` answered "I am the quartermaster …
+and I read `.shipmates/memory/quartermaster/` at the start of every turn";
+the identical prompt with no `--agent` answered "I'm a Claude agent for
+software engineering tasks". Both facts come only from the installed file.
 
 ## Memory hook
 
@@ -229,12 +262,17 @@ codex-only project never grows a `.claude/` directory.
 ## End-to-end harness
 
 `test/e2e/claude/run.sh` builds the real binary, scaffolds a scratch
-project, and drives `init` / `add` / `update` / `live` / `feed` / `tell` /
-`show` (text and image) / `interrupt` / approvals / `ask` against
+project, and drives `init` / `add` / `update` (including persona-artifact
+install, hand-edit preservation, re-add and idempotence) / `live` / `feed`
+/ `tell` / `show` (text and image) / `interrupt` / approvals / `ask`
+against
 `test/e2e/claude/fake-claude.py` — a fake `claude` on PATH that speaks the
-real stream-json protocol, including `can_use_tool`. Nothing inside
-shipmates is stubbed. Unix only: the coordination server's state directory
-and the policy loader both need `openat`-class primitives.
+real stream-json protocol, including `can_use_tool`. It resolves `--agent`
+the way the real binary does (by file name under `.claude/agents/`) and
+echoes the persona's own heading back, so a missing or empty definition is
+distinguishable from a loaded one. Nothing inside shipmates is stubbed.
+Unix only: the coordination server's state directory and the policy loader
+both need `openat`-class primitives.
 
 ## Migration order
 
@@ -259,11 +297,21 @@ Each phase ships independently.
       command-side entry point; codex returns `ErrNotConfigured` from
       the selector because it needs `codexapp.StartOptions` that the
       config file cannot reasonably carry.
-- [ ] **Phase 4**: introduce canonical persona format (`persona.md`) +
-      per-runtime translators, and migrate `shipmates init` / `add` /
-      `update` / `render` onto the runtime interface so `init` emits
-      both `.codex/agents/*.toml` and `.claude/agents/*.md` per the
-      selected runtime.
+- [~] **Phase 4 (persona install landed)**: `add` / `update` install the
+      configured runtime's persona artifact through
+      `factory.PersonaArtifact`, and `remove` deletes it (memory
+      preserved). `.claude/agents/<persona>.md` is written for a claude
+      project and never for a codex one; the canonical
+      `.codex/agents/*.toml` stays unconditional because it is also the
+      persona inventory. Both artifacts are manifest-tracked and obey the
+      same preserve / re-add / conflict rules. `internal/runtime/persona`
+      is the canonical parse + `Canonical.Spec()` translation seam, and
+      normalizes CRLF so a Windows checkout renders byte-identical
+      artifacts to a Linux one.
+      - Remaining: the canonical catalog file is still named
+        `agent.md`, `render` still has its own thin-target writers, and
+        `Runtime.InstallPersona` is not itself the CLI's install path
+        (see above for why).
 - [ ] **Phase 5**: cgroup containment stubs for darwin/windows so the
       whole binary compiles cleanly on all three OSes. (Cross-platform
       build achieved by the release workflow via `//go:build unix`
@@ -299,6 +347,8 @@ Each phase ships independently.
       - **The memory hook is installed by `init` / `add` / `update`**
         for whichever runtime the project selected, in the matcher-group
         shape Claude Code actually executes.
+      - **The persona artifact is installed by `add` / `update`** for
+        the selected runtime and removed by `remove` — see Phase 4.
       - Remaining: `open` (the terminal dashboard) still assumes the
         codex-native controller surface, and the queue workflows
         (`fanout`, `drain`, `drain-many`, `autonomous`) plus `sail` and

@@ -77,6 +77,8 @@ func MemoryDir(persona string) string {
 }
 
 // CodexAgentPath is the project-scoped Codex custom-agent configuration.
+// It is also shipmates' canonical persona inventory: `list`, `remove` and
+// `update` read it to decide what is installed, on every runtime.
 func CodexAgentPath(persona string) string {
 	return filepath.Join(CodexAgentsDir, persona+".toml")
 }

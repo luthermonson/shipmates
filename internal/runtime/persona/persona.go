@@ -18,6 +18,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/luthermonson/shipmates/internal/runtime"
 )
 
 // Canonical is the parsed shape of catalog/<persona>/agent.md. Unknown
@@ -38,6 +40,23 @@ type Canonical struct {
 
 	// Body is the Markdown body following the frontmatter, verbatim.
 	Body string `yaml:"-"`
+}
+
+// Spec projects the canonical persona onto the runtime-neutral
+// runtime.PersonaSpec that every runtime's installer consumes. It is the one
+// place the canonical vocabulary (Tools, Body) is translated into the
+// interface vocabulary (Capabilities, SystemPrompt); the shipmates-only
+// fields a runtime cannot express (byline, domainGlob, memoryDir,
+// permissions, remoteControl, Extra) stop here, on purpose.
+func (c *Canonical) Spec() runtime.PersonaSpec {
+	return runtime.PersonaSpec{
+		Name:         c.Name,
+		Description:  c.Description,
+		Capabilities: c.Tools,
+		Berth:        c.Berth,
+		Model:        c.Model,
+		SystemPrompt: c.Body,
+	}
 }
 
 // Load parses a canonical persona file from disk.
@@ -66,7 +85,11 @@ func Parse(r io.Reader) (*Canonical, error) {
 			return nil, fmt.Errorf("persona: parse frontmatter: %w", err)
 		}
 	}
-	c.Body = string(body)
+	// Normalize line endings. A catalog checked out on Windows arrives with
+	// CRLF, and a runtime artifact rendered from it must not differ from the
+	// same artifact rendered on Linux — the install manifest hashes these
+	// bytes, so a stray \r would make every update look like a local edit.
+	c.Body = strings.ReplaceAll(string(body), "\r\n", "\n")
 	if strings.TrimSpace(c.Name) == "" {
 		return nil, errors.New("persona: name is required")
 	}

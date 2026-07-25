@@ -42,6 +42,13 @@ written for codex. Re-run `shipmates update` after changing `runtime:` to
 wire the new one. See
 [Configuration → Session-start memory hook](configuration.md#session-start-memory-hook).
 
+`add` and `update` also install the configured runtime's persona artifact.
+On claude that is `.claude/agents/<persona>.md`, which `claude --agent
+<persona>` loads the persona's role and instructions from; a codex project
+never grows one. The canonical `.codex/agents/<persona>.toml` is written on
+every runtime, because it is also shipmates' persona inventory. See
+[Configuration → Canonical persona files](configuration.md#canonical-persona-files).
+
 ## Runtime installation
 
 ### `sudo shipmates install [--dry-run] [--json] [--uninstall] [--profile ubuntu-rojo-localhost]`
@@ -76,7 +83,9 @@ shipmates init --crew backend,security,tester
 ### `shipmates add <persona>`
 
 Installs one catalog persona and policy. Missing memory seeds are copied;
-existing memory and session continuity are preserved.
+existing memory and session continuity are preserved. Writes
+`.codex/agents/<persona>.toml` always, plus `.claude/agents/<persona>.md`
+when the configured runtime is claude.
 
 ### `shipmates list`
 
@@ -86,12 +95,20 @@ Lists catalog personas and installation state.
 
 Updates one persona, or all installed personas when omitted. Modified managed
 files produce conflicts. `ours` preserves local content; `theirs` explicitly
-accepts current catalog content.
+accepts current catalog content. The rules apply equally to
+`.claude/agents/<persona>.md`: an edited one is preserved, a deleted one is
+re-added, and a second run reports nothing. It is also how a project that
+switched `runtime:` to claude gains claude artifacts for personas it already
+had.
 
 ### `shipmates remove <persona> [--purge]`
 
-Removes managed agent and policy artifacts. Memory survives by default.
-`--purge` also deletes persona memory and is intentionally destructive.
+Removes managed agent and policy artifacts — including
+`.claude/agents/<persona>.md` when shipmates installed it. Memory survives by
+default. `--purge` also deletes persona memory and is intentionally
+destructive. As with every managed target, a hand-edited artifact refuses the
+removal rather than being destroyed, and a file shipmates never installed is
+left alone.
 
 ### `shipmates render <persona> --target <target> [--write]`
 

@@ -56,8 +56,8 @@ matrix.
 
 | Path | Purpose |
 |---|---|
-| `.codex/agents/<persona>.toml` | Installed Codex persona definition (`shipmates init` writes this today) |
-| `.claude/agents/<persona>.md` | Claude Code persona definition — written by `runtime.claude.InstallPersona`; the CLI's `init` will emit it once the persona installer is migrated onto the runtime interface |
+| `.codex/agents/<persona>.toml` | Installed Codex persona definition, written by `add` / `update` on every runtime — it is also shipmates' persona inventory (`list`, `update` and `remove` read it) |
+| `.claude/agents/<persona>.md` | Claude Code persona definition, written by `add` / `update` only when the project's configured runtime is claude. `claude --agent <persona>` loads the persona's role and instructions from it |
 | `.claude/settings.json` | Claude Code project settings. `init` / `add` / `update` merge a `SessionStart` hook running `shipmates hook load-memory` into it — only when the project's configured runtime is claude |
 | `.shipmates/memory/<persona>/` | User-owned durable project memory |
 | `.shipmates/policies/<persona>.yaml` | Project-local execution policy |

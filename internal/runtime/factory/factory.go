@@ -27,6 +27,7 @@ import (
 	"github.com/luthermonson/shipmates/internal/runtime/containment"
 	"github.com/luthermonson/shipmates/internal/runtime/containment/none"
 	"github.com/luthermonson/shipmates/internal/runtime/containment/watchdog"
+	"github.com/luthermonson/shipmates/internal/runtime/persona"
 )
 
 // NewFromResolved constructs a Runtime from a fully resolved config —
@@ -142,4 +143,46 @@ func InstallMemoryHook(name, projectDir string) error {
 		slog.Debug("no memory-hook mechanism for runtime", "runtime", name)
 		return nil
 	}
+}
+
+// PersonaArtifactPath returns the project-relative path of the named
+// runtime's own persona artifact, and whether it has one at all.
+//
+// Only claude does today. Codex's artifact — `.codex/agents/<persona>.toml`
+// — is deliberately absent here: it is shipmates' canonical persona
+// inventory (`list`, `remove` and `update` read it on every runtime), so it
+// is written unconditionally by `add`/`update` and is not a per-runtime
+// artifact this seam may skip.
+//
+// The path is what `add`/`update` record in the install manifest, so an
+// artifact is tracked, preserved when hand-edited, and removed with the
+// persona.
+func PersonaArtifactPath(name, personaName string) (string, bool) {
+	if name == "claude" {
+		return claude.AgentPath(personaName), true
+	}
+	return "", false
+}
+
+// PersonaArtifact renders a canonical persona into the named runtime's own
+// artifact: the project-relative path and its exact bytes.
+//
+// It exists separately from Runtime.InstallPersona for the same reason
+// InstallMemoryHook does — installing a persona is a file operation that
+// `add`/`update` must perform without starting a runtime transport — and for
+// one more: shipmates must decide whether to write at all. Handing back the
+// bytes is what lets the caller run them through the install manifest and
+// leave an operator's edits alone. Runtime.InstallPersona renders through
+// the same function, so both produce identical artifacts.
+func PersonaArtifact(name string, c *persona.Canonical) (string, []byte, bool, error) {
+	path, ok := PersonaArtifactPath(name, c.Name)
+	if !ok {
+		slog.Debug("runtime installs no persona artifact of its own", "runtime", name)
+		return "", nil, false, nil
+	}
+	content, err := claude.RenderPersona(c.Spec())
+	if err != nil {
+		return "", nil, false, err
+	}
+	return path, content, true, nil
 }

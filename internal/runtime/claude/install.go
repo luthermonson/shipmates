@@ -8,32 +8,62 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/luthermonson/shipmates/internal/runtime"
 )
 
-// InstallPersona writes .claude/agents/<name>.md under projectDir. It emits
-// only the Claude Code-relevant frontmatter fields (name, description,
-// model, tools). Shipmates-only fields (byline, domainGlob, memoryDir,
-// permissions, remoteControl, berth) are elided — they live in the
-// canonical catalog and shipmates carries them out-of-band.
-func (r *Runtime) InstallPersona(_ context.Context, projectDir string, p runtime.PersonaSpec) error {
+// AgentsDir is where Claude Code reads project-scoped subagents from.
+const AgentsDir = ".claude/agents"
+
+// AgentPath is a persona's subagent file, relative to the project root.
+// Shipmates records this path in the install manifest, so it is the one
+// spelling of the location: both InstallPersona and the CLI's manifest-aware
+// installer resolve through it.
+func AgentPath(name string) string {
+	return filepath.Join(filepath.FromSlash(AgentsDir), name+".md")
+}
+
+// RenderPersona returns the exact bytes of a persona's Claude Code subagent
+// file. It is the single source of the artifact's content: InstallPersona
+// writes what it returns, and `shipmates add`/`update` reconcile what it
+// returns against the install manifest so a hand-edited file is never
+// clobbered.
+//
+// Only the Claude Code-relevant frontmatter fields are emitted (name,
+// description, model, tools). Shipmates-only fields (byline, domainGlob,
+// memoryDir, permissions, remoteControl, berth) are elided — they live in
+// the canonical catalog and shipmates carries them out-of-band.
+func RenderPersona(p runtime.PersonaSpec) ([]byte, error) {
 	if p.Name == "" {
-		return fmt.Errorf("claude: persona name required")
+		return nil, fmt.Errorf("claude: persona name required")
 	}
-	dir := filepath.Join(projectDir, ".claude", "agents")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	var buf bytes.Buffer
+	if err := writeClaudeAgent(&buf, p); err != nil {
+		return nil, err
 	}
-	dest := filepath.Join(dir, p.Name+".md")
-	f, err := os.Create(dest)
+	return buf.Bytes(), nil
+}
+
+// InstallPersona writes .claude/agents/<name>.md under projectDir.
+//
+// This is the runtime-interface entry point and it writes unconditionally.
+// `shipmates add`/`update` deliberately do not call it: they reconcile
+// RenderPersona's bytes through the install manifest instead, which is what
+// preserves an operator's local edits. Both paths therefore produce
+// byte-identical artifacts (see TestRenderPersonaMatchesInstallPersona).
+func (r *Runtime) InstallPersona(_ context.Context, projectDir string, p runtime.PersonaSpec) error {
+	content, err := RenderPersona(p)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return writeClaudeAgent(f, p)
+	dest := filepath.Join(projectDir, AgentPath(p.Name))
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dest, content, 0o644)
 }
 
 // UninstallPersona removes .claude/agents/<name>.md if present. Missing
@@ -42,7 +72,7 @@ func (r *Runtime) UninstallPersona(_ context.Context, projectDir, name string) e
 	if name == "" {
 		return fmt.Errorf("claude: persona name required")
 	}
-	err := os.Remove(filepath.Join(projectDir, ".claude", "agents", name+".md"))
+	err := os.Remove(filepath.Join(projectDir, AgentPath(name)))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -161,6 +191,51 @@ func groupHasCommand(group map[string]any, command string) bool {
 	return false
 }
 
+// claudeTools maps shipmates' canonical capability names onto the tool names
+// Claude Code actually recognizes. The mapping is load-bearing, not cosmetic:
+// verified against claude 2.1.153, a subagent whose frontmatter lists
+// `tools: [read, edit, bash]` starts with `"tools":[]` in its init frame —
+// every unrecognized name is dropped, so the canonical spelling would have
+// silently left the persona with no tools at all. `tools: [Read, Glob, Grep,
+// Bash]` yields exactly those four.
+//
+// Lookup is case-sensitive, and deliberately so: canonical capabilities are
+// lowercase by definition (see runtime.PersonaSpec) while Claude Code's tool
+// names are CamelCase, so the two vocabularies cannot collide. Anything not
+// in the map is passed through verbatim, which is what lets a persona name a
+// Claude Code tool — or an MCP tool — directly.
+var claudeTools = map[string][]string{
+	"read":   {"Read", "Glob", "Grep"},
+	"edit":   {"Read", "Edit", "Write"},
+	"bash":   {"Bash"},
+	"browse": {"WebFetch", "WebSearch"},
+}
+
+// translateCapabilities expands canonical capability names into Claude Code
+// tool names, de-duplicated and order-preserving. An empty result means the
+// frontmatter carries no `tools` key at all, which is what grants the
+// persona Claude Code's full tool set — the right default, because shipmates
+// governs what a tool may actually do through policy and the can_use_tool
+// approval path, not by amputating the toolbox.
+func translateCapabilities(caps []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, c := range caps {
+		names, ok := claudeTools[strings.TrimSpace(c)]
+		if !ok {
+			names = []string{c}
+		}
+		for _, n := range names {
+			if n == "" || seen[n] {
+				continue
+			}
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // writeClaudeAgent emits the frontmatter + body Claude Code expects.
 func writeClaudeAgent(w io.Writer, p runtime.PersonaSpec) error {
 	type frontmatter struct {
@@ -173,7 +248,7 @@ func writeClaudeAgent(w io.Writer, p runtime.PersonaSpec) error {
 		Name:        p.Name,
 		Description: p.Description,
 		Model:       p.Model,
-		Tools:       p.Capabilities,
+		Tools:       translateCapabilities(p.Capabilities),
 	}
 	if _, err := io.WriteString(w, "---\n"); err != nil {
 		return err
@@ -189,9 +264,17 @@ func writeClaudeAgent(w io.Writer, p runtime.PersonaSpec) error {
 	if _, err := io.WriteString(w, "---\n\n"); err != nil {
 		return err
 	}
+	// The body is the persona's system prompt, verbatim. Canonical bodies
+	// arrive with the newline that followed their frontmatter still attached;
+	// strip it so the artifact has exactly one blank line after the
+	// frontmatter no matter which caller produced the spec.
 	body := p.SystemPrompt
-	if body == "" {
+	if strings.TrimSpace(body) == "" {
 		body = fmt.Sprintf("# %s\n\n%s\n", p.Name, p.Description)
+	}
+	body = strings.TrimLeft(body, "\n")
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
 	}
 	_, err := io.WriteString(w, body)
 	return err

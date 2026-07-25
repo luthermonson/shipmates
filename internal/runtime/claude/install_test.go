@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/luthermonson/shipmates/internal/runtime"
+	"github.com/luthermonson/shipmates/internal/runtime/persona"
 )
 
 func TestInstallPersona_WritesFileWithFrontmatter(t *testing.T) {
@@ -33,7 +35,9 @@ func TestInstallPersona_WritesFileWithFrontmatter(t *testing.T) {
 	if !strings.HasPrefix(body, "---\n") {
 		t.Errorf("missing frontmatter start")
 	}
-	for _, want := range []string{"name: architect", "description: Cross-cutting design review", "model: sonnet", "read", "# Custom prompt"} {
+	// "read"/"edit"/"bash" are canonical shipmates capabilities; the artifact
+	// must carry the Claude Code tool names they translate to.
+	for _, want := range []string{"name: architect", "description: Cross-cutting design review", "model: sonnet", "- Read", "- Edit", "- Bash", "# Custom prompt"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("output missing %q; got:\n%s", want, body)
 		}
@@ -57,6 +61,137 @@ func TestInstallPersona_EmptyPromptGeneratesDefault(t *testing.T) {
 	}
 	if !strings.Contains(body, "Backend review.") {
 		t.Errorf("expected description in body")
+	}
+}
+
+// TestWriteClaudeAgent_TranslatesCanonicalCapabilities pins the mapping the
+// live binary forced. claude 2.1.153 drops every frontmatter tool name it
+// does not recognize: an agent declaring `tools: [read, edit, bash]` came up
+// with "tools":[] in its init frame — no tools at all — while
+// `tools: [Read, Glob, Grep, Bash]` came up with exactly those four.
+func TestWriteClaudeAgent_TranslatesCanonicalCapabilities(t *testing.T) {
+	out, err := RenderPersona(runtime.PersonaSpec{
+		Name:         "tester",
+		Capabilities: []string{"read", "bash"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(out)
+	for _, want := range []string{"- Read", "- Glob", "- Grep", "- Bash"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in:\n%s", want, body)
+		}
+	}
+	for _, unwanted := range []string{"- read", "- bash"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("canonical capability %q leaked into the artifact, which claude silently drops:\n%s", unwanted, body)
+		}
+	}
+}
+
+// TestWriteClaudeAgent_UnknownCapabilityPassesThrough keeps an operator able
+// to name a Claude Code (or MCP) tool directly, and proves de-duplication
+// across overlapping capabilities.
+func TestWriteClaudeAgent_UnknownCapabilityPassesThrough(t *testing.T) {
+	out, err := RenderPersona(runtime.PersonaSpec{
+		Name:         "tester",
+		Capabilities: []string{"read", "edit", "TodoWrite"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "- TodoWrite") {
+		t.Errorf("unknown tool name dropped:\n%s", out)
+	}
+	if n := strings.Count(string(out), "- Read\n"); n != 1 {
+		t.Errorf("Read listed %d times (read and edit both map to it), want 1:\n%s", n, out)
+	}
+}
+
+// TestWriteClaudeAgent_NoCapabilitiesOmitsTools proves the default is the
+// full toolbox. An empty `tools:` key would be the worst outcome — a persona
+// that cannot act — and shipmates governs tool use through policy and the
+// can_use_tool approval path instead.
+func TestWriteClaudeAgent_NoCapabilitiesOmitsTools(t *testing.T) {
+	out, err := RenderPersona(runtime.PersonaSpec{Name: "tester", Description: "QA."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "tools:") {
+		t.Errorf("emitted a tools key for a persona with no capabilities:\n%s", out)
+	}
+}
+
+// TestRenderPersonaMatchesInstallPersona is what lets `shipmates add` write
+// the artifact itself (through the install manifest, so local edits survive)
+// without the two paths drifting apart.
+func TestRenderPersonaMatchesInstallPersona(t *testing.T) {
+	spec := runtime.PersonaSpec{
+		Name:         "architect",
+		Description:  "Cross-cutting design review.",
+		Model:        "sonnet",
+		Capabilities: []string{"read", "edit"},
+		SystemPrompt: "# Role\n\nBody text.\n",
+	}
+	rendered, err := RenderPersona(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj := t.TempDir()
+	if err := New(Config{}).InstallPersona(context.Background(), proj, spec); err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile(filepath.Join(proj, AgentPath("architect")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(onDisk) != string(rendered) {
+		t.Errorf("InstallPersona and RenderPersona disagree:\n--- installed\n%s\n--- rendered\n%s", onDisk, rendered)
+	}
+}
+
+// TestRenderPersona_RoundTripsThroughCanonical closes the loop the runtime
+// interface promises: a canonical shipmates persona translated into the
+// claude artifact parses back with its identity, model, tools and body
+// intact.
+func TestRenderPersona_RoundTripsThroughCanonical(t *testing.T) {
+	src := "---\n" +
+		"name: backend\n" +
+		"description: APIs and request lifecycle.\n" +
+		"byline: \"Backend here,\"\n" +
+		"model: sonnet\n" +
+		"tools:\n  - Read\n  - Bash\n" +
+		"memoryDir: .shipmates/memory/backend\n" +
+		"permissions:\n  mode: acceptEdits\n" +
+		"---\n\n# Role\n\nReview the request lifecycle.\n"
+	canonical, err := persona.Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := RenderPersona(canonical.Spec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := persona.Parse(bytes.NewReader(artifact))
+	if err != nil {
+		t.Fatalf("the claude artifact does not parse as a canonical persona: %v\n%s", err, artifact)
+	}
+	if back.Name != canonical.Name || back.Description != canonical.Description {
+		t.Errorf("identity lost: %+v", back)
+	}
+	if back.Model != canonical.Model {
+		t.Errorf("model = %q, want %q", back.Model, canonical.Model)
+	}
+	if strings.Join(back.Tools, ",") != strings.Join(canonical.Tools, ",") {
+		t.Errorf("tools = %v, want %v", back.Tools, canonical.Tools)
+	}
+	if strings.TrimSpace(back.Body) != strings.TrimSpace(canonical.Body) {
+		t.Errorf("body changed:\n--- got\n%q\n--- want\n%q", back.Body, canonical.Body)
+	}
+	// Shipmates-only fields must not survive into a runtime artifact.
+	if back.Byline != "" || back.MemoryDir != "" || len(back.Permissions) > 0 {
+		t.Errorf("shipmates-only fields leaked into the claude artifact: %+v", back)
 	}
 }
 
