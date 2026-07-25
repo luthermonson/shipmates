@@ -47,8 +47,9 @@ type Runtime interface {
     // Event stream — normalized across runtimes
     Events() <-chan Event
 
-    // Approvals (both runtimes have this concept; Codex calls them approvals,
-    // Claude has PermissionRequest hook responses)
+    // Approvals. Both runtimes have the concept and both are implemented:
+    // Codex issues item/commandExecution/requestApproval RPCs, Claude issues
+    // can_use_tool control_requests. See "Claude approvals" below.
     ResolveApproval(ctx context.Context, r ApprovalResponse, d ApprovalDecision) (bool, error)
 
     Close(ctx context.Context) error
@@ -56,6 +57,7 @@ type Runtime interface {
 
 type Caps struct {
     Streaming, Interrupt, Steer, Attachments, Refusal, Containment bool
+    Environment, Approvals bool
 }
 
 type SessionSpec struct {
@@ -82,6 +84,72 @@ type Event struct {
 
 The `runtime` package owns the interface, types, and event normalization.
 Runtimes live under `runtime/claude/` and `runtime/codex/`.
+
+## Claude approvals
+
+Claude Code does not carry tool permissions in its normal stream-json
+output, and it does not use a hook for them either. It uses the control
+protocol on the same stdio pipe, gated behind `--permission-prompt-tool`
+— a real flag that `claude --help` does not list.
+
+Everything below was verified by driving the real binary, **claude
+2.1.153**, over `-p --input-format stream-json --output-format stream-json
+--verbose --permission-prompt-tool stdio`. The transcripts are reproducible
+with the opt-in live tests in `internal/runtime/claude/live_test.go`
+(`SHIPMATES_CLAUDE_LIVE=1`).
+
+**Request.** Emitted when the permission flow does not resolve a call on
+its own. `request_id` is at the top level of the frame, *not* inside
+`request`:
+
+```json
+{"type":"control_request","request_id":"ea418bbe-425c-4017-af33-292558f4a71b",
+ "request":{"subtype":"can_use_tool","tool_name":"Write","display_name":"Write",
+            "input":{"file_path":"…","content":"banana"},
+            "description":"probe-test.txt",
+            "permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],
+            "tool_use_id":"toolu_016nbEodpNG2MdyW6eRgHpsE"}}
+```
+
+**Answer.** Written back on stdin:
+
+```json
+{"type":"control_response","response":{"subtype":"success","request_id":"…",
+ "response":{"behavior":"allow","updatedInput":{…}}}}
+
+{"type":"control_response","response":{"subtype":"success","request_id":"…",
+ "response":{"behavior":"deny","message":"…"}}}
+```
+
+Observed facts that shaped the implementation:
+
+- Allow ran the tool (the file appeared on disk, `permission_denials` was
+  empty). Deny blocked it (no file, and `permission_denials` in the result
+  frame listed the call).
+- `updatedInput` is **mandatory** on allow for this version, so shipmates
+  echoes the original tool input back verbatim.
+- `message` is mandatory on deny, so a denial always carries a rationale.
+- No `initialize` handshake is required first.
+- **Leaving a request unanswered blocks the turn indefinitely** (observed
+  >180s with no result frame). Every shipmates path that can see a request
+  therefore answers it, including the ones that decline to mediate.
+
+Shipmates never echoes `permission_suggestions` back as
+`updatedPermissions`: a decision is scoped to that one call and is never
+persisted into the project's Claude Code settings.
+
+**Mediation.** `internal/livesession`'s runtime backend maps the request
+onto the same `codexapp.ApprovalRequested` event the codex adapter emits,
+so policy evaluation, the operator's 30s window, the audit feed, `open`
+and the dashboard behave identically on both runtimes. Requests are named
+for policy the same way on both: a shell tool (`Bash`, `PowerShell`)
+contributes its command verbatim — the same string codex passes for
+`item/commandExecution/requestApproval` — so one `process.exec` rule
+governs the same command on either runtime. Tools with no command line are
+named `Tool(primary-argument)`, e.g. `Write(/etc/passwd)`; that is
+nameable in a policy file and in the feed, is never presented as a shell
+command, and matches no real command rule, so it falls through to `ask`
+and reaches the operator.
 
 ## Config
 
@@ -129,6 +197,44 @@ catalog/
 
 - Claude: writes `.claude/agents/<name>.md`
 - Codex: writes `.codex/agents/<name>.md` (or wherever Codex reads personas)
+
+Note that `shipmates add` / `update` still render the codex artifact
+(`.codex/agents/<persona>.toml`) directly rather than through
+`InstallPersona`; folding persona install onto the interface is Phase 4.
+`InstallMemoryHook` *is* wired: `init`, `add` and `update` call
+`factory.InstallMemoryHook` for the runtime the project selected.
+
+## Memory hook
+
+The claude hook lives in `.claude/settings.json`. The shape matters and is
+not the obvious one — verified against **claude 2.1.153** with
+`--include-hook-events`:
+
+```json
+{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"shipmates hook load-memory"}]}]}}
+```
+
+produces `hook_started` / `hook_response` frames named
+`SessionStart:startup` carrying the command's stdout. The flatter
+`{"SessionStart":[{"type":"command","command":"…"}]}` spelling parses
+without complaint and is then **silently ignored** — no hook event, no
+injected context. Any previously written flat entry is migrated into a
+group. No `matcher` is set, so memory loads on resumed sessions too.
+
+Codex has no equivalent: its memory travels in the persona's developer
+instructions, which `add` / `update` already render. Its
+`InstallMemoryHook` is a documented no-op that writes nothing, so a
+codex-only project never grows a `.claude/` directory.
+
+## End-to-end harness
+
+`test/e2e/claude/run.sh` builds the real binary, scaffolds a scratch
+project, and drives `init` / `add` / `update` / `live` / `feed` / `tell` /
+`show` (text and image) / `interrupt` / approvals / `ask` against
+`test/e2e/claude/fake-claude.py` — a fake `claude` on PATH that speaks the
+real stream-json protocol, including `can_use_tool`. Nothing inside
+shipmates is stubbed. Unix only: the coordination server's state directory
+and the policy loader both need `openat`-class primitives.
 
 ## Migration order
 
@@ -184,10 +290,15 @@ Each phase ships independently.
         existing (session, thread, turn) tuple with the runtime session
         id in the thread slot, so exact-turn targeting is preserved
         verbatim. Continuity markers are per-backend.
-      - Known gaps on the claude live path: `ResolveApproval` returns
-        `ErrUnsupported` (approval mediation is Phase 4 hook plumbing),
-        and no claude event maps to `KindApprovalNeeded` yet, so an
-        approval-needing tool call cannot be mediated there.
+      - **Approval mediation landed on claude** via the `can_use_tool`
+        control protocol (see [Claude approvals](#claude-approvals)).
+        The decoder emits `KindApprovalNeeded`, `ResolveApproval`
+        answers on the session's stdin, `Caps.Approvals` is true, and
+        the live-session backend routes the request through the same
+        mediation path codex uses.
+      - **The memory hook is installed by `init` / `add` / `update`**
+        for whichever runtime the project selected, in the matcher-group
+        shape Claude Code actually executes.
       - Remaining: `open` (the terminal dashboard) still assumes the
         codex-native controller surface, and the queue workflows
         (`fanout`, `drain`, `drain-many`, `autonomous`) plus `sail` and
@@ -199,11 +310,12 @@ Each phase ships independently.
 
 ## Non-goals
 
-- Perfect API parity between Codex and Claude. Some capabilities (e.g.
-  Refusal, ResolveApproval) return `not supported` on Claude. That's
-  fine — the gap is surfaced as a runtime-scoped error, never faked or
-  silently no-opped. (Steer, Interrupt, and Attachments landed on Claude
-  via the persistent stream-json transport.) Symmetrically, shipmates
+- Perfect API parity between Codex and Claude. `Caps.Refusal` is still
+  false on Claude, which surfaces refusals as ordinary text rather than a
+  distinct protocol signal. Any remaining gap is surfaced as a
+  runtime-scoped error, never faked or silently no-opped. (Steer,
+  Interrupt, Attachments, per-session Environment and Approvals have all
+  landed on Claude.) Symmetrically, shipmates
   sends codex mid-turn steer input as text only, so a `show` into a
   running codex turn references images by path instead of attaching
   them.

@@ -35,9 +35,10 @@ repositories containing secrets or production credentials.
 
 ### Claude execution (runtime interface)
 
-The `runtime.claude` adapter spawns `claude -p --session-id
-<uuid> --output-format stream-json` per turn and parses the JSONL event
-stream into the normalized `runtime.Event` channel. Session state is
+The `runtime.claude` adapter spawns one persistent `claude -p
+--input-format stream-json --output-format stream-json --verbose
+--permission-prompt-tool stdio` process per session and parses the JSONL
+event stream into the normalized `runtime.Event` channel. Session state is
 scoped to the runtime and cleaned up on `Close`. As with the codex path,
 the persona instructions never enter a shell, and only normalized events
 are exposed to feeds and Fleet.
@@ -45,6 +46,62 @@ are exposed to feeds and Fleet.
 Shipmates does not silently fall back from one runtime to another. If the
 configured runtime's CLI is missing or unauthenticated, dispatch fails
 closed with an actionable error rather than trying the other runtime.
+
+#### Claude tool permissions
+
+`--permission-prompt-tool stdio` is what makes a persona's tool
+permissions visible to shipmates at all. Without it Claude Code resolves
+prompts on its own and the operator never sees them. With it, every tool
+call that Claude Code's own permission flow does not resolve arrives as a
+`can_use_tool` control request on the session's stdout, and the turn
+blocks until shipmates answers on stdin. Verified against claude 2.1.153;
+the exact frames are in
+[the runtime interface plan](runtime-interface-plan.md#claude-approvals).
+
+Consequences that matter for the security posture:
+
+- **Nothing is auto-approved by shipmates.** A request is either resolved
+  by the project's policy snapshot, decided by an operator within the
+  30-second window, or denied. There is no implicit allow.
+- **Answers are single-call.** Claude Code offers `permission_suggestions`
+  that would persist a rule into the project's own settings; shipmates
+  never echoes them back. `/allow-once` still creates no durable grant on
+  either runtime.
+- **Requests are named identically on both runtimes.** A `Bash` or
+  `PowerShell` approval contributes its command verbatim — the same string
+  codex passes for `item/commandExecution/requestApproval` — so a single
+  `process.exec` policy rule governs the same command whichever runtime is
+  configured. Tools with no command line are named `Tool(argument)` (e.g.
+  `Write(/etc/passwd)`); such a descriptor matches no command rule, so it
+  can never inherit an allow written for a shell command and always
+  reaches the operator.
+- **Unanswered means wedged, so everything answers.** An unanswered
+  request stalls the turn indefinitely. A request that cannot be bound to
+  the live turn and its immutable policy snapshot is never forwarded into
+  the mediation path — the unbindable tuple would be a protocol violation
+  — but it *is* denied back to the runtime.
+- **`ask` has no operator.** One-shot dispatch has no feed and no
+  controller lease, so policy is the entire authority: allow when a rule
+  matches, deny otherwise, always answer. Where the secure policy loader
+  does not exist (non-unix — it needs `openat`-class primitives) there is
+  no authority at all, and every request is denied with an explicit
+  warning on stderr. Use `shipmates live` when a human should decide.
+- **Claude Code's own permission settings still apply first.** Anything
+  its allow rules, `acceptEdits`, or `bypassPermissions` approve is
+  resolved before shipmates is consulted and never reaches this path.
+  Review `.claude/settings.json` and the user-level settings the same way
+  you would review the codex sandbox.
+
+#### Claude session-start hook
+
+`shipmates init` / `add` / `update` write a `SessionStart` hook into
+`.claude/settings.json` running `shipmates hook load-memory`, which prints
+the persona's `.shipmates/memory/<persona>/` files into the session
+context. It is a local command with no arguments derived from untrusted
+input, it is bounded (8 KiB total) and it never fails a session. Existing
+settings are merged, never replaced; an unparseable settings file is
+reported rather than overwritten. Only the configured runtime is wired, so
+a codex-only project never grows a `.claude/` directory.
 
 ## Filesystem ownership
 
@@ -76,9 +133,10 @@ separately authorized unrestricted host qualifier passes.
 
 ## Exact-turn authority
 
-Steer, interrupt, and approval bind to an exact persona, project session, Codex
-thread, and turn. Local controller actions also bind to a current lease. Stale
-identifiers are rejected, never redirected to current work.
+Steer, interrupt, and approval bind to an exact persona, project session,
+runtime thread/session, and turn — on both runtimes. Local controller
+actions also bind to a current lease. Stale identifiers are rejected,
+never redirected to current work.
 
 Approvals are single-request decisions. `/allow-once` creates no durable grant.
 Timeout, lease loss, policy change, ambiguous delivery, and stale state fail the

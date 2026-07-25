@@ -27,12 +27,20 @@ The default when nothing is set is `codex`. Precedence is:
 user `~/.shipmates/config.yaml` > built-in default.
 
 The runtime interface lives in `internal/runtime` and is wired through
-`internal/runtime/factory`. `ask` honors `--runtime` / config: resolving
-`claude` dispatches the turn through the runtime interface, and resolving
-`codex` uses the codex-native dispatcher unchanged. All other commands
-are codex-native pending migration, and the sections that describe Codex
-behavior below apply to that path. See
+`internal/runtime/factory`. `ask`, `show`, and the live-session surface
+(`live`, `tell`, `feed`, `interrupt`) honor `--runtime` / config:
+resolving `claude` dispatches through the runtime interface, and resolving
+`codex` uses the codex-native path unchanged. `open`, `sail`, `plan`, and
+the queue workflows are codex-native pending migration, and the sections
+that describe Codex behavior below apply to that path. See
 [Runtime interface plan](runtime-interface-plan.md).
+
+`init`, `add` and `update` additionally wire the configured runtime's
+session-start memory hook — on claude, a `SessionStart` entry in
+`.claude/settings.json` running `shipmates hook load-memory`. Nothing is
+written for codex. Re-run `shipmates update` after changing `runtime:` to
+wire the new one. See
+[Configuration → Session-start memory hook](configuration.md#session-start-memory-hook).
 
 ## Runtime installation
 
@@ -110,6 +118,16 @@ shipmates ask security --timeout 15m 'Review the current diff.'
 Only the final response is written to stdout. Cancellation and timeout reap the
 child and preserve the last successful continuity marker.
 
+`ask` is one-shot: there is no feed to watch and no controller lease, so
+when the runtime asks permission to use a tool the project's policy
+snapshot decides alone — allow when a rule matches, deny otherwise — and
+the decision is printed to stderr as `approval: allowed by policy: …` or
+`approval: denied (no allow rule; ask cannot prompt): …`. A request is
+always answered; leaving one unanswered would stall the turn. Use
+`shipmates live` / `shipmates open` when a human should decide. Because
+the secure policy loader is unix-only, on other platforms `ask` runs with
+no authority and denies every request, saying so on stderr.
+
 ### `shipmates fanout <personas> <prompt>`
 
 Sends one prompt to comma-separated personas. Each retains separate memory and
@@ -180,6 +198,14 @@ preserved.
 Starts or attaches the terminal dashboard and acquires a renewable controller
 lease. `--plain` supports constrained terminals and logs.
 
+The lease is what lets you answer a tool-permission request that project
+policy leaves as `ask`. With no attached controller such a request is
+refused as `mediation_unavailable` and published to the feed — never
+silently allowed, and never left unanswered. This works on both runtimes:
+codex approvals arrive as app-server RPCs, claude approvals as
+`can_use_tool` control requests, and both are presented as the same
+sanitized approval card.
+
 ### `shipmates live <persona> <prompt>`
 
 Starts a managed live turn and reports session, thread, and turn
@@ -191,10 +217,17 @@ the coordination server is a separate process, the client-side `--runtime`
 flag does not reach it: set `SHIPMATES_RUNTIME` in the server's environment
 or `runtime:` in `.shipmates/config.yaml`. On codex the transport is the
 app-server thread; on claude it is a persistent `claude -p
---input-format stream-json` session, with the runtime session id occupying
-the thread slot of the session/thread/turn tuple. Each runtime keeps its own
-live continuity marker, so switching runtimes never resumes the other one's
-thread.
+--input-format stream-json --permission-prompt-tool stdio` session, with
+the runtime session id occupying the thread slot of the
+session/thread/turn tuple. Each runtime keeps its own live continuity
+marker, so switching runtimes never resumes the other one's thread.
+
+Tool-permission requests are mediated the same way on both. Policy decides
+first; anything policy leaves as `ask` goes to the attached controller
+(`shipmates open`) for 30 seconds; with no controller the request is
+refused. Every outcome is published to the feed as `request.allowed`,
+`request.denied`, `request.refused`, `approval.pending`, or
+`approval.resolved`.
 
 ### `shipmates feed <persona> [--follow] [--after <sequence>]`
 

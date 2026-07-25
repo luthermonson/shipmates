@@ -246,16 +246,52 @@ form into its native on-disk shape:
 
 Today `shipmates init` and `shipmates add` write the codex TOML artifact
 directly. The claude Markdown writer is implemented in
-`internal/runtime/claude`; installing a claude persona also wires a
-`SessionStart` memory hook by modifying the project's
-`.claude/settings.json` to run the hidden `shipmates hook load-memory`
-subcommand, which prints the persona's `.shipmates/memory/<persona>/`
-files into the session context at start (bounded, and it never fails a
-session — missing memory prints nothing). The CLI's `init`/`add` will
-emit the claude artifacts once they are migrated onto the runtime
-interface (see [Runtime interface plan](runtime-interface-plan.md)).
+`internal/runtime/claude` but is not yet called by the CLI; persona
+install moves onto the runtime interface in a later phase (see
+[Runtime interface plan](runtime-interface-plan.md)).
 
 Persona names must match `^[a-z][a-z0-9_-]*$`.
+
+## Session-start memory hook
+
+`shipmates init`, `add` and `update` wire the **configured** runtime's
+"read memory on session start" mechanism. Only that runtime is touched: a
+codex-only project never grows a `.claude/` directory, and since the
+built-in default is codex, a project with no `runtime:` setting gets
+nothing claude-specific.
+
+On claude that means merging a `SessionStart` hook into the project's
+`.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "shipmates hook load-memory" } ] }
+    ]
+  }
+}
+```
+
+The nesting is required — Claude Code silently ignores a flat
+`{"type":"command", …}` entry directly under `SessionStart`. No `matcher`
+is set so memory loads on resumed sessions too. The hidden
+`shipmates hook load-memory` subcommand prints the persona's
+`.shipmates/memory/<persona>/` files into the session context (bounded at
+8 KiB, and it never fails a session — missing memory prints nothing). The
+claude runtime exports `SHIPMATES_PERSONA` into the spawned process so the
+hook knows which persona is starting; run by hand without it, the hook
+prints every installed persona's memory instead.
+
+Installation merges: unrelated settings keys, other hook events, and your
+own `SessionStart` groups are preserved, re-running never duplicates the
+entry, and an unparseable `settings.json` is reported rather than
+overwritten. Re-run `shipmates update` after switching `runtime:` to wire
+the new one.
+
+On codex the operation is a deliberate no-op that writes nothing — codex
+memory travels in the persona's developer instructions, which `add` and
+`update` already render into `.codex/agents/<persona>.toml`.
 
 ## Policy files
 
@@ -272,6 +308,21 @@ Rule effects are `allow`, `ask`, and `deny`. Exact-command explanation is
 available through `shipmates policy explain`; runtime mediation still binds an
 approval to the exact persona, session, thread, turn, controller lease, request,
 and policy snapshot.
+
+Policy applies to **both** runtimes, and a `process.exec` rule names the
+same thing on each: a codex command-execution approval and a claude
+`Bash`/`PowerShell` tool approval both contribute the command verbatim.
+Claude tools that have no command line are named `Tool(argument)` — for
+example `Write(/etc/passwd)` or `WebFetch(https://example.com)`. Those
+descriptors are nameable in a policy file and in the audit feed, but they
+match no shell-command rule, so they always fall through to `ask` and
+reach an operator. See
+[Security → Claude tool permissions](security.md#claude-tool-permissions).
+
+The secure policy loader is unix-only (it needs `openat`-class
+primitives). On other platforms `shipmates ask --runtime claude` runs
+without a policy snapshot and denies every tool permission request, saying
+so on stderr.
 
 ## Durable memory
 

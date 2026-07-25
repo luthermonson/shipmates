@@ -58,6 +58,7 @@ matrix.
 |---|---|
 | `.codex/agents/<persona>.toml` | Installed Codex persona definition (`shipmates init` writes this today) |
 | `.claude/agents/<persona>.md` | Claude Code persona definition — written by `runtime.claude.InstallPersona`; the CLI's `init` will emit it once the persona installer is migrated onto the runtime interface |
+| `.claude/settings.json` | Claude Code project settings. `init` / `add` / `update` merge a `SessionStart` hook running `shipmates hook load-memory` into it — only when the project's configured runtime is claude |
 | `.shipmates/memory/<persona>/` | User-owned durable project memory |
 | `.shipmates/policies/<persona>.yaml` | Project-local execution policy |
 | `.shipmates/sessions/` | Bounded Codex continuity and local discovery state |
@@ -173,12 +174,25 @@ bounded, and backend output is rendered from normalized events only.
 
 Policy loading produces an immutable semantic snapshot from project-local
 Shipmates rules. `allow` and `deny` decisions are automatic. `ask` may pause an
-exact Codex app-server request while the active local dashboard displays a
+exact runtime request while the active local dashboard displays a
 sanitized approval card. The controller may allow that request once or deny it;
 timeout, lease loss, stale authority, or delivery uncertainty fails closed.
 
+Both runtimes feed this plane. Codex issues
+`item/commandExecution/requestApproval` RPCs on the app-server transport;
+claude issues `can_use_tool` control requests on its stream-json stdio
+channel and blocks the turn until an answer is written back. The
+runtime-backed adapter normalizes the claude request into the same
+approval event the codex adapter emits, so policy evaluation, the operator
+window, the audit feed, `open` and the dashboard are one implementation
+rather than two. A request that cannot be bound to the live turn and its
+snapshot is never admitted to the plane, but it is still denied back to
+the runtime — an unanswered claude request stalls its turn indefinitely.
+
 Approvals do not create durable grants. They are not exposed through top-level
-commands, Fleet, hooks, or generic resolve endpoints.
+commands, Fleet, hooks, or generic resolve endpoints. Claude Code offers to
+persist a matching rule into its own settings alongside each request;
+shipmates never takes that offer.
 
 ## Fleet plane
 

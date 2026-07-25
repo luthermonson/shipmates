@@ -74,9 +74,20 @@ watchdog additionally programs kernel-enforced Job Object caps for
 
 The Claude runtime is cross-platform because it drives the Claude Code
 CLI via stdio (`claude -p --input-format stream-json --output-format
-stream-json`) — no OS-specific primitives. `ask`, `show`, and the
-live-session surface honor `--runtime` / config; `open`, `sail`, `plan`,
-and the queue workflows are codex-native pending migration.
+stream-json --permission-prompt-tool stdio`) — no OS-specific primitives.
+`ask`, `show`, and the live-session surface honor `--runtime` / config;
+`open`, `sail`, `plan`, and the queue workflows are codex-native pending
+migration.
+
+One approval behavior does vary by platform. Mediating an approval needs
+an immutable policy snapshot, and the secure policy loader requires
+`openat`-class primitives, so it exists on unix only. On Windows and any
+other non-unix platform a `shipmates ask --runtime claude` turn still
+runs, but with no policy authority every tool permission request is
+denied and the degraded posture is printed to stderr. Live sessions are
+unaffected in principle — the mediation path is identical — but the
+coordination server's state directory is likewise unix-only, so `live`
+itself is not yet available on Windows.
 
 ## Where to next
 
@@ -85,10 +96,11 @@ and the queue workflows are codex-native pending migration.
   `show` and the live-session surface (`live`, `tell`, `feed`,
   `interrupt`). Once done, the same commands work with either runtime on
   any platform where the underlying CLI is installed.
-- Wire approval mediation for the claude runtime. `ResolveApproval`
-  returns `ErrUnsupported` there today, so a claude live session cannot
-  mediate a tool-approval request; the gap is surfaced as a
-  runtime-scoped error rather than silently allowed.
+- Make the policy loader portable so claude approvals can be mediated
+  against project policy on Windows too. The mediation path itself is
+  platform-independent; only `policy.Load` is unix-only, and
+  `policy.SecureLoadSupported` reports the gap so the non-unix posture is
+  a deliberate deny rather than an accident.
 - Carry attachments on a codex mid-turn steer. Shipmates sends codex
   steer input as text only, so `show` into a *running* codex turn
   references images by path instead of attaching them.

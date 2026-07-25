@@ -23,6 +23,41 @@ All notable changes to Shipmates are documented here. This project follows
   session). `SessionSpec.Environment` overrides are applied to every
   claude spawn; the codex transport cannot carry them and rejects them
   with `ErrUnsupported` (`Caps.Environment`).
+- **Claude tool approvals are mediated.** The claude runtime now spawns
+  with `--permission-prompt-tool stdio`, so every tool call Claude Code's
+  own permission flow does not resolve arrives as a `can_use_tool`
+  control request that shipmates answers. Requests surface as
+  `runtime.KindApprovalNeeded` and are routed through the *same*
+  mediation path codex uses: policy first, then the attached controller's
+  30-second window, then refusal — so `open`, the dashboard, and the
+  audit feed work unchanged on either runtime. Verified against claude
+  2.1.153; the wire shapes are documented in
+  `docs/runtime-interface-plan.md`. A shell tool (`Bash`, `PowerShell`)
+  is named for policy by its command verbatim, exactly as codex names an
+  exec approval, so one `process.exec` rule governs both runtimes; other
+  tools are named `Tool(argument)` (e.g. `Write(/etc/passwd)`), which
+  matches no command rule and therefore always reaches an operator.
+  Decisions are single-call — shipmates never echoes Claude Code's
+  `permission_suggestions` back to persist a rule. An unanswered request
+  stalls the turn forever, so every path answers: a request that cannot
+  be bound to the live turn and its policy snapshot is denied rather than
+  dropped, and one-shot `ask` decides from policy alone (allow on a
+  matching rule, deny otherwise) and prints the outcome to stderr.
+  `runtime.Caps` grows an `Approvals` bit; both runtimes report true.
+- **The session-start memory hook is actually installed.** `init`, `add`
+  and `update` now wire the configured runtime's memory mechanism —
+  previously `InstallMemoryHook` had no caller at all, so a claude
+  project got no `.claude/settings.json` and real sessions ran with no
+  durable memory injected. The written shape was also wrong: Claude Code
+  silently ignores a flat `SessionStart` entry and only executes the
+  matcher-group form
+  (`{"SessionStart":[{"hooks":[{"type":"command",…}]}]}`), verified with
+  `--include-hook-events` on claude 2.1.153. Any previously written flat
+  entry is migrated. Installation merges — unrelated keys, other hook
+  events and your own `SessionStart` groups survive, repeats never
+  duplicate, and an unparseable `settings.json` is reported rather than
+  overwritten. Only the selected runtime is wired, so a codex-only
+  project never grows a `.claude/` directory.
 - **Containment watcher.** Cross-platform process containment with three
   modes: `watchdog` (default), `cgroup` (Linux enterprise; the adapter is
   not yet implemented, so it degrades to watchdog with a warn-level log),
@@ -64,8 +99,22 @@ All notable changes to Shipmates are documented here. This project follows
   keeps its own live continuity marker.
 - **`--runtime` CLI flag** and `runtime:` config block. Precedence:
   CLI flag > project `.shipmates/config.yaml` > user
-  `~/.shipmates/config.yaml` > default (`codex`). `ask` honors the
-  selection; other commands are codex-native pending migration.
+  `~/.shipmates/config.yaml` > default (`codex`). `ask`, `show`, the
+  live-session surface, and the memory-hook install honor the selection;
+  `open`, `sail`, `plan` and the queue workflows are codex-native pending
+  migration.
+- **`policy.SecureLoadSupported()`.** Reports whether the immutable
+  policy snapshot can be captured on this platform. The loader needs
+  `openat`-class primitives and so is unix-only; callers that mediate
+  runtime approvals consult it and fail closed (deny every request, with
+  an explicit warning) rather than degrading silently.
+- **End-to-end harness for the claude runtime** at
+  `test/e2e/claude/`. Builds the real binary, scaffolds a scratch
+  project, and drives `init` / `add` / `update` / `live` / `feed` /
+  `tell` / `show` (text and image) / `interrupt` / approvals / `ask`
+  against a fake `claude` on PATH that speaks the real stream-json
+  protocol including `can_use_tool`. Nothing inside shipmates is stubbed.
+  Unix only.
 - **Canonical persona catalog.** `internal/runtime/persona` reads and
   writes `persona.md` in a canonical form so the same persona definition
   can be installed for both Claude and Codex without drift.
@@ -99,6 +148,10 @@ All notable changes to Shipmates are documented here. This project follows
   executor depends on PID-file dispatch locks and unix signal semantics.
   Rather than hang, `shipmates sail` on Windows reports the platform
   limitation and points to the issue tracker.
+- **The claude memory hook is written in the shape Claude Code
+  executes.** The previous flat `SessionStart` entry parsed but was
+  silently ignored, so it injected nothing. Existing settings files are
+  migrated in place on the next `init` / `add` / `update`.
 
 ### Removed
 

@@ -1,0 +1,5 @@
+# Shell and Python fixtures are executed on unix (including from WSL against
+# a Windows checkout). A CRLF working-tree copy makes the shebang and every
+# `fi`/`done` unparseable there, so keep them LF regardless of core.autocrlf.
+*.sh text eol=lf
+*.py text eol=lf
