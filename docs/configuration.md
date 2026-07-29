@@ -25,7 +25,22 @@ runtime: claude   # or codex
 
 Per-runtime settings live under `runtimes:`; unknown keys are preserved
 so a runtime can consume its own settings without this loader knowing
-them. Example:
+them.
+
+**Where each setting may live.** A project's `.shipmates/config.yaml`
+arrives with the checkout, so on a repository you have just cloned it is
+content you have not reviewed yet. It may therefore choose *which* runtime
+the project uses, but not what that runtime executes or how it is bounded:
+
+| Setting | Project config | User config |
+| --- | --- | --- |
+| `runtime` | yes | yes |
+| `runtimes.<name>.binary` | ignored | yes |
+| `runtimes.<name>.default_args` | ignored | yes |
+| other `runtimes.<name>` keys | yes | yes |
+| `containment` | ignored | yes |
+
+Example:
 
 ```yaml
 runtime: claude
@@ -51,7 +66,9 @@ Notes:
 
 - `runtime` values are lower-cased and trimmed before comparison.
 - Runtime `settings` are taken from the *first* file that specifies them
-  (project, then user) and are **not** merged.
+  (project, then user) and are **not** merged — except `binary` and
+  `default_args`, which are read from user config only (see the table
+  above), and `containment`, likewise.
 - `containment.mode` accepts `watchdog` (default; kernel-primitive-backed:
   Windows Job Objects enforce `memory_limit_mb` and `max_processes` in the
   kernel, the poll loop covers CPU everywhere), `cgroup` (Linux

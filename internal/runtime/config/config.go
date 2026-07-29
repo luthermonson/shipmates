@@ -78,10 +78,26 @@ func LoadUser() (File, error) {
 	return loadFile(filepath.Join(home, ".shipmates", "config.yaml"))
 }
 
+// executionKeys are the per-runtime settings that decide WHAT gets executed
+// rather than which runtime is selected. They are honored from user config
+// only — see the trust boundary described on Resolve.
+var executionKeys = map[string]bool{"binary": true, "default_args": true}
+
 // Resolve applies precedence: cliRuntime > project > user > defaults.
-// Settings for the selected runtime are taken from the FIRST file that
-// specified them (project then user), NOT merged, keeping the mental
-// model simple.
+//
+// Trust boundary: a project's .shipmates/config.yaml arrives with the
+// checkout, so on a cloned repository it is attacker-controlled content that
+// shipmates reads before the operator has reviewed anything. It may
+// therefore select WHICH runtime a project uses ("this repo is a codex
+// repo") but may not decide what that runtime executes or how it is
+// contained. `binary` and `default_args` are taken from user config only,
+// and containment likewise — otherwise a repository could point shipmates at
+// an executable of its choosing, or set `containment: {mode: none}` to
+// remove the resource bounds from every turn it runs.
+//
+// Non-execution settings for the selected runtime are still taken from the
+// FIRST file that specified them (project then user), NOT merged, keeping
+// the mental model simple.
 func Resolve(cliRuntime string, project, user File) (Resolved, error) {
 	defaults := Defaults()
 	pick := ""
@@ -105,20 +121,46 @@ func Resolve(cliRuntime string, project, user File) (Resolved, error) {
 	}
 	var settings map[string]any
 	if s, ok := project.Runtimes[pick]; ok {
-		settings = s
+		settings = stripExecutionKeys(s)
 	} else if s, ok := user.Runtimes[pick]; ok {
 		settings = s
 	}
-	// Containment: project overrides user; the mode field decides "was it
-	// set?" for purposes of falling through.
-	contain := project.Containment
-	if contain.Mode == "" && user.Containment.Mode != "" {
-		contain = user.Containment
+	// Execution settings come from user config regardless of which file
+	// supplied the rest, so an operator's `binary` still applies to a project
+	// that carries its own (untrusted) settings block.
+	for k, v := range user.Runtimes[pick] {
+		if !executionKeys[k] {
+			continue
+		}
+		if settings == nil {
+			settings = map[string]any{}
+		}
+		settings[k] = v
 	}
+	// Containment is user-config-only for the same reason: a checkout must
+	// not be able to unbound the turns it runs.
+	contain := user.Containment
 	if contain.Mode == "" {
 		contain.Mode = "watchdog" // sensible default: bounded but no privileges required
 	}
 	return Resolved{Runtime: pick, Settings: settings, Containment: contain, Source: source}, nil
+}
+
+// stripExecutionKeys copies s without the settings a project checkout is not
+// trusted to supply. It copies rather than deleting in place because the
+// caller's File may be reused.
+func stripExecutionKeys(s map[string]any) map[string]any {
+	if s == nil {
+		return nil
+	}
+	out := make(map[string]any, len(s))
+	for k, v := range s {
+		if executionKeys[k] {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func loadFile(path string) (File, error) {
