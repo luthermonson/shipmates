@@ -235,9 +235,23 @@ func TestProductionFleetShipObserveRemoteSteerVerticalSlice(t *testing.T) {
 	if string(healthBody) != "ok" {
 		t.Fatalf("scoped health body=%q", healthBody)
 	}
+	// The live routes require the control token from the discovery record, not
+	// just the project scope: the scope is a SHA of the project path that the
+	// server documents as non-secret, and loopback is not a boundary between
+	// local user accounts. Prove the refusal here, against a real server, so
+	// the guarantee is covered end to end and not only in the unit tests.
+	unauthReq, _ := http.NewRequest(http.MethodPost, "http://"+discovery.Address+"/api/live/backend", strings.NewReader(`{"prompt":"work"}`))
+	unauthReq.Header.Set("X-Shipmates-Project", discovery.ProjectScope)
+	unauthResp, err := http.DefaultClient.Do(unauthReq)
+	if err != nil || unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("scope-only live start: err=%v status=%v, want 401", err, unauthResp)
+	}
+	_ = unauthResp.Body.Close()
+
 	reqBody := strings.NewReader(`{"prompt":"work"}`)
 	req, _ := http.NewRequest(http.MethodPost, "http://"+discovery.Address+"/api/live/backend", reqBody)
 	req.Header.Set("X-Shipmates-Project", discovery.ProjectScope)
+	req.Header.Set("Authorization", "Bearer "+discovery.ControlToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		var body struct {
