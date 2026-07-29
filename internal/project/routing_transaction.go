@@ -65,6 +65,16 @@ func RecoverRoutingTransaction(root string) error {
 	}
 	jraw, err := routingReadArtifact(root, path.Join(Dir, routingTransactionName, "journal.json"))
 	if errors.Is(err, os.ErrNotExist) {
+		// The journal is written last, so a crash between creating the
+		// transaction directory and making the journal durable leaves debris
+		// with nothing committed. Clearing it here is the only thing that keeps
+		// the next ApplyRoutingTransaction from failing forever at its mkdir on
+		// a path this function used to return from without cleanup.
+		if _, statErr := os.Lstat(routingTxnDir(root)); statErr == nil {
+			return removeRoutingTxn(root)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
 		return nil
 	}
 	if err != nil {
@@ -167,8 +177,15 @@ func ApplyRoutingTransaction(root string, artifacts []RoutingArtifact, oldManife
 		stageRel := path.Join(Dir, routingTransactionName, filepath.ToSlash(e.Stage))
 		if err := routingExchangeDestination(root, stageRel, e.Path, artifacts[i].OldDevice, artifacts[i].OldInode, e.OldHash, os.FileMode(e.OldMode)); err != nil {
 			if errors.Is(err, errRoutingDestinationChanged) {
-				return cleanupRoutingFailure(root, fmt.Errorf("persona %q changed at routing commit: %w", e.Name, err))
+				err = fmt.Errorf("persona %q changed at routing commit: %w", e.Name, err)
 			}
+			// Never remove the transaction directory from inside this loop.
+			// Entries before this one are already live at their destinations
+			// and the only copies of their originals are the journal-bound
+			// backups inside that directory; the journal is the only thing
+			// that can put them back. This also covers a failed exchange-back,
+			// where even the first entry's displaced original is still in
+			// stage. Recovery is always the correct response here.
 			return recoverAfterRoutingFailure(root, err)
 		}
 		if err := routingRename(root, stageRel, path.Join(Dir, routingTransactionName, filepath.ToSlash(e.Backup))); err != nil {

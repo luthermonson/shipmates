@@ -258,7 +258,7 @@ func AcquireDispatchLockAt(root, persona string) (func(), error) {
 		return nil, err
 	}
 	path := filepath.Join(sessionsDir, persona+".dispatch.lock")
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := openDispatchLockFile(path)
 	if err != nil {
 		return nil, err
 	}
