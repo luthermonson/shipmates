@@ -1117,7 +1117,6 @@ func (m *Manager) SteerExactTurn(ctx context.Context, sid, tid, turn, text strin
 		candidate.mu.Unlock()
 		if match {
 			if s != nil { // Session IDs are authority identifiers and must be unique.
-				m.mu.Unlock()
 				return RemoteSteerDecision{Outcome: RemoteSteerRefused, ReasonCode: "stale_target"}
 			}
 			s = candidate
