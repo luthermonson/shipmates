@@ -64,34 +64,85 @@ func NewWithCodexOptions(options codexapp.StartOptions) *Server {
 
 func (s *Server) Ready() <-chan struct{} { return s.ready }
 
+// route is one registered endpoint. authenticated routes are wrapped in
+// localControlOnly — which checks the project scope AND does a constant-time
+// compare of the control token — when the mux is built, so a route cannot be
+// registered with the wrong gate by forgetting to wrap it by hand.
+type route struct {
+	pattern       string
+	handler       http.HandlerFunc
+	authenticated bool
+}
+
+// routes is the single source of truth for the server's surface: what exists
+// and what it requires. route_auth_test.go asserts every entry here is
+// covered by an auth test, so a new endpoint cannot ship unauthenticated by
+// omission — which is exactly how the whole /api/live surface came to be
+// gated on nothing but the project scope, a SHA of the project path that is
+// documented non-secret. Loopback is not a boundary between local user
+// accounts; the token in the 0600 discovery record is.
+func (s *Server) routes() []route {
+	return []route{
+		// The liveness probe callers use before they trust anything else, so
+		// it carries no token — but it must not answer WITH the project scope
+		// until the caller has proved it already knows it.
+		{"GET /health", s.handleHealth, false},
+
+		{"POST /shutdown", s.handleShutdown, true},
+
+		{"POST /api/live/{persona}", s.handleCodexLive, true},
+		{"POST /api/live/{persona}/attach", s.handleCodexAttach, true},
+		{"POST /api/live/{persona}/release", s.handleCodexRelease, true},
+		{"POST /api/live/{persona}/heartbeat", s.handleCodexHeartbeat, true},
+		{"POST /api/live/{persona}/sync", s.handleCodexSync, true},
+		{"POST /api/live/{persona}/action", s.handleCodexControllerAction, true},
+		{"POST /api/live/{persona}/approval", s.handleCodexApproval, true},
+		{"GET /api/live/{persona}/feed", s.handleCodexFeed, true},
+		{"POST /api/live/{persona}/tell", s.handleCodexTell, true},
+		{"POST /api/live/{persona}/show", s.handleLiveShow, true},
+		{"POST /api/live/{persona}/interrupt", s.handleCodexInterrupt, true},
+
+		{"GET /api/local/v1/steer-targets", s.handleLocalSteerTargets, true},
+		{"POST /api/local/v1/steer-exact", s.handleLocalSteerExact, true},
+		{"POST /api/local/v1/interrupt-exact", s.handleLocalInterruptExact, true},
+
+		// 204 stubs retained for legacy clients; they touch no state.
+		{"POST /register", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }, false},
+		{"POST /deregister", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }, false},
+	}
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Shipmates-Project") != s.projectScope {
+		http.Error(w, "project mismatch", http.StatusConflict)
+		return
+	}
+	w.Header().Set("X-Shipmates-Project", s.projectScope)
+	_, _ = w.Write([]byte("ok"))
+}
+
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Shipmates-Project", s.projectScope)
-		if r.Header.Get("X-Shipmates-Project") != s.projectScope {
-			http.Error(w, "project mismatch", http.StatusConflict)
-			return
+	for _, rt := range s.routes() {
+		if rt.authenticated {
+			mux.Handle(rt.pattern, s.localControlOnly(rt.handler))
+			continue
 		}
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.Handle("POST /shutdown", s.localControlOnly(http.HandlerFunc(s.handleShutdown)))
-	mux.Handle("POST /api/live/{persona}", s.projectOnly(http.HandlerFunc(s.handleCodexLive)))
-	mux.Handle("POST /api/live/{persona}/attach", s.projectOnly(http.HandlerFunc(s.handleCodexAttach)))
-	mux.Handle("POST /api/live/{persona}/release", s.projectOnly(http.HandlerFunc(s.handleCodexRelease)))
-	mux.Handle("POST /api/live/{persona}/heartbeat", s.projectOnly(http.HandlerFunc(s.handleCodexHeartbeat)))
-	mux.Handle("POST /api/live/{persona}/sync", s.projectOnly(http.HandlerFunc(s.handleCodexSync)))
-	mux.Handle("POST /api/live/{persona}/action", s.projectOnly(http.HandlerFunc(s.handleCodexControllerAction)))
-	mux.Handle("POST /api/live/{persona}/approval", s.projectOnly(http.HandlerFunc(s.handleCodexApproval)))
-	mux.Handle("GET /api/live/{persona}/feed", s.projectOnly(http.HandlerFunc(s.handleCodexFeed)))
-	mux.Handle("POST /api/live/{persona}/tell", s.projectOnly(http.HandlerFunc(s.handleCodexTell)))
-	mux.Handle("POST /api/live/{persona}/show", s.projectOnly(http.HandlerFunc(s.handleLiveShow)))
-	mux.Handle("POST /api/live/{persona}/interrupt", s.projectOnly(http.HandlerFunc(s.handleCodexInterrupt)))
-	mux.Handle("GET /api/local/v1/steer-targets", s.localControlOnly(http.HandlerFunc(s.handleLocalSteerTargets)))
-	mux.Handle("POST /api/local/v1/steer-exact", s.localControlOnly(http.HandlerFunc(s.handleLocalSteerExact)))
-	mux.Handle("POST /api/local/v1/interrupt-exact", s.localControlOnly(http.HandlerFunc(s.handleLocalInterruptExact)))
-	mux.HandleFunc("POST /register", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	mux.HandleFunc("POST /deregister", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+		mux.Handle(rt.pattern, rt.handler)
+	}
 	return mux
+}
+
+// registeredRoutePatterns lists every pattern handler() registers. It exists
+// for route_auth_test.go: net/http.ServeMux cannot be enumerated, so without
+// this the coverage test would have to scrape source text, which proves
+// formatting rather than behavior.
+func (s *Server) registeredRoutePatterns() []string {
+	out := make([]string, 0, len(s.routes()))
+	for _, rt := range s.routes() {
+		out = append(out, rt.pattern)
+	}
+	return out
 }
 
 func (s *Server) Run(ctx context.Context) error {

@@ -145,8 +145,8 @@ func Post(path string, body any) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	authorize(req, ep, path)
-	resp, err := clientForPath(path).Do(req)
+	authorize(req, ep)
+	resp, err := controlHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -168,8 +168,8 @@ func Get(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	authorize(req, ep, path)
-	resp, err := clientForPath(path).Do(req)
+	authorize(req, ep)
+	resp, err := controlHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -199,20 +199,23 @@ func Do(ctx context.Context, method, path string, body any) (*http.Response, err
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	authorize(req, ep, path)
-	return clientForPath(path).Do(req)
+	authorize(req, ep)
+	return controlHTTPClient().Do(req)
 }
 
-func authorize(req *http.Request, ep endpoint, path string) {
+// authorize attaches the project scope and the control token to every
+// request. There is deliberately no per-path allowlist: one used to exist
+// here, and the routes it omitted — the entire /api/live surface — were
+// authenticated by nothing but a guessable project hash. An allowlist that
+// must be extended whenever a route is added will drift again, and the
+// server refuses a token it does not need far more gracefully than it
+// survives a route that needed one and never got it.
+func authorize(req *http.Request, ep endpoint) {
 	req.Header.Set(projectHeader, ep.scope)
-	if path == "/shutdown" || strings.HasPrefix(path, "/api/local/v1/") {
-		req.Header.Set("Authorization", "Bearer "+ep.token)
-	}
+	req.Header.Set("Authorization", "Bearer "+ep.token)
 }
 
-func clientForPath(path string) *http.Client {
-	if path == "/shutdown" || strings.HasPrefix(path, "/api/local/v1/") {
-		return localControlHTTPClient
-	}
-	return http.DefaultClient
-}
+// controlHTTPClient is used for every request now that every request bears
+// the token: it strips Authorization across redirects, which
+// http.DefaultClient does not.
+func controlHTTPClient() *http.Client { return localControlHTTPClient }

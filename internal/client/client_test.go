@@ -64,32 +64,69 @@ func TestDiscoveryValidatesAtomicServerRecord(t *testing.T) {
 	}
 }
 
-func TestBearerIsScopedToLocalControlRequests(t *testing.T) {
+// TestBearerAccompaniesEveryRequest replaces an earlier test that asserted
+// the opposite — that the bearer was withheld from /api/live requests. That
+// was the bug, not the invariant: the live routes start sessions, mint
+// controller leases, steer and interrupt live turns, and resolve tool
+// approvals, and they were gated on the project scope alone, which is a SHA
+// of the project path that the server documents as non-secret. Loopback is
+// not a boundary between local user accounts, so the token must ride on
+// every request. The client no longer keeps a per-path allowlist, because an
+// allowlist that must be extended for each new route is what produced the
+// gap in the first place.
+func TestBearerAccompaniesEveryRequest(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeDiscoveryFixture(t, nil)
-	old := http.DefaultTransport
-	defer func() { http.DefaultTransport = old }()
+	old := localControlHTTPClient.Transport
+	defer func() { localControlHTTPClient.Transport = old }()
 	seen := map[string]http.Header{}
-	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	localControlHTTPClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		seen[r.URL.Path] = r.Header.Clone()
 		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}"))}, nil
 	})
-	if _, err := Do(context.Background(), http.MethodPost, "/api/live/backend", nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Do(context.Background(), http.MethodPost, "/shutdown", nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := seen["/api/live/backend"].Get("Authorization"); got != "" {
-		t.Fatalf("live request leaked bearer %q", got)
-	}
-	if got := seen["/shutdown"].Get("Authorization"); got != "Bearer "+strings.Repeat("x", 43) {
-		t.Fatalf("shutdown bearer = %q", got)
-	}
-	for path, header := range seen {
-		if header.Get(projectHeader) == "" {
-			t.Fatalf("%s missing project scope", path)
+	for _, path := range []string{
+		"/api/live/backend",
+		"/api/live/backend/attach",
+		"/api/live/backend/approval",
+		"/api/live/backend/interrupt",
+		"/api/local/v1/steer-exact",
+		"/shutdown",
+	} {
+		if _, err := Do(context.Background(), http.MethodPost, path, nil); err != nil {
+			t.Fatalf("%s: %v", path, err)
 		}
+	}
+	wantBearer := "Bearer " + strings.Repeat("x", 43)
+	for path, header := range seen {
+		if got := header.Get("Authorization"); got != wantBearer {
+			t.Errorf("%s Authorization = %q, want the control token", path, got)
+		}
+		if header.Get(projectHeader) == "" {
+			t.Errorf("%s missing project scope", path)
+		}
+	}
+	if len(seen) != 6 {
+		t.Fatalf("saw %d requests, want 6", len(seen))
+	}
+}
+
+// The redirect-stripping client must be used for every request now that
+// every request bears the token: http.DefaultClient would carry
+// Authorization across a redirect.
+func TestControlClientStripsAuthorizationOnRedirect(t *testing.T) {
+	if controlHTTPClient() != localControlHTTPClient {
+		t.Fatal("requests must use the redirect-stripping client")
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1/api/live/backend", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer secret")
+	if err := localControlHTTPClient.CheckRedirect(req, nil); err != http.ErrUseLastResponse {
+		t.Fatalf("CheckRedirect = %v, want ErrUseLastResponse", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization survived a redirect: %q", got)
 	}
 }
 

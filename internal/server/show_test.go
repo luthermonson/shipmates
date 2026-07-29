@@ -23,6 +23,7 @@ func TestShowEndpointRevalidatesPathsAndNeverLeaks(t *testing.T) {
 	}
 	s := NewWithCodexOptions(codexapp.StartOptions{})
 	s.projectRoot, s.projectScope = root, "scope"
+	s.controlToken = testControlToken
 
 	for _, tc := range []struct {
 		name, contentType, body string
@@ -37,7 +38,7 @@ func TestShowEndpointRevalidatesPathsAndNeverLeaks(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "/api/live/backend/show", strings.NewReader(tc.body))
-			r.Header.Set("X-Shipmates-Project", "scope")
+			authenticate(r, "scope")
 			r.Header.Set("Content-Type", tc.contentType)
 			w := httptest.NewRecorder()
 			s.handler().ServeHTTP(w, r)

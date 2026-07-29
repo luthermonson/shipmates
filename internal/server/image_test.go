@@ -13,9 +13,10 @@ import (
 func TestImageLiveRequestRejectsMalformedPathsAndContentTypeWithoutLeak(t *testing.T) {
 	s := NewWithCodexOptions(codexapp.StartOptions{})
 	s.projectScope = "scope"
+	s.controlToken = testControlToken
 	for _, tc := range []struct{ content, body string }{{"text/plain", `{"prompt":"x","images":["secret.png"]}`}, {"application/json", `{"prompt":"x","images":["../secret.png"]}`}} {
 		r := httptest.NewRequest(http.MethodPost, "/api/live/backend", strings.NewReader(tc.body))
-		r.Header.Set("X-Shipmates-Project", "scope")
+		authenticate(r, "scope")
 		r.Header.Set("Content-Type", tc.content)
 		w := httptest.NewRecorder()
 		s.handler().ServeHTTP(w, r)

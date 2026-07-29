@@ -79,16 +79,11 @@ type liveApprovalRequest struct {
 	Decision     livesession.ApprovalDecision  `json:"decision"`
 }
 
-func (s *Server) projectOnly(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Shipmates-Project") != s.projectScope {
-			writeLiveJSON(w, http.StatusConflict, map[string]string{"code": "project_mismatch", "message": "live session request failed"})
-			return
-		}
-		w.Header().Set("X-Shipmates-Project", s.projectScope)
-		next.ServeHTTP(w, r)
-	})
-}
+// projectOnly is deliberately gone. It gated every live-session route on the
+// project scope alone — a SHA of the project path, documented non-secret —
+// which is not a boundary between local user accounts. localControlOnly
+// performs the same scope check plus a constant-time control-token compare
+// and is the only middleware any authenticated route should use.
 
 func (s *Server) localControlOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
