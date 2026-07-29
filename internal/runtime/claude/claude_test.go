@@ -35,6 +35,9 @@ func TestMain(m *testing.M) {
 //	SHIPMATES_CLAUDE_FAKE_ECHO_ENV         name of an env var echoed as a text frame
 //	SHIPMATES_CLAUDE_FAKE_ECHO_ARGS        emit one "argv:…" text frame per process
 //	SHIPMATES_CLAUDE_FAKE_IGNORE_INTERRUPT ack control_requests but never end the turn
+//	SHIPMATES_CLAUDE_FAKE_STDERR           write this to stderr and exit 1 on the first turn
+//	SHIPMATES_CLAUDE_FAKE_HUGE_FRAME       emit a text frame of this many bytes per turn,
+//	                                       before the turn's other output
 //
 // A turn whose text starts with "approve:" additionally exercises the
 // permission control protocol: the fake emits a can_use_tool
@@ -99,6 +102,12 @@ func runFakeClaude() {
 		}
 		switch msg.Type {
 		case "user":
+			// Auth/config failures: claude prints to stderr and exits without
+			// ever emitting a stdout frame.
+			if boom := os.Getenv("SHIPMATES_CLAUDE_FAKE_STDERR"); boom != "" {
+				fmt.Fprintln(os.Stderr, boom)
+				os.Exit(1)
+			}
 			var text string
 			for _, c := range msg.Message.Content {
 				if c.Type == "text" {
@@ -130,6 +139,16 @@ func runFakeClaude() {
 			wg.Add(1)
 			go func(intr chan struct{}, ms int, text, reqID string) {
 				defer wg.Done()
+				// One pathologically long frame, then business as usual: the
+				// process stays alive and keeps emitting frames the consumer
+				// can no longer parse.
+				if size := os.Getenv("SHIPMATES_CLAUDE_FAKE_HUGE_FRAME"); size != "" {
+					var n int
+					_, _ = fmt.Sscanf(size, "%d", &n)
+					if n > 0 {
+						emit(textFrame(strings.Repeat("x", n)))
+					}
+				}
 				emit(map[string]any{
 					"type": "assistant",
 					"message": map[string]any{

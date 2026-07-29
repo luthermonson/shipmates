@@ -87,7 +87,10 @@ func interruptFixture(t *testing.T) (*Manager, *Session, *interruptFakeClock, Re
 	t.Helper()
 	clock := &interruptFakeClock{at: time.Unix(500, 0)}
 	m := &Manager{sessions: make(map[string]*Session)}
-	s := &Session{persona: "backend", sessionID: "session", threadID: "thread", turnID: "turn", state: Working}
+	// done/notify/nextSequence are what Session.finish and publishLocked need:
+	// the fail-closed interrupt paths now go through finish, and closing a nil
+	// done channel would panic instead of reporting the defect.
+	s := &Session{persona: "backend", sessionID: "session", threadID: "thread", turnID: "turn", state: Working, done: make(chan struct{}), notify: make(chan struct{}, 1), nextSequence: 1}
 	m.sessions["backend"] = s
 	op := RemoteInterruptOperator{SubjectID: "subject", CredentialID: "credential", CredentialGeneration: 9, FleetID: "fleet", Capability: RemoteInterruptCapability}
 	req := RemoteInterruptRequest{ProtocolVersion: 1, OperationID: "operation", OperationNonce: "nonce", FleetID: "fleet", FleetEpoch: 2, ShipID: "ship", ConnectionGeneration: 3, Persona: "backend", TargetReference: "target"}
@@ -338,17 +341,35 @@ func TestRemoteInterruptExactTupleConflictExpiryAndCapacity(t *testing.T) {
 	}
 }
 
+// TestRemoteInterruptApprovalUncertaintyFailsClosed asserts the whole
+// fail-closed contract, not just the state label. Unprovable approval
+// cancellation must close the exact owner through Session.finish: the version
+// that hand-set "s.state, s.shutting = Failed, true" produced the same
+// snapshot while leaving the backend child executing the turn, the dispatch
+// lock held, session.failed unpublished and Done() waiters blocked forever.
 func TestRemoteInterruptApprovalUncertaintyFailsClosed(t *testing.T) {
 	m, s, clock, op, req, target := interruptFixture(t)
+	backend := &stubBackend{}
+	released := make(chan struct{})
+	s.adapter = backend
+	s.release = func() { close(released) }
 	c := NewRemoteInterruptCoordinator(m, clock.Now, nil)
 	a := &fakeApprovalCanceller{result: ApprovalUnknown}
 	i := &fakeExactInterrupter{result: ExactTurnInterrupted}
 	r, _ := c.Interrupt(context.Background(), op, req, target, a, i)
-	s.mu.Lock()
-	state, shutting := s.state, s.shutting
-	s.mu.Unlock()
-	if r.Outcome != RemoteInterruptIndeterminate || r.ReasonCode != "approval_cancel_unknown" || i.calls != 0 || state != Failed || !shutting {
-		t.Fatalf("result=%+v calls=%d state=%s shutting=%v", r, i.calls, state, shutting)
+	if r.Outcome != RemoteInterruptIndeterminate || r.ReasonCode != "approval_cancel_unknown" || i.calls != 0 {
+		t.Fatalf("result=%+v interrupt calls=%d", r, i.calls)
+	}
+	assertFinishedClosed(t, s, backend, released)
+
+	// The wedge the bypass caused: Shutdown saw Failed, treated the session as
+	// already terminal and returned nil WITHOUT ever closing the adapter. It is
+	// only correct for Shutdown to short-circuit because finish did the work.
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown after fail-closed interrupt: %v", err)
+	}
+	if got := backend.closes(); got != 1 {
+		t.Fatalf("adapter closed %d times across teardown, want exactly 1", got)
 	}
 }
 

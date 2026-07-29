@@ -58,6 +58,23 @@ import (
 // tree via the containment handle.
 const defaultInterruptGrace = 5 * time.Second
 
+// defaultMaxFrameBytes bounds one stdout JSONL frame. A frame this large is
+// already pathological (claude's own frames are kilobytes), but the bound has
+// to exist or a malformed stream could grow the read buffer without limit.
+const defaultMaxFrameBytes = 8 * 1024 * 1024
+
+// stderrTailBytes is how much of a session process's stderr is retained for
+// diagnosis. The child's last words are what distinguish "please run /login",
+// a missing binary and a crash from a generic timeout, and the interesting
+// output is always at the end.
+const stderrTailBytes = 16 * 1024
+
+// stderrDrainGrace bounds the wait for the stderr reader to finish before a
+// terminal event is published. cmd.Wait closes the pipe on process exit, so
+// the reader returns immediately; the bound only exists so a stuck reader can
+// never delay teardown.
+const stderrDrainGrace = 2 * time.Second
+
 // Runtime is the claude-backed runtime.Runtime. Zero value is not usable;
 // call New.
 type Runtime struct {
@@ -76,6 +93,10 @@ type Runtime struct {
 	// interruptGrace bounds InterruptTurn's wait for the in-band interrupt
 	// before escalating to a containment-handle kill. Tests shrink it.
 	interruptGrace time.Duration
+
+	// maxFrameBytes is readLoop's per-frame ceiling. Tests shrink it so the
+	// oversized-frame path is reachable without writing 8 MiB.
+	maxFrameBytes int
 
 	stream  chan runtime.Event
 	stopFan chan struct{}
@@ -144,6 +165,7 @@ func New(cfg Config) *Runtime {
 		contain:        contain,
 		limits:         cfg.Limits,
 		interruptGrace: defaultInterruptGrace,
+		maxFrameBytes:  defaultMaxFrameBytes,
 		stream:         make(chan runtime.Event, 64),
 		stopFan:        make(chan struct{}),
 		sessions:       map[string]*session{},
@@ -293,6 +315,12 @@ func (r *Runtime) SendTurn(ctx context.Context, sessionID string, in runtime.Tur
 	}
 	if err := p.writeUserMessage(in.Text, in.Attachments); err != nil {
 		releaseSlot()
+		// A broken stdin nearly always means the child already exited, and the
+		// reason is on its stderr — "please run /login" rather than a bare
+		// "file already closed". Keep %w so callers can still unwrap.
+		if tail := p.lastStderr(); tail != "" {
+			return nil, fmt.Errorf("claude: write turn to session process: %w; stderr: %s", err, tail)
+		}
 		return nil, fmt.Errorf("claude: write turn to session process: %w", err)
 	}
 	return &turn{id: turnID, sessionID: sessionID, startedAt: time.Now()}, nil
@@ -572,12 +600,30 @@ func (r *Runtime) spawn(ctx context.Context, s *session) (*proc, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Route the spawn through containment so RSS/CPU are bounded.
-	handle, err := r.contain.Start(cmd, r.limits)
+	// Claude Code reports auth failures ("Invalid API key · Please run
+	// /login"), config errors and crash detail on stderr. Left unwired it goes
+	// to the void and every one of those failures looks like a generic timeout.
+	// StderrPipe rather than an io.Writer on purpose: cmd.Wait closes the pipe
+	// once the process exits instead of waiting for the copy to finish, so a
+	// grandchild holding the descriptor open can never block the reap — and the
+	// tail reader below drains continuously, so a chatty child never blocks on
+	// a full pipe either.
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, err
 	}
-	p := &proc{handle: handle, stdin: stdin}
+	// Route the spawn through containment so RSS/CPU are bounded.
+	handle, err := r.contain.Start(cmd, r.limits)
+	if err != nil {
+		_ = stderr.Close()
+		return nil, err
+	}
+	p := &proc{handle: handle, stdin: stdin, stderr: newStderrTail(stderrTailBytes), stderrDone: make(chan struct{})}
+	go func() {
+		defer close(p.stderrDone)
+		// Errors here are expected: cmd.Wait closes the read end on exit.
+		_, _ = io.Copy(p.stderr, stderr)
+	}()
 
 	r.sessMu.Lock()
 	if r.closed {
@@ -611,7 +657,17 @@ func (r *Runtime) spawn(ctx context.Context, s *session) (*proc, error) {
 // close, crash) rather than only that it did.
 func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	max := r.maxFrameBytes
+	if max <= 0 {
+		max = defaultMaxFrameBytes
+	}
+	// bufio raises the token limit to cap(buf) when that is larger, so the
+	// starting buffer must never exceed max or the ceiling silently moves.
+	start := 64 * 1024
+	if start > max {
+		start = max
+	}
+	scanner.Buffer(make([]byte, 0, start), max)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		isResult := frameType(line) == "result"
@@ -636,15 +692,52 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 			r.approvals[req.RequestID] = &pendingApproval{sessionID: s.id, turnID: turnID, proc: p, request: req}
 			r.sessMu.Unlock()
 		}
-		select {
-		case <-r.stopFan:
+		if !r.publish(ev) {
 			return
-		case r.stream <- ev:
 		}
 	}
+	// scanner.Scan returning false is NOT proof of clean EOF: a frame longer
+	// than the token limit (or any read fault) ends the loop with the child
+	// still alive and still emitting frames we can no longer parse. Ignoring
+	// scanner.Err made truncation indistinguishable from a clean exit and left
+	// this goroutine waiting for a terminal event nobody would ever trigger,
+	// which in turn hung Close on fanWG.Wait forever. Report the real cause and
+	// tear the desynced process down.
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		r.sessMu.Lock()
+		turnID := s.turnID
+		r.sessMu.Unlock()
+		if !r.publish(runtime.Event{
+			Timestamp: time.Now(),
+			Kind:      runtime.KindError,
+			SessionID: s.id,
+			TurnID:    turnID,
+			Payload:   withStderr(fmt.Sprintf("claude: session stdout framing failed: %v", scanErr), p.lastStderr()),
+		}) {
+			return
+		}
+		p.closeStdin()
+		_ = p.handle.Close(context.Background())
+	}
 	// Stdout closed: the process is exiting. Wait for containment to
-	// report the terminal event, then clean up session state.
-	ev, ok := <-p.handle.Done()
+	// report the terminal event, then clean up session state. The stopFan arm
+	// is what guarantees Close's drain can never be stranded here, whatever
+	// state the child or its containment handle is in.
+	var ev containment.Event
+	ok := false
+	select {
+	case ev, ok = <-p.handle.Done():
+	case <-r.stopFan:
+	}
+	if ok && p.stderrDone != nil {
+		// Give the stderr drain the moment it needs to finish so the terminal
+		// event carries the child's last words.
+		select {
+		case <-p.stderrDone:
+		case <-time.After(stderrDrainGrace):
+		}
+	}
 	r.sessMu.Lock()
 	if s.proc == p {
 		s.proc = nil
@@ -659,10 +752,21 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 	r.dropSessionApprovalsLocked(s.id)
 	r.sessMu.Unlock()
 
+	if scanErr != nil {
+		// The framing failure was already published as this session's error
+		// terminal; a second terminal event would double-report one death.
+		return
+	}
+
 	kind := runtime.KindSessionClosed
 	var payload any = ev
 	if !ok {
-		payload = "handle closed without terminal event"
+		payload = withStderr("handle closed without terminal event", p.lastStderr())
+	} else {
+		// containment.Event.Detail is the diagnosis slot: an exit code alone
+		// never explains WHY claude refused to run.
+		ev.Detail = withStderr(ev.Detail, p.lastStderr())
+		payload = ev
 	}
 	if active {
 		// The process died mid-turn — whatever the reason (memory kill,
@@ -670,16 +774,84 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 		// its result frame, so surface it as an error terminal.
 		kind = runtime.KindError
 	}
-	select {
-	case <-r.stopFan:
-	case r.stream <- runtime.Event{
+	r.publish(runtime.Event{
 		Timestamp: time.Now(),
 		Kind:      kind,
 		SessionID: s.id,
 		TurnID:    turnID,
 		Payload:   payload,
-	}:
+	})
+}
+
+// publish sends one event on the fan-out stream, reporting false when the
+// runtime is shutting down and the event was dropped.
+func (r *Runtime) publish(ev runtime.Event) bool {
+	select {
+	case <-r.stopFan:
+		return false
+	case r.stream <- ev:
+		return true
 	}
+}
+
+// withStderr appends a captured stderr tail to a diagnostic string.
+func withStderr(detail, tail string) string {
+	if tail == "" {
+		return detail
+	}
+	if detail == "" {
+		return "stderr: " + tail
+	}
+	return detail + "; stderr: " + tail
+}
+
+// stderrTail is a bounded ring of a child's most recent stderr output. Writes
+// never block and never grow past max, so the reader draining the child's
+// stderr pipe can always keep up and the child can never wedge on a full pipe.
+type stderrTail struct {
+	mu       sync.Mutex
+	buf      []byte
+	max      int
+	overflow bool
+}
+
+func newStderrTail(max int) *stderrTail {
+	if max <= 0 {
+		max = stderrTailBytes
+	}
+	return &stderrTail{max: max}
+}
+
+func (t *stderrTail) Write(p []byte) (int, error) {
+	n := len(p)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(p) >= t.max {
+		t.buf = append(t.buf[:0], p[len(p)-t.max:]...)
+		t.overflow = true
+		return n, nil
+	}
+	if drop := len(t.buf) + len(p) - t.max; drop > 0 {
+		t.buf = t.buf[:copy(t.buf, t.buf[drop:])]
+		t.overflow = true
+	}
+	t.buf = append(t.buf, p...)
+	return n, nil
+}
+
+// String returns the retained tail with surrounding whitespace trimmed, marked
+// with a leading ellipsis when earlier output was dropped.
+func (t *stderrTail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := strings.TrimSpace(string(t.buf))
+	if out == "" {
+		return ""
+	}
+	if t.overflow {
+		return "..." + out
+	}
+	return out
 }
 
 // session is the runtime.Session implementation for claude sessions. The
@@ -725,10 +897,25 @@ func (s *session) workingDir() string {
 type proc struct {
 	handle containment.Handle
 	stdin  io.WriteCloser
+	// stderr retains the tail of the child's stderr so a failure that only
+	// shows up there (auth, config, crash detail) reaches the operator instead
+	// of looking like a generic timeout.
+	stderr *stderrTail
+	// stderrDone closes when the stderr reader has drained the pipe.
+	stderrDone chan struct{}
 	// writeMu serializes stdin writers (SendTurn vs SteerTurn vs
 	// InterruptTurn) so JSONL lines never interleave.
 	writeMu   sync.Mutex
 	stdinDone bool
+}
+
+// lastStderr returns the child's retained stderr, or "" when nothing was
+// captured. Safe on a proc built without stderr wiring (tests).
+func (p *proc) lastStderr() string {
+	if p == nil || p.stderr == nil {
+		return ""
+	}
+	return p.stderr.String()
 }
 
 // writeUserMessage writes one stream-json user-message line. With no

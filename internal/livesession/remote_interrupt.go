@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/codexapp"
 )
 
 const (
@@ -322,11 +324,20 @@ func (c *RemoteInterruptCoordinator) Interrupt(ctx context.Context, op RemoteInt
 	approval := approvals.CancelPendingApproval(ctx, target.SessionID, target.ThreadID, target.TurnID)
 	c.barrier("approval_closed")
 	if approval == ApprovalUnknown {
+		// Cancellation delivery cannot be proven, so approval authority is
+		// unknowable and the exact owner must be closed. finish is the only
+		// teardown that closes the adapter, releases the dispatch lock,
+		// publishes session.failed and closes s.done; hand-setting Failed here
+		// left the backend child executing the turn with its own approval
+		// requests unanswered, wedged Done() waiters forever, and made the
+		// persona permanently Busy. Same pattern as approval.go's
+		// allow-delivery-unknown branch.
 		s.mu.Lock()
-		if exactRemoteInterruptTurn(s, target) {
-			s.state, s.shutting = Failed, true
-		}
+		owner, adapter := exactRemoteInterruptTurn(s, target), s.adapter
 		s.mu.Unlock()
+		if owner {
+			s.finish(Failed, adapter, codexapp.ProtocolViolation)
+		}
 		return c.complete(rec, op, req, target, RemoteInterruptIndeterminate, "approval_cancel_unknown", false)
 	}
 	if approval != ApprovalAbsent && approval != ApprovalCancelled {
@@ -363,7 +374,7 @@ func (c *RemoteInterruptCoordinator) LocalInterrupt(ctx context.Context, persona
 		return ExactTurnAlreadyTerminal
 	}
 	s.mu.Lock()
-	if s.sessionID != sessionID || s.threadID != threadID || s.turnID != turnID {
+	if !s.ownsExactTurnLocked(sessionID, threadID, turnID) {
 		s.mu.Unlock()
 		return ExactTurnAlreadyTerminal
 	}
@@ -380,9 +391,15 @@ func (c *RemoteInterruptCoordinator) LocalInterrupt(ctx context.Context, persona
 	c.mu.Unlock()
 	a := approvals.CancelPendingApproval(ctx, sessionID, threadID, turnID)
 	if a == ApprovalUnknown {
+		// Fail closed through finish, exactly as Interrupt does — and only
+		// when this session still owns the target tuple, which the hand-rolled
+		// version forgot to re-check after releasing the lock.
 		s.mu.Lock()
-		s.state, s.shutting = Failed, true
+		owner, adapter := s.ownsExactTurnLocked(sessionID, threadID, turnID), s.adapter
 		s.mu.Unlock()
+		if owner {
+			s.finish(Failed, adapter, codexapp.ProtocolViolation)
+		}
 		c.mu.Lock()
 		return ExactTurnUnknown
 	}
@@ -422,8 +439,17 @@ func validateRemoteInterruptLocked(now time.Time, s *Session, op RemoteInterrupt
 	return ""
 }
 
+// ownsExactTurnLocked reports whether the session still owns exactly this
+// session/thread/turn tuple. Every exact-turn ownership re-check goes through
+// it: the interrupt paths release the session lock across their backend RPCs,
+// and spelling the same three comparisons out at each re-lock is how one of
+// them ended up missing entirely. Caller must hold s.mu.
+func (s *Session) ownsExactTurnLocked(sessionID, threadID, turnID string) bool {
+	return s.sessionID == sessionID && s.threadID == threadID && s.turnID == turnID
+}
+
 func exactRemoteInterruptTurn(s *Session, t RemoteInterruptTarget) bool {
-	return s.sessionID == t.SessionID && s.threadID == t.ThreadID && s.turnID == t.TurnID
+	return s.ownsExactTurnLocked(t.SessionID, t.ThreadID, t.TurnID)
 }
 
 func (c *RemoteInterruptCoordinator) complete(rec *remoteInterruptRecord, op RemoteInterruptOperator, req RemoteInterruptRequest, target RemoteInterruptTarget, outcome RemoteInterruptOutcome, reason string, cancelled bool) (RemoteInterruptResult, RemoteInterruptAuditCandidate) {

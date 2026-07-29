@@ -602,8 +602,19 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 		return nil, failure(Busy)
 	}
 	s.mu.Lock()
-	s.release = release
+	claimed := s.startupClaimedLocked()
+	if !claimed {
+		s.release = release
+	}
 	s.mu.Unlock()
+	if claimed {
+		// finish already consumed s.release (it reads the field exactly once),
+		// so installing it now would strand the persona's dispatch lock until
+		// the process exits. Hand it back here instead.
+		closeRuntime()
+		release()
+		return nil, failure(StoppedCode)
+	}
 	marker, have, err := project.ReadLiveContinuityBackendAt(root, opts.Persona, backendName)
 	if err != nil {
 		closeRuntime()
@@ -648,6 +659,23 @@ func (m *Manager) StartIdle(ctx context.Context, opts StartIdleOptions) (*Sessio
 		s.mu.Unlock()
 		s.startupFailure(ctx, a, codexapp.RequestTimeout)
 		return nil, ctx.Err()
+	}
+	if s.startupClaimedLocked() {
+		// A concurrent Shutdown/ShutdownAll reached this session — it has been
+		// visible in m.sessions since before the dispatch lock — and finish
+		// already ran to completion or is running now. finish is one-shot, so
+		// overwriting its terminal state with Idle here would resurrect a
+		// session whose done channel is already closed and whose every later
+		// finish is a no-op: Shutdown would stop closing the adapter, monitor's
+		// EOF path would skip teardown, and the persona would report Busy
+		// forever. Abandon the startup instead.
+		s.mu.Unlock()
+		// Close unconditionally rather than trying to work out whether the
+		// racing Shutdown captured this adapter before StartIdle installed it:
+		// both Backend implementations guard Close with a sync.Once, so a
+		// redundant call is free, whereas guessing wrong leaks a live child.
+		_ = a.Close(context.Background())
+		return nil, failure(StoppedCode)
 	}
 	s.threadID, s.state = thread.ID, Idle
 	if resume {
@@ -1340,6 +1368,24 @@ func (s *Session) snapshotLocked() Snapshot {
 	return Snapshot{Persona: s.persona, SessionID: s.sessionID, Backend: backend, ThreadID: s.threadID, TurnID: s.turnID, State: s.state, FailureCode: s.failureCode}
 }
 
+// startupClaimedLocked reports whether terminal cleanup has taken a still-
+// Starting session away from StartIdle. finish is one-shot: everything it
+// consumes (doneOnce, s.done, s.release) can never be re-armed, so once it has
+// run — or Shutdown has committed to running it by setting s.shutting —
+// StartIdle must abandon the session rather than complete its startup. Both of
+// StartIdle's post-blocking-call re-locks ask exactly this question; keeping it
+// in one place is what stops the two checks from drifting apart.
+// Caller must hold s.mu.
+func (s *Session) startupClaimedLocked() bool {
+	return s.state != Starting || s.shutting
+}
+
+// finish is the single blessed terminal transition. It is the ONLY place that
+// may assign Stopped or Failed to s.state, because it is also the only place
+// that closes the adapter, releases the persona's dispatch lock, publishes the
+// terminal event and closes s.done. Hand-rolling any part of that leaves the
+// backend child running, wedges Done() waiters and pins the persona at Busy;
+// TestTerminalStateOnlyEnteredThroughFinish enforces the rule mechanically.
 func (s *Session) finish(state State, a Backend, code codexapp.Code) {
 	if a != nil {
 		_ = a.Close(context.Background())
