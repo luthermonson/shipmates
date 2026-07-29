@@ -11,15 +11,19 @@
 package ship
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -192,58 +196,102 @@ func runCaptain(ctx context.Context, exe, dir string, env []string) error {
 	return cmd.Wait()
 }
 
-// serverPort reads the project's recorded coordination-server port, 0 when absent.
-func serverPort(dir string) int {
-	b, err := os.ReadFile(filepath.Join(dir, ".shipmates", "sessions", "server.port"))
-	if err != nil {
-		return 0
-	}
-	var port int
-	_, _ = fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &port)
-	return port
+// serverRecord is the validated content of a project's server.json
+// discovery record. It mirrors the validation in client.discover — the
+// record format is owned by `server serve` (see server.Run) and read in
+// three places today; consolidating the readers is a follow-up.
+type serverRecord struct {
+	base  string // http://<loopback>:<port>
+	scope string
+	token string
+	port  int
+	pid   int
 }
 
-// serverHealthy probes the project's recorded server port. A stale port file
+// readServerRecord reads .shipmates/sessions/server.json for dir. The record
+// is only trusted when it names this exact project root and scope, a
+// loopback address, and a PID that is still alive — a crashed server's stale
+// record reads as absent rather than poisoning the probe.
+func readServerRecord(dir string) (serverRecord, bool) {
+	root, err := projectstate.CanonicalRoot(dir)
+	if err != nil {
+		return serverRecord{}, false
+	}
+	scope, err := projectstate.ScopeID(root)
+	if err != nil {
+		return serverRecord{}, false
+	}
+	b, err := projectstate.ReadServerStateFile(root, "server.json", 4096)
+	if err != nil {
+		return serverRecord{}, false
+	}
+	var record struct {
+		SchemaVersion uint64 `json:"schema_version"`
+		ProjectRoot   string `json:"project_root"`
+		ProjectScope  string `json:"project_scope"`
+		Address       string `json:"address"`
+		PID           int    `json:"pid"`
+		ControlToken  string `json:"control_token"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&record) != nil || dec.Decode(&struct{}{}) != io.EOF || record.SchemaVersion != 1 || record.ProjectRoot != root || record.ProjectScope != scope || record.PID < 1 || len(record.ControlToken) < 32 || strings.ContainsAny(record.ControlToken, " \t\r\n") {
+		return serverRecord{}, false
+	}
+	host, portStr, err := net.SplitHostPort(record.Address)
+	if err != nil || portStr == "" {
+		return serverRecord{}, false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return serverRecord{}, false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return serverRecord{}, false
+	}
+	if alive, err := projectstate.ProcessAlive(record.PID); err != nil || !alive {
+		return serverRecord{}, false
+	}
+	return serverRecord{base: "http://" + net.JoinHostPort(host, portStr), scope: scope, token: record.ControlToken, port: port, pid: record.PID}, true
+}
+
+// serverHealthy probes the project's recorded server. A stale record
 // (server crashed without cleanup) fails the probe and is treated as absent.
 func serverHealthy(dir string) bool {
-	port := serverPort(dir)
-	if port == 0 {
+	rec, ok := readServerRecord(dir)
+	if !ok {
 		return false
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	scope, err := projectstate.ScopeID(dir)
+	req, err := http.NewRequest(http.MethodGet, rec.base+"/health", nil)
 	if err != nil {
 		return false
 	}
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/health", port), nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("X-Shipmates-Project", scope)
+	req.Header.Set("X-Shipmates-Project", rec.scope)
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK && resp.Header.Get("X-Shipmates-Project") == scope
+	return resp.StatusCode == http.StatusOK && resp.Header.Get("X-Shipmates-Project") == rec.scope
 }
 
 // shutdownServer asks the project's coordination server to exit gracefully.
+// /shutdown sits behind localControlOnly, so the request must carry the
+// control token from the discovery record, not just the project scope.
 func shutdownServer(dir string) bool {
-	port := serverPort(dir)
-	if port == 0 {
+	rec, ok := readServerRecord(dir)
+	if !ok {
 		return false
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	scope, err := projectstate.ScopeID(dir)
+	req, err := http.NewRequest(http.MethodPost, rec.base+"/shutdown", nil)
 	if err != nil {
 		return false
 	}
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/shutdown", port), nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("X-Shipmates-Project", scope)
+	req.Header.Set("X-Shipmates-Project", rec.scope)
+	req.Header.Set("Authorization", "Bearer "+rec.token)
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
@@ -313,9 +361,8 @@ func StatusAll(c *Config) []ProjectStatus {
 	out := make([]ProjectStatus, 0, len(c.Projects))
 	for _, p := range c.Projects {
 		st := ProjectStatus{Dir: p.Dir}
-		st.Port = serverPort(p.Dir)
-		if b, err := os.ReadFile(filepath.Join(p.Dir, ".shipmates", "sessions", "server.pid")); err == nil {
-			_, _ = fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &st.PID)
+		if rec, ok := readServerRecord(p.Dir); ok {
+			st.Port, st.PID = rec.port, rec.pid
 		}
 		st.Running = serverHealthy(p.Dir)
 		out = append(out, st)

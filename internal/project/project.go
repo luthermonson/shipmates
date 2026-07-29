@@ -100,14 +100,11 @@ func ManifestPath() string {
 	return filepath.Join(Dir, ManifestName)
 }
 
-// SessionsDir holds transient coordination state (server port/pid, session markers).
+// SessionsDir holds transient coordination state (server discovery record, session markers).
 func SessionsDir() string { return filepath.Join(Dir, SessionsDirName) }
 
-// PortFile / PidFile / LogFile locate the running server's metadata.
-func PortFile() string         { return filepath.Join(SessionsDir(), "server.port") }
-func PidFile() string          { return filepath.Join(SessionsDir(), "server.pid") }
+// ServerRecordFile / LogFile locate the running server's metadata.
 func LogFile() string          { return filepath.Join(SessionsDir(), "server.log") }
-func ControlTokenFile() string { return filepath.Join(SessionsDir(), "server.control-token") }
 func ServerRecordFile() string { return filepath.Join(SessionsDir(), "server.json") }
 
 // DelegationJournalPathAt returns the isolated M1 journal path for one exact
