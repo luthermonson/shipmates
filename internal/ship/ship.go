@@ -1,8 +1,13 @@
 // Package ship implements the per-host supervisor: one daemon that reads
 // ~/.shipmates/ship.yaml (a list of project dirs), keeps a project server alive
-// in each, and restarts them on crash. It is the thing `ship install` wires
-// to run at logon as a user-scoped Windows Scheduled Task or macOS launchd
-// agent so project-local Codex configuration and user credentials are available.
+// in each, and restarts them on crash. One supervisor covers every project on
+// the host; `ship install` is run once per machine, not once per project.
+//
+// `ship install` wires it to a user-scoped Windows Scheduled Task or macOS
+// launchd agent rather than a session-0 service, so project-local runtime
+// configuration and the user's credentials are available to the runtimes it
+// spawns. On Windows, `--unattended` additionally registers a boot trigger so
+// the supervisor returns after a power cut with nobody logged in.
 package ship
 
 import (

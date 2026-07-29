@@ -18,7 +18,9 @@ and why.
 | `show` | ✅ | ✅ | ⚠️ | Same as `ask`. File validation is platform-specific but complete on all three: `openat` + `O_NOFOLLOW` on unix, `FILE_FLAG_OPEN_REPARSE_POINT` refusal on Windows. Delivery into a running live turn needs the local server, so it shares `live`'s constraints; without one it falls back to a one-shot turn. |
 | `fanout`, `drain`, `drain-many`, `autonomous` | ✅ | ✅ | ⚠️ | Codex-native execution in this release; will follow the runtime interface migration. |
 | `sail` | ✅ | ✅ | ❌ | PID-file dispatch locks + unix signal semantics; returns a clear error on Windows. |
-| `fleet`, `ship`, `server` | ✅ | ❌ | ❌ | Fleet Commander M1-M3; unix-only because of `openat`, `O_NOFOLLOW`, `flock`. Absent from the CLI on non-unix. |
+| `fleet`, `server` | ✅ | ❌ | ❌ | Fleet Commander M1-M3; unix-only because of `openat`, `O_NOFOLLOW`, `flock`. Absent from the CLI on non-unix. |
+| `ship serve`, `add`, `status`, `install`, `uninstall` | ✅ | ✅ | ✅ | The per-host supervisor: one daemon per machine, keeping a project server alive in every dir listed in `~/.shipmates/ship.yaml`. Depends on nothing unix-only. `ship install` registers it as a Windows Scheduled Task or a macOS launchd user agent; on Linux it is still unimplemented (write a systemd *user* unit by hand). |
+| `ship observe` | ✅ | ❌ | ❌ | Fleet Commander's tunnel/steer surface, unix-only for the same reason as `fleet`. Absent from the `ship` command tree on non-unix. |
 
 ## Why some things are unix-only
 
@@ -34,7 +36,7 @@ exchange — and neither do the remaining unix platforms, so
 unsupported on this platform`. Everything else about routing (`routing
 show`, composition at `add`/`update` time) works everywhere.
 
-### Fleet Commander (M1-M3) — `fleet`, `ship`, `server`
+### Fleet Commander (M1-M3) — `fleet`, `server`, `ship observe`
 
 The delegation mailbox and M3 provisioning validator use filesystem
 primitives that shipmates has not yet abstracted:
@@ -48,6 +50,82 @@ primitives that shipmates has not yet abstracted:
 Porting to Windows would require re-implementing atomic
 exchange semantics against Win32 handle-based file APIs. The path is
 open (see `docs/runtime-interface-plan.md`) but not scheduled.
+
+Only `ship observe` is affected. The rest of the `ship` tree is the
+per-host supervisor, which shares no code with Fleet Commander and runs
+on every platform — see below.
+
+## The supervisor — `ship install`
+
+One install per machine, not per project. The supervisor is a single
+daemon that reads `~/.shipmates/ship.yaml` and keeps a project server
+alive in every dir listed there, so five projects on one host means one
+`ship install` plus five `ship add <dir>`.
+
+### Windows — Scheduled Task
+
+The task is registered from generated task XML rather than through
+`schtasks /Create` flags, because the settings that matter are not
+reachable from the command line and their defaults are wrong for a
+long-lived supervisor:
+
+| Setting | schtasks default | What shipmates registers |
+|---|---|---|
+| `ExecutionTimeLimit` | `PT72H` | `PT0S` (no limit) — otherwise the supervisor is killed after three days, silently |
+| `DisallowStartIfOnBatteries` | `true` | `false` — a UPS taking over during an outage must not stop the ship |
+| `StopIfGoingOnBatteries` | `true` | `false` — same |
+| `RestartOnFailure` | none | 3 restarts, 1 minute apart — the Windows equivalent of launchd's `KeepAlive` |
+| `MultipleInstancesPolicy` | `IgnoreNew` | `IgnoreNew` — kept explicit so the boot and logon triggers cannot race |
+| `StartWhenAvailable` | `false` | `true` — run a missed trigger late rather than never |
+
+### Windows — surviving a power cut
+
+The default registration is logon-triggered with an interactive token,
+which means it needs somebody to log in. A machine that boots to the
+lock screen after an outage never starts the ship.
+
+`ship install --unattended` swaps that for a boot trigger plus a
+non-interactive logon type, so the supervisor is running before anyone
+touches the console. No auto-logon and no extra daemon are involved —
+a daemon could not help, because what is missing on an unattended boot
+is a logon session, not a trigger.
+
+Two principals are available:
+
+- **S4U** (default). Stores no password. The task gets a token with no
+  network credentials and no access to the user's DPAPI store, neither
+  of which shipmates needs: the runtimes authenticate over outbound
+  HTTPS, and Claude Code's credentials on Windows are a plain file at
+  `%USERPROFILE%\.claude\.credentials.json`. Registering an S4U task
+  needs the account to hold the "Log on as a batch job" right.
+- **Password** (`--store-password`). A full token, at the cost of a
+  password stored as an LSA secret. `schtasks` prompts for it directly;
+  shipmates never reads it and it never appears on a command line.
+
+Both keep the supervisor running as the operator's own account with
+their profile loaded, which a session-0 service would not.
+
+### macOS — launchd user agent
+
+`ship install` writes a `~/Library/LaunchAgents` plist with `KeepAlive`,
+so launchd restarts the supervisor if it dies. `--unattended` is
+refused rather than ignored: a LaunchAgent starts at login by design.
+Boot-time supervision on macOS means a `LaunchDaemon` running as root
+without the user's profile — a different design, not a flag.
+
+### Linux — not implemented
+
+`ship install` returns an error. Run `shipmates ship serve` from a
+systemd **user** unit so the supervisor inherits the login environment.
+Two things are easy to get wrong by hand:
+
+- `loginctl enable-linger <user>` is mandatory. Without it the unit does
+  not start at boot and is killed when the last session ends — the Linux
+  analogue of the logon-trigger problem on Windows.
+- `After=network-online.target` is inert in a user unit, because the
+  user manager has its own unit namespace. Use `Restart=always` with
+  `RestartSec=10` to handle a supervisor starting before the network is
+  up.
 
 ### Sail — voyage executor
 

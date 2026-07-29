@@ -3,6 +3,7 @@
 package ship
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,7 +26,17 @@ func plistPath() (string, error) {
 // user's login session with their environment — the Mac analogue of the
 // Windows logon Scheduled Task). KeepAlive makes launchd itself restart the
 // supervisor if it dies.
-func Install() error {
+//
+// InstallOptions.Unattended is refused rather than ignored: a LaunchAgent
+// only runs once somebody logs in, so accepting the flag would promise a
+// boot-time supervisor the plist cannot deliver. Reaching that on macOS
+// means a LaunchDaemon in /Library/LaunchDaemons, which runs as root
+// without the user's profile — a different design, not a flag.
+func Install(opts InstallOptions) error {
+	if opts.Unattended {
+		return errors.New("ship install --unattended is Windows-only: a launchd user agent " +
+			"starts at login by design, so it cannot bring the ship back on an unattended boot")
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return err

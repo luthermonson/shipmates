@@ -7,6 +7,51 @@ All notable changes to Shipmates are documented here. This project follows
 
 ### Added
 
+- **`ship install --unattended` brings the supervisor back after a power
+  cut.** The default registration is logon-triggered, so a host that boots
+  to the lock screen after an outage never starts the ship. `--unattended`
+  registers a boot trigger with a non-interactive logon type instead:
+  S4U by default (no stored secret), or a Windows-stored password with
+  `--store-password`, where `schtasks` does the prompting so the password
+  never passes through shipmates or a command line. Neither auto-logon
+  nor a helper daemon is involved — what an unattended boot lacks is a
+  logon session, not a trigger, so a daemon calling `schtasks /Run` could
+  not have helped. macOS refuses the flag rather than ignoring it: a
+  launchd *user agent* starts at login by definition.
+
+- **The per-host supervisor is available on Windows and macOS again.**
+  `shipmates ship` was gated `//go:build unix` as collateral damage of
+  gating Fleet Commander — the file that defines the command also holds
+  `ship observe`, which imports the unix-only `fleettunnel` /
+  `fleetsteer` / `fleetobserve` / `fleetidentity` packages. Everything
+  else in the tree (`serve`, `add`, `status`, `install`, `uninstall`)
+  depends on nothing but `internal/ship`, which was already portable, so
+  the Windows Scheduled Task and macOS launchd code was unreachable from
+  the CLI on the platforms it was written for. `shipcmd.go` now holds the
+  portable supervisor, `shipcmd_unix.go` adds `observe` on unix, and
+  `public_other.go` registers `Ship()` off unix. `fleet` and `server` are
+  unchanged and stay unix-only.
+
+### Fixed
+
+- **The Windows supervisor no longer dies on a timer, on battery, or on a
+  crash.** `ship install` created its Scheduled Task with no settings
+  flags, so every Task Scheduler default applied to a process meant to run
+  indefinitely: `ExecutionTimeLimit` of `PT72H` terminated the supervisor
+  after three days with no log entry and no restart; `StopIfGoingOnBatteries`
+  and `DisallowStartIfOnBatteries` meant a UPS taking over during an outage
+  *stopped* the ship and refused to restart it, so adding a UPS made the
+  failure more likely; and `RestartCount = 0` left a crash terminal until
+  the next logon, where macOS had `KeepAlive` all along. None of these are
+  reachable from `schtasks /Create` switches, so the task is now built from
+  generated task XML (`ExecutionTimeLimit PT0S`, both battery settings
+  false, `RestartOnFailure` 3×1min, `StartWhenAvailable`). Element order
+  inside `<Settings>` is schema-significant and is pinned by a test, as is
+  the UTF-16LE encoding `schtasks /XML` requires; a second, opt-in test
+  (`SHIPMATES_TASK_PROBE=1`) registers the generated XML against the real
+  Task Scheduler and reads the settings back, which is the only check that
+  can tell valid XML from merely plausible XML.
+
 - **The policy subsystem works on Windows.** `internal/policy` and the
   policy write lock had no Windows implementation, which meant
   `shipmates init` failed outright with "secure policy mutation locking

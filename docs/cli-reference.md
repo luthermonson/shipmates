@@ -345,8 +345,15 @@ Ship-side commands:
 - `shipmates ship serve` runs the supervised ship-side service.
 - `shipmates ship add` enrolls or configures a ship identity.
 - `shipmates ship status` reports local service and identity state.
-- `shipmates ship install` installs the user service.
+- `shipmates ship install` installs the user service — one per machine, not
+  per project; it supervises every dir in `~/.shipmates/ship.yaml`. Add
+  `--unattended` on Windows to register a boot trigger so the supervisor
+  returns after a power cut with nobody logged in, and `--store-password`
+  to run it under a stored password instead of S4U. See
+  `docs/platform-support.md` for what each principal buys.
 - `shipmates ship uninstall` removes the user service.
+
+`ship observe` is unix-only; the rest of the `ship` tree runs everywhere.
 
 Fleet-side commands:
 

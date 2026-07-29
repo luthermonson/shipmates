@@ -37,9 +37,11 @@ func TestMain(m *testing.M) {
 }
 
 // m11PublicCommandTree mirrors PublicCommands. The Fleet Commander
-// subsystem (fleet/server/ship) is unix-only — see public_unix.go /
-// public_other.go — so those branches are added by
+// subsystem (fleet/server, plus ship's observe) is unix-only — see
+// public_unix.go / public_other.go — so those branches are added by
 // m11_release_gate_unix_test.go via init() when the unix build tag applies.
+// The `ship` branch itself exists on every platform (the per-host supervisor
+// is portable) and is added by m11_release_gate_other_test.go off unix.
 var m11PublicCommandTree = map[string][]string{
 	"":        {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "show", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail", "hook"},
 	"policy":  {"validate", "explain"},
