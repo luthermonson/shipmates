@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"sync"
@@ -83,6 +84,8 @@ type ObserverCredentialRecord struct {
 	CredentialID string
 	FleetID      string
 	ShipIDs      []string
+	IssuedAt     time.Time
+	ExpiresAt    time.Time
 	Revoked      bool
 }
 type OperatorPrincipal struct {
@@ -164,7 +167,11 @@ func proofMatches(v [32]byte, transcript, proof []byte) bool {
 func (r *Registry) AuthenticateShipProof(credentialID string, transcript, proof []byte) (ShipPrincipal, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return ShipPrincipal{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return ShipPrincipal{}, err
 	}
@@ -195,7 +202,11 @@ func (r *Registry) AuthenticateShipProof(credentialID string, transcript, proof 
 func (r *Registry) AllocateConnectionGeneration(p ShipPrincipal) (uint64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return 0, err
 	}
@@ -220,6 +231,12 @@ func (r *Registry) AllocateConnectionGeneration(p ShipPrincipal) (uint64, error)
 func (r *Registry) ConnectionGeneration(shipID string) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	_, unlock, err := r.beginLocked()
+	if err != nil {
+		// A store that cannot be read cannot prove any generation is current.
+		return 0
+	}
+	defer unlock()
 	if s := r.ships[shipID]; s != nil {
 		return s.generation
 	}
@@ -235,7 +252,11 @@ func credentialActive(s *ship, id string) bool {
 func (r *Registry) ShipCredentialActive(p ShipPrincipal) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return false, err
 	}
@@ -252,7 +273,8 @@ type artifact struct {
 }
 type observer struct {
 	credential
-	ships map[string]struct{}
+	ships           map[string]struct{}
+	issued, expires time.Time
 }
 type operatorCredential struct {
 	credential
@@ -311,6 +333,13 @@ func OpenRegistry(dir, fleetID string, clock Clock, random io.Reader) (*Registry
 		return nil, err
 	}
 	r.storeDir = dir
+	// The initial load takes the same cross-process lock as every later
+	// transaction, so opening never races a concurrent writer's rename.
+	release, err := lockAuthorityStore(filepath.Clean(dir))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err = r.loadAuthority(); err != nil {
 		return nil, err
 	}
@@ -336,7 +365,11 @@ func validTTL(ttl time.Duration) bool { return ttl >= time.Minute && ttl <= 24*t
 func (r *Registry) CreateEnrollment(ttl time.Duration) (EnrollmentArtifact, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return EnrollmentArtifact{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return EnrollmentArtifact{}, err
 	}
@@ -365,7 +398,11 @@ func (r *Registry) CreateEnrollment(ttl time.Duration) (EnrollmentArtifact, erro
 func (r *Registry) Enroll(artifactID, secret, transactionID string) (EnrollmentResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return EnrollmentResult{}, err
+	}
+	defer unlock()
 	if !opaqueID.MatchString(artifactID) || !opaqueID.MatchString(transactionID) || len(secret) > 128 {
 		return EnrollmentResult{}, fail(Unauthorized)
 	}
@@ -415,7 +452,11 @@ func (r *Registry) Enroll(artifactID, secret, transactionID string) (EnrollmentR
 func (r *Registry) AuthenticateShip(credentialID, secret string) (ShipPrincipal, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return ShipPrincipal{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return ShipPrincipal{}, err
 	}
@@ -441,7 +482,11 @@ func (r *Registry) AuthenticateShip(credentialID, secret string) (ShipPrincipal,
 func (r *Registry) IssueShipRotation(shipID string, overlap time.Duration) (SecretCredential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return SecretCredential{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return SecretCredential{}, err
 	}
@@ -475,7 +520,11 @@ func (r *Registry) rotationProvedLocked(s *ship) {
 func (r *Registry) CommitShipRotation(shipID, credentialID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return err
 	}
@@ -495,7 +544,11 @@ func (r *Registry) CommitShipRotation(shipID, credentialID string) error {
 func (r *Registry) RevokeShipCredential(shipID, credentialID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	s := r.ships[shipID]
 	if s == nil {
 		return fail(NotFound)
@@ -513,7 +566,11 @@ func (r *Registry) RevokeShipCredential(shipID, credentialID string) error {
 func (r *Registry) RevokeShip(shipID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	s := r.ships[shipID]
 	if s == nil {
 		return fail(NotFound)
@@ -531,6 +588,11 @@ func (r *Registry) RevokeShip(shipID string) error {
 func (r *Registry) InspectShip(shipID string) (ShipCredentialRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	_, unlock, err := r.beginLocked()
+	if err != nil {
+		return ShipCredentialRecord{}, err
+	}
+	defer unlock()
 	s := r.ships[shipID]
 	if s == nil {
 		return ShipCredentialRecord{}, fail(NotFound)
@@ -538,12 +600,36 @@ func (r *Registry) InspectShip(shipID string) (ShipCredentialRecord, error) {
 	return ShipCredentialRecord{ShipID: shipID, CredentialID: s.current.id, Generation: s.generation, Revoked: s.revoked || s.current.revoked, Pending: s.rotation != nil}, nil
 }
 
+// ObserverTTL is the default lifetime for a read-only observer credential. It
+// matches the upper bound accepted for operator and commander credentials so no
+// credential family is unbounded.
+const ObserverTTL = 24 * time.Hour
+
+// IssueObserver issues a read-only credential for an exact, non-empty ship
+// scope with the default lifetime. An empty scope is refused: it would be a
+// silent fleet-wide grant, and the read path now fails closed on it anyway.
 func (r *Registry) IssueObserver(shipIDs []string) (SecretCredential, error) {
+	return r.IssueObserverTTL(shipIDs, ObserverTTL)
+}
+
+// IssueObserverTTL issues a read-only credential bounded by ttl.
+func (r *Registry) IssueObserverTTL(shipIDs []string, ttl time.Duration) (SecretCredential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return SecretCredential{}, err
+	}
+	defer unlock()
+	if err := r.expireAndCommitLocked(before); err != nil {
+		return SecretCredential{}, err
+	}
+	before = r.durableLocked()
 	if len(r.observers) >= maxObservers {
 		return SecretCredential{}, fail(LimitExceeded)
+	}
+	if len(shipIDs) == 0 || !validTTL(ttl) {
+		return SecretCredential{}, fail(InvalidInput)
 	}
 	allowed := map[string]struct{}{}
 	for _, id := range shipIDs {
@@ -560,7 +646,8 @@ func (r *Registry) IssueObserver(shipIDs []string) (SecretCredential, error) {
 	if err != nil {
 		return SecretCredential{}, err
 	}
-	r.observers[id] = &observer{credential: credential{id: id, verifier: verifier(secret)}, ships: allowed}
+	now := r.clock.Now()
+	r.observers[id] = &observer{credential: credential{id: id, verifier: verifier(secret)}, ships: allowed, issued: now, expires: now.Add(ttl)}
 	if err := r.commitLocked(before); err != nil {
 		return SecretCredential{}, err
 	}
@@ -569,8 +656,16 @@ func (r *Registry) IssueObserver(shipIDs []string) (SecretCredential, error) {
 func (r *Registry) AuthenticateObserver(credentialID, secret string) (ObserverPrincipal, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return ObserverPrincipal{}, err
+	}
+	defer unlock()
+	if err := r.expireAndCommitLocked(before); err != nil {
+		return ObserverPrincipal{}, err
+	}
 	o := r.observers[credentialID]
-	if o == nil || o.revoked || !verifies(secret, o.verifier) {
+	if o == nil || o.revoked || len(o.ships) == 0 || !r.clock.Now().Before(o.expires) || !verifies(secret, o.verifier) {
 		return ObserverPrincipal{}, fail(Unauthorized)
 	}
 	ids := make([]string, 0, len(o.ships))
@@ -583,7 +678,11 @@ func (r *Registry) AuthenticateObserver(credentialID, secret string) (ObserverPr
 func (r *Registry) RevokeObserver(credentialID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	o := r.observers[credentialID]
 	if o == nil {
 		return fail(NotFound)
@@ -597,6 +696,14 @@ func (r *Registry) RevokeObserver(credentialID string) error {
 func (r *Registry) InspectObserver(credentialID string) (ObserverCredentialRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return ObserverCredentialRecord{}, err
+	}
+	defer unlock()
+	if err := r.expireAndCommitLocked(before); err != nil {
+		return ObserverCredentialRecord{}, err
+	}
 	o := r.observers[credentialID]
 	if o == nil {
 		return ObserverCredentialRecord{}, fail(NotFound)
@@ -606,7 +713,7 @@ func (r *Registry) InspectObserver(credentialID string) (ObserverCredentialRecor
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	return ObserverCredentialRecord{CredentialID: credentialID, FleetID: r.fleetID, ShipIDs: ids, Revoked: o.revoked}, nil
+	return ObserverCredentialRecord{CredentialID: credentialID, FleetID: r.fleetID, ShipIDs: ids, IssuedAt: o.issued, ExpiresAt: o.expires, Revoked: o.revoked}, nil
 }
 
 func operatorRecord(o *operatorCredential) OperatorCredentialRecord {
@@ -630,7 +737,11 @@ func (r *Registry) IssueOperator(subjectID string, shipIDs []string, ttl time.Du
 func (r *Registry) IssueOperatorCapability(subjectID string, shipIDs []string, capability string, ttl time.Duration) (IssuedOperatorCredential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return IssuedOperatorCredential{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return IssuedOperatorCredential{}, err
 	}
@@ -670,7 +781,11 @@ func (r *Registry) IssueOperatorCapability(subjectID string, shipIDs []string, c
 func (r *Registry) RotateOperator(credentialID string, generation uint64, overlap, ttl time.Duration) (IssuedOperatorCredential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return IssuedOperatorCredential{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return IssuedOperatorCredential{}, err
 	}
@@ -715,7 +830,11 @@ func (r *Registry) RotateOperator(credentialID string, generation uint64, overla
 func (r *Registry) CommitOperatorRotation(credentialID string, generation uint64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	n := r.operators[credentialID]
 	if n == nil || n.revoked || n.generation != generation || generation < 2 {
 		return fail(NotFound)
@@ -732,7 +851,11 @@ func (r *Registry) CommitOperatorRotation(credentialID string, generation uint64
 func (r *Registry) AuthenticateOperator(credentialID, secret, fleetID, shipID string) (OperatorPrincipal, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return OperatorPrincipal{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return OperatorPrincipal{}, err
 	}
@@ -752,7 +875,11 @@ func (r *Registry) AuthenticateOperator(credentialID, secret, fleetID, shipID st
 func (r *Registry) AuthenticateOperatorCredential(credentialID, secret string) (OperatorPrincipal, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return OperatorPrincipal{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return OperatorPrincipal{}, err
 	}
@@ -782,7 +909,11 @@ func commanderRecord(o *commanderCredential) CommanderCredentialRecord {
 func (r *Registry) IssueCommander(subjectID string, shipIDs []string, ttl time.Duration) (IssuedCommanderCredential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return IssuedCommanderCredential{}, err
 	}
@@ -819,7 +950,11 @@ func (r *Registry) IssueCommander(subjectID string, shipIDs []string, ttl time.D
 func (r *Registry) RotateCommander(credentialID string, generation uint64, overlap, ttl time.Duration) (IssuedCommanderCredential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return IssuedCommanderCredential{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return IssuedCommanderCredential{}, err
 	}
@@ -857,7 +992,11 @@ func (r *Registry) RotateCommander(credentialID string, generation uint64, overl
 func (r *Registry) CommitCommanderRotation(credentialID string, generation uint64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	n := r.commanders[credentialID]
 	if n == nil || n.revoked || n.generation != generation || generation < 2 {
 		return fail(NotFound)
@@ -874,7 +1013,11 @@ func (r *Registry) CommitCommanderRotation(credentialID string, generation uint6
 func (r *Registry) AuthenticateCommander(credentialID, secret, fleetID, shipID string) (CommanderPrincipal, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return CommanderPrincipal{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return CommanderPrincipal{}, err
 	}
@@ -892,7 +1035,11 @@ func (r *Registry) AuthenticateCommander(credentialID, secret, fleetID, shipID s
 func (r *Registry) AuthenticateCommanderCredential(credentialID, secret string) (CommanderPrincipal, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return CommanderPrincipal{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return CommanderPrincipal{}, err
 	}
@@ -907,7 +1054,11 @@ func (r *Registry) AuthenticateCommanderCredential(credentialID, secret string) 
 func (r *Registry) InspectCommander(credentialID string, generation uint64) (CommanderCredentialRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return CommanderCredentialRecord{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return CommanderCredentialRecord{}, err
 	}
@@ -920,7 +1071,11 @@ func (r *Registry) InspectCommander(credentialID string, generation uint64) (Com
 func (r *Registry) RevokeCommanderCredential(credentialID string, generation uint64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	o := r.commanders[credentialID]
 	if o == nil || o.generation != generation {
 		return fail(NotFound)
@@ -932,7 +1087,11 @@ func (r *Registry) RevokeCommanderCredential(credentialID string, generation uin
 func (r *Registry) RevokeCommanderSubject(subjectID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	found := false
 	for _, o := range r.commanders {
 		if o.subject == subjectID {
@@ -950,7 +1109,11 @@ func (r *Registry) RevokeCommanderSubject(subjectID string) error {
 func (r *Registry) InspectOperator(credentialID string, generation uint64) (OperatorCredentialRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return OperatorCredentialRecord{}, err
+	}
+	defer unlock()
 	if err := r.expireAndCommitLocked(before); err != nil {
 		return OperatorCredentialRecord{}, err
 	}
@@ -963,7 +1126,11 @@ func (r *Registry) InspectOperator(credentialID string, generation uint64) (Oper
 func (r *Registry) RevokeOperatorCredential(credentialID string, generation uint64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	o := r.operators[credentialID]
 	if o == nil || o.generation != generation {
 		return fail(NotFound)
@@ -975,7 +1142,11 @@ func (r *Registry) RevokeOperatorCredential(credentialID string, generation uint
 func (r *Registry) RevokeOperatorSubject(subjectID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	before := r.durableLocked()
+	before, unlock, err := r.beginLocked()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	found := false
 	for _, o := range r.operators {
 		if o.subject == subjectID {
@@ -1004,6 +1175,14 @@ func (r *Registry) expireLocked() bool {
 			s.current.revoked = true
 			s.current = s.rotation.pending
 			s.rotation = nil
+			changed = true
+		}
+	}
+	// An observer restored without an expiry predates the TTL requirement and is
+	// treated as expired rather than as an unbounded fleet-wide credential.
+	for _, o := range r.observers {
+		if !o.revoked && !now.Before(o.expires) {
+			o.revoked = true
 			changed = true
 		}
 	}

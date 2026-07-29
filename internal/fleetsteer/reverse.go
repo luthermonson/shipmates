@@ -1,8 +1,11 @@
 package fleetsteer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,6 +18,59 @@ import (
 	"github.com/luthermonson/shipmates/internal/fleetinterrupt"
 	"github.com/luthermonson/shipmates/internal/livesession"
 )
+
+const (
+	// maxReverseWireBytes bounds one reverse frame on both ends. gorilla's
+	// default read limit is unlimited, and this tunnel carries strictly more
+	// authority than the observation tunnel, which already caps reads.
+	maxReverseWireBytes = 256 << 10
+	// reverseIdleTimeout is the read deadline refreshed by traffic and by the
+	// keepalive below. Without it a hung peer holds the tunnel and its
+	// registered generation open forever.
+	reverseIdleTimeout   = 60 * time.Second
+	reverseKeepalivePing = 25 * time.Second
+)
+
+// strictReverseRead reads exactly one bounded text frame and decodes it with no
+// unknown fields and no trailing data. gorilla's ReadJSON accepts both.
+func strictReverseRead(c *websocket.Conn, dst any) error {
+	kind, data, err := c.ReadMessage()
+	if err != nil {
+		return err
+	}
+	if err := c.SetReadDeadline(time.Now().Add(reverseIdleTimeout)); err != nil {
+		return err
+	}
+	if kind != websocket.TextMessage || len(data) == 0 || len(data) > maxReverseWireBytes {
+		return errors.New("protocol_violation")
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(dst); err != nil {
+		return errors.New("protocol_violation")
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		return errors.New("protocol_violation")
+	}
+	return nil
+}
+
+// hardenReverseConn applies the read bound and the idle read deadline that the
+// reverse tunnel previously lacked entirely.
+func hardenReverseConn(c *websocket.Conn) error {
+	c.SetReadLimit(maxReverseWireBytes)
+	refresh := func() error { return c.SetReadDeadline(time.Now().Add(reverseIdleTimeout)) }
+	c.SetPongHandler(func(string) error { return refresh() })
+	previousPing := c.PingHandler()
+	c.SetPingHandler(func(appData string) error {
+		if err := refresh(); err != nil {
+			return err
+		}
+		return previousPing(appData)
+	})
+	return refresh()
+}
 
 type reverseRequest struct {
 	Type          string                          `json:"type"`
@@ -51,9 +107,16 @@ type reverseWriter struct {
 	conn websocketJSONWriter
 }
 
+// write never installs a zero deadline. gorilla treats the zero time as "clear
+// the deadline", so a peer whose receive window is full would block here
+// forever while holding mu, and the delivery goroutine abandoned by Submit
+// after DeliveryDeadline would never exit.
 func (w *reverseWriter) write(deadline time.Time, value any) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if deadline.IsZero() {
+		deadline = time.Now().Add(DeliveryDeadline)
+	}
 	if err := w.conn.SetWriteDeadline(deadline); err != nil {
 		return err
 	}
@@ -210,10 +273,16 @@ func ReverseHandler(service *Service, registry *fleetidentity.Registry, interrup
 		if err != nil {
 			return
 		}
+		// Registered immediately: every later failure path must close the
+		// hijacked connection, and the interrupt registration failure below
+		// previously returned before any close was in place.
+		defer c.Close()
+		if err = hardenReverseConn(c); err != nil {
+			return
+		}
 		ep := &reverseEndpoint{writer: &reverseWriter{conn: c}, wait: map[string]chan livesession.RemoteSteerResult{}, waitInterrupt: map[string]chan livesession.RemoteInterruptResult{}, waitInstall: map[string]chan bool{}, waitTargets: map[string]chan []SteerTargetV1{}, registry: registry, shipID: p.ShipID, clock: service.clock}
 		disconnect, err := service.Connect(p.ShipID, gen, ep)
 		if err != nil {
-			_ = c.Close()
 			return
 		}
 		defer disconnect()
@@ -225,13 +294,15 @@ func ReverseHandler(service *Service, registry *fleetidentity.Registry, interrup
 			}
 			defer disconnectInterrupt()
 		}
-		defer c.Close()
-		if err = ep.writer.write(time.Time{}, reverseReady{Type: "reverse_ready", SteerRegistered: true, InterruptRegistered: disconnectInterrupt != nil}); err != nil {
+		stopPing := make(chan struct{})
+		defer close(stopPing)
+		go reverseKeepalive(c, stopPing)
+		if err = ep.writer.write(time.Now().Add(DeliveryDeadline), reverseReady{Type: "reverse_ready", SteerRegistered: true, InterruptRegistered: disconnectInterrupt != nil}); err != nil {
 			return
 		}
 		for {
 			var out reverseResult
-			if err = c.ReadJSON(&out); err != nil {
+			if err = strictReverseRead(c, &out); err != nil {
 				return
 			}
 			if out.OperationID == "" {
@@ -283,6 +354,24 @@ func ReverseHandler(service *Service, registry *fleetidentity.Registry, interrup
 	})
 }
 
+// reverseKeepalive proves the peer is alive. gorilla's WriteControl is safe to
+// call concurrently with the serialized JSON writer, so the keepalive never
+// takes the delivery write lock.
+func reverseKeepalive(c *websocket.Conn, stop <-chan struct{}) {
+	t := time.NewTicker(reverseKeepalivePing)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			if c.WriteControl(websocket.PingMessage, nil, time.Now().Add(DeliveryDeadline)) != nil {
+				return
+			}
+		}
+	}
+}
+
 // RunReverseClient serves the one closed steer operation over an outbound
 // ship-initiated websocket until disconnect or cancellation.
 func RunReverseClient(ctx context.Context, destination string, identity fleetidentity.ShipState, generation uint64, endpoint Endpoint) error {
@@ -322,8 +411,11 @@ func runReverseClient(ctx context.Context, destination string, identity fleetide
 		return err
 	}
 	defer c.Close()
+	if err := hardenReverseConn(c); err != nil {
+		return err
+	}
 	var ready reverseReady
-	if err := c.ReadJSON(&ready); err != nil || ready.Type != "reverse_ready" || !ready.SteerRegistered || (requireInterrupt && !ready.InterruptRegistered) {
+	if err := strictReverseRead(c, &ready); err != nil || ready.Type != "reverse_ready" || !ready.SteerRegistered || (requireInterrupt && !ready.InterruptRegistered) {
 		return errors.New("reverse_handshake_failed")
 	}
 	if connected != nil {
@@ -340,7 +432,7 @@ func runReverseClient(ctx context.Context, destination string, identity fleetide
 	}()
 	for {
 		var in reverseRequest
-		if c.ReadJSON(&in) != nil {
+		if strictReverseRead(c, &in) != nil {
 			return nil
 		}
 		if in.Type == "turn_interrupt" && in.Interrupt != nil {

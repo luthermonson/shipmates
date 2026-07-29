@@ -159,10 +159,20 @@ func (c Client) Targets(ctx context.Context) (SteerTargetsV1, error) {
 	return out, nil
 }
 
+// Submit sends one steer. A caller that intends to retry must set and reuse
+// SubmitV1.OperationID: replaying the same identifier returns the first
+// decision instead of steering the turn twice. For a caller that never retries,
+// an absent identifier is minted here so the operation is still exactly one
+// identified operation on the wire and in the audit journal.
 func (c Client) Submit(ctx context.Context, in SubmitV1) (livesession.RemoteSteerResult, error) {
 	base, err := ValidateOperatorURL(c.BaseURL)
 	if err != nil {
 		return livesession.RemoteSteerResult{}, err
+	}
+	if in.OperationID == "" {
+		if in.OperationID, err = NewOperationID(); err != nil {
+			return livesession.RemoteSteerResult{}, errors.New("operation_id_unavailable")
+		}
 	}
 	b, _ := json.Marshal(in)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base.String(), "/")+"/api/fleet/v1/turn-steers", bytes.NewReader(b))

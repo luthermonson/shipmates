@@ -6,7 +6,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -27,6 +29,10 @@ const (
 	DeliveryDeadline = 5 * time.Second
 	TotalDeadline    = 12 * time.Second
 	TargetLifetime   = 60 * time.Second
+	// MaxOperations bounds the caller-owned replay table. MaxWaiters bounds the
+	// concurrent replays admitted for one still-undecided operation.
+	MaxOperations = 256
+	MaxWaiters    = 64
 )
 
 type Clock interface{ Now() time.Time }
@@ -39,6 +45,10 @@ type Authority interface {
 	InspectOperator(credentialID string, generation uint64) (fleetidentity.OperatorCredentialRecord, error)
 }
 
+// SubmitV1 carries a caller-owned OperationID. Idempotency is only possible
+// when the retrying caller owns the identifier, so it is a required field: a
+// Fleet-minted identifier would change on every retry and the ship-local
+// at-most-once table would treat each retry as a new steer of the same turn.
 type SubmitV1 struct {
 	SchemaVersion        uint64 `json:"schema_version"`
 	FleetID              string `json:"fleet_id"`
@@ -48,6 +58,7 @@ type SubmitV1 struct {
 	Persona              string `json:"persona"`
 	SteerTargetRef       string `json:"steer_target_ref"`
 	Message              string `json:"message"`
+	OperationID          string `json:"operation_id"`
 }
 
 type DeliveryV1 struct {
@@ -101,6 +112,20 @@ type Service struct {
 	audit       AuditSink
 	projection  *fleetobserve.Projection
 	epoch       uint64
+	operations  map[string]*steerOperation
+	waiters     map[string]int
+}
+
+// steerOperation is the Fleet-side record of one caller-owned operation. A
+// replay of the same identifier never re-enters delivery: it either waits for
+// the still-undecided original or returns its already-stored decision.
+type steerOperation struct {
+	fingerprint [32]byte
+	nonce       string
+	result      livesession.RemoteSteerResult
+	done        chan struct{}
+	finished    bool
+	created     time.Time
 }
 
 // AuditRecordV1 is a closed redacted projection. It intentionally has no
@@ -195,7 +220,7 @@ func NewService(fleetID string, authority Authority, clock Clock, random io.Read
 	if random == nil {
 		random = rand.Reader
 	}
-	return &Service{fleetID: fleetID, authority: authority, clock: clock, random: random, connections: map[string]connection{}, changed: make(chan struct{})}, nil
+	return &Service{fleetID: fleetID, authority: authority, clock: clock, random: random, connections: map[string]connection{}, changed: make(chan struct{}), operations: map[string]*steerOperation{}, waiters: map[string]int{}}, nil
 }
 
 func (s *Service) signalConnectionChangeLocked() {
@@ -262,26 +287,41 @@ func (s *Service) Submit(ctx context.Context, credentialID, secret string, in Su
 	if !validSubmit(in) {
 		return result("", "refused", "invalid_request")
 	}
-	opid, err1 := randomID(s.random, 16)
-	nonce, err2 := randomID(s.random, 32)
-	if err1 != nil || err2 != nil {
-		return result("", "indeterminate", "internal_uncertain")
-	}
-	digest := sha256.Sum256([]byte(in.Message))
-	req := livesession.RemoteSteerRequest{ProtocolVersion: 1, OperationID: opid, OperationNonce: nonce, FleetID: in.FleetID, ShipID: in.ShipID, Persona: in.Persona, TargetReference: in.SteerTargetRef, FleetEpoch: in.FleetEpoch, ConnectionGeneration: in.ConnectionGeneration, Message: in.Message, MessageSHA256: hex.EncodeToString(digest[:]), MessageUTF8Bytes: uint64(len([]byte(in.Message)))}
+	// The operation identifier belongs to the caller, so an exact replay is
+	// recognizable here and never reaches the ship a second time.
+	opid := in.OperationID
+	fp := steerFingerprint(principal, in)
+	now := s.clock.Now()
 	s.mu.Lock()
+	s.reclaimLocked(now)
+	if old := s.operations[opid]; old != nil {
+		return s.replayLocked(ctx, opid, fp, old)
+	}
+	if len(s.operations) >= MaxOperations {
+		s.mu.Unlock()
+		return result(opid, "refused", "busy")
+	}
+	nonce, err := randomID(s.random, 32)
+	if err != nil {
+		s.mu.Unlock()
+		return result(opid, "indeterminate", "internal_uncertain")
+	}
+	rec := &steerOperation{fingerprint: fp, nonce: nonce, done: make(chan struct{}), created: now}
+	s.operations[opid] = rec
 	c, ok := s.connections[in.ShipID]
 	audit := s.audit
 	s.mu.Unlock()
+	digest := sha256.Sum256([]byte(in.Message))
+	req := livesession.RemoteSteerRequest{ProtocolVersion: 1, OperationID: opid, OperationNonce: nonce, FleetID: in.FleetID, ShipID: in.ShipID, Persona: in.Persona, TargetReference: in.SteerTargetRef, FleetEpoch: in.FleetEpoch, ConnectionGeneration: in.ConnectionGeneration, Message: in.Message, MessageSHA256: hex.EncodeToString(digest[:]), MessageUTF8Bytes: uint64(len([]byte(in.Message)))}
 	base := AuditRecordV1{SchemaVersion: 1, EventKind: "remote_steer.attempted", OperationID: opid, ActorSubjectID: principal.SubjectID, OperatorCredentialID: principal.CredentialID, OperatorCredentialGeneration: principal.CredentialGeneration, Capability: principal.Capability, FleetID: in.FleetID, ShipID: in.ShipID, Persona: in.Persona, MessageSHA256: req.MessageSHA256, FleetEpoch: in.FleetEpoch, ConnectionGeneration: in.ConnectionGeneration, MessageUTF8Bytes: req.MessageUTF8Bytes, Layer: "fleet"}
 	if audit != nil && audit.AppendRemoteSteer(base) != nil {
-		return result(opid, "refused", "shutdown")
+		return s.finish(rec, result(opid, "refused", "shutdown"))
 	}
 	if !ok {
-		return s.audited(audit, base, result(opid, "refused", "ship_offline"))
+		return s.finish(rec, s.audited(audit, base, result(opid, "refused", "ship_offline")))
 	}
 	if c.generation != in.ConnectionGeneration {
-		return s.audited(audit, base, result(opid, "refused", "stale_generation"))
+		return s.finish(rec, s.audited(audit, base, result(opid, "refused", "stale_generation")))
 	}
 	dctx, cancel := context.WithTimeout(ctx, DeliveryDeadline)
 	defer cancel()
@@ -289,11 +329,99 @@ func (s *Service) Submit(ctx context.Context, credentialID, secret string, in Su
 	go func() { done <- c.endpoint.Deliver(dctx, DeliveryV1{principal, req}) }()
 	select {
 	case r := <-done:
-		return s.audited(audit, base, r)
+		return s.finish(rec, s.audited(audit, base, r))
 	case <-dctx.Done():
-		return s.audited(audit, base, result(opid, "indeterminate", "delivery_unknown"))
+		return s.finish(rec, s.audited(audit, base, result(opid, "indeterminate", "delivery_unknown")))
 	}
 }
+
+// replayLocked is entered holding s.mu and always releases it. A replay whose
+// authenticated request differs in any field is a distinct operation reusing an
+// identifier and is refused rather than silently answered from the first call.
+func (s *Service) replayLocked(ctx context.Context, opid string, fp [32]byte, old *steerOperation) livesession.RemoteSteerResult {
+	if subtle.ConstantTimeCompare(old.fingerprint[:], fp[:]) != 1 {
+		s.mu.Unlock()
+		return result(opid, "refused", "operation_conflict")
+	}
+	if old.finished {
+		r := old.result
+		s.mu.Unlock()
+		return r
+	}
+	if s.waiters[opid] >= MaxWaiters {
+		s.mu.Unlock()
+		return result(opid, "refused", "busy")
+	}
+	s.waiters[opid]++
+	done := old.done
+	s.mu.Unlock()
+	var timeout bool
+	select {
+	case <-done:
+	case <-ctx.Done():
+		timeout = true
+	}
+	s.mu.Lock()
+	s.waiters[opid]--
+	if s.waiters[opid] == 0 {
+		delete(s.waiters, opid)
+	}
+	r := old.result
+	s.mu.Unlock()
+	if timeout {
+		return result(opid, "indeterminate", "delivery_unknown")
+	}
+	return r
+}
+
+// finish publishes exactly one decision for an operation and releases every
+// replay waiting on it.
+func (s *Service) finish(rec *steerOperation, r livesession.RemoteSteerResult) livesession.RemoteSteerResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !rec.finished {
+		rec.result, rec.finished = r, true
+		close(rec.done)
+	}
+	return rec.result
+}
+
+// reclaimLocked drops decided operations once the ship-local at-most-once
+// window has closed, so the replay tables cannot grow without bound.
+func (s *Service) reclaimLocked(now time.Time) {
+	for id, rec := range s.operations {
+		if rec.finished && now.Sub(rec.created) >= livesession.RemoteSteerRetention && s.waiters[id] == 0 {
+			delete(s.operations, id)
+		}
+	}
+}
+
+func steerFingerprint(p fleetidentity.OperatorPrincipal, in SubmitV1) [32]byte {
+	h := sha256.New()
+	h.Write([]byte("shipmates.fleet-steer.v1\x00"))
+	var b [8]byte
+	for _, v := range []string{p.SubjectID, p.CredentialID, p.FleetID, p.Capability, in.FleetID, in.ShipID, in.Persona, in.SteerTargetRef, in.OperationID, in.Message} {
+		binary.BigEndian.PutUint64(b[:], uint64(len(v)))
+		h.Write(b[:])
+		h.Write([]byte(v))
+	}
+	for _, v := range []uint64{p.CredentialGeneration, in.SchemaVersion, in.FleetEpoch, in.ConnectionGeneration} {
+		binary.BigEndian.PutUint64(b[:], v)
+		h.Write(b[:])
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+func validOperationID(v string) bool {
+	b, e := base64.RawURLEncoding.DecodeString(v)
+	return e == nil && len(b) == 32
+}
+
+// NewOperationID returns a caller-owned 256-bit identifier suitable for one
+// steer submission and its exact replays.
+func NewOperationID() (string, error) { return randomID(rand.Reader, 32) }
 
 func (s *Service) audited(a AuditSink, rec AuditRecordV1, r livesession.RemoteSteerResult) livesession.RemoteSteerResult {
 	if a != nil {
@@ -305,7 +433,7 @@ func (s *Service) audited(a AuditSink, rec AuditRecordV1, r livesession.RemoteSt
 }
 
 func validSubmit(in SubmitV1) bool {
-	if in.FleetEpoch == 0 || in.ConnectionGeneration == 0 || in.SteerTargetRef == "" || len(in.SteerTargetRef) > 128 || project.ValidatePersonaName(in.Persona) != nil || !utf8.ValidString(in.Message) || len([]byte(in.Message)) == 0 || len([]byte(in.Message)) > 4096 {
+	if !validOperationID(in.OperationID) || in.FleetEpoch == 0 || in.ConnectionGeneration == 0 || in.SteerTargetRef == "" || len(in.SteerTargetRef) > 128 || project.ValidatePersonaName(in.Persona) != nil || !utf8.ValidString(in.Message) || len([]byte(in.Message)) == 0 || len([]byte(in.Message)) > 4096 {
 		return false
 	}
 	for _, r := range in.Message {
@@ -344,14 +472,24 @@ func result(id, outcome, reason string) livesession.RemoteSteerResult {
 	return livesession.RemoteSteerResult{SchemaVersion: 1, OperationID: id, Outcome: livesession.RemoteSteerOutcome(outcome), ReasonCode: reason, RetryDisposition: r}
 }
 
-// ShipEndpoint retains private targets and independently revalidates current
-// operator generation/revocation immediately before entering the coordinator.
+// ShipEndpoint retains the private exact-turn targets and independently
+// enforces, immediately before entering the coordinator, every property of the
+// delivered operator principal that the ship can decide on its own: the exact
+// capability for the operation, this Fleet, and this ship's presence in the
+// principal's immutable scope. Deliver previously checked none of those.
+//
+// A ship additionally revalidates current operator generation, revocation, and
+// expiry whenever it has been given its own credential authority. The
+// production ship has no operator credential store, so authority is nil there
+// and that recheck honestly does not exist; Fleet performs it against the live
+// registry immediately before writing to the reverse tunnel, in
+// reverseEndpoint.Deliver and reverseEndpoint.DeliverInterrupt. Authority is
+// never a boolean that can silently switch a configured check off.
 type ShipEndpoint struct {
 	mu                      sync.Mutex
 	fleetID, shipID         string
 	fleetEpoch, generation  uint64
 	authority               Authority
-	trustedFleet            bool
 	steerClock              Clock
 	interruptClock          Clock
 	coordinator             *livesession.RemoteSteerCoordinator
@@ -380,43 +518,48 @@ func (c ShipEndpointConfig) clocks() (Clock, Clock) {
 	return steer, interrupt
 }
 
+// NewProductionShipEndpoint builds the endpoint used by the real ship runtime.
+// The ship holds no operator credential store, so it has no authority and
+// performs only the principal checks it can decide locally.
 func NewProductionShipEndpoint(fleetID, shipID string, epoch, generation uint64, config ShipEndpointConfig, control *LocalControl) (*ShipEndpoint, error) {
 	if fleetID == "" || shipID == "" || epoch == 0 || generation == 0 || control == nil {
 		return nil, errors.New("invalid_request")
 	}
 	steerClock, interruptClock := config.clocks()
-	return &ShipEndpoint{fleetID: fleetID, shipID: shipID, fleetEpoch: epoch, generation: generation, authority: authenticatedFleetAuthority{}, trustedFleet: true, steerClock: steerClock, interruptClock: interruptClock, localControl: control, targets: map[string]livesession.RemoteSteerTarget{}, interruptTargets: map[string]livesession.RemoteInterruptTarget{}, interruptPersonaAliases: map[string]string{}, interruptPublicPersonas: map[string]string{}, interruptRandom: rand.Reader}, nil
+	e := newShipEndpoint(fleetID, shipID, epoch, generation, nil, steerClock, nil, nil)
+	e.interruptClock = interruptClock
+	e.localControl = control
+	return e, nil
 }
 
 // NewAuthenticatedShipEndpoint is for the ship side of the mutually
 // authenticated production tunnel. Operator authentication is performed by
-// Fleet immediately before the closed delivery is sent; the ship still owns
-// target and exact-turn validation.
+// Fleet immediately before the closed delivery is sent, and Fleet rechecks
+// revocation against the live registry at that moment; the ship owns target,
+// exact-turn, capability, and ship-scope validation.
 func NewAuthenticatedShipEndpoint(fleetID, shipID string, epoch, generation uint64, clock Clock, coordinator *livesession.RemoteSteerCoordinator, manager *livesession.Manager) (*ShipEndpoint, error) {
-	s, err := NewShipEndpoint(fleetID, shipID, epoch, generation, authenticatedFleetAuthority{}, clock, coordinator, manager)
-	if err == nil {
-		s.trustedFleet = true
+	if fleetID == "" || shipID == "" || epoch == 0 || generation == 0 || coordinator == nil || manager == nil {
+		return nil, errors.New("invalid_request")
 	}
-	return s, err
+	return newShipEndpoint(fleetID, shipID, epoch, generation, nil, clock, coordinator, manager), nil
 }
 
-type authenticatedFleetAuthority struct{}
-
-func (authenticatedFleetAuthority) AuthenticateOperator(string, string, string, string) (fleetidentity.OperatorPrincipal, error) {
-	return fleetidentity.OperatorPrincipal{}, errors.New("unsupported")
-}
-func (authenticatedFleetAuthority) InspectOperator(string, uint64) (fleetidentity.OperatorCredentialRecord, error) {
-	return fleetidentity.OperatorCredentialRecord{}, errors.New("unsupported")
-}
-
+// NewShipEndpoint builds a ship endpoint that owns a credential authority and
+// therefore revalidates operator generation, revocation, expiry, capability,
+// and ship scope on every delivery. The authority is mandatory here precisely
+// so no caller can obtain this constructor's stronger contract without it.
 func NewShipEndpoint(fleetID, shipID string, epoch, generation uint64, authority Authority, clock Clock, coordinator *livesession.RemoteSteerCoordinator, manager *livesession.Manager) (*ShipEndpoint, error) {
 	if fleetID == "" || shipID == "" || epoch == 0 || generation == 0 || authority == nil || coordinator == nil || manager == nil {
 		return nil, errors.New("invalid_request")
 	}
+	return newShipEndpoint(fleetID, shipID, epoch, generation, authority, clock, coordinator, manager), nil
+}
+
+func newShipEndpoint(fleetID, shipID string, epoch, generation uint64, authority Authority, clock Clock, coordinator *livesession.RemoteSteerCoordinator, manager *livesession.Manager) *ShipEndpoint {
 	if clock == nil {
 		clock = wallClock{}
 	}
-	return &ShipEndpoint{fleetID: fleetID, shipID: shipID, fleetEpoch: epoch, generation: generation, authority: authority, steerClock: clock, interruptClock: clock, coordinator: coordinator, manager: manager, targets: map[string]livesession.RemoteSteerTarget{}, interruptTargets: map[string]livesession.RemoteInterruptTarget{}, interruptPersonaAliases: map[string]string{}, interruptPublicPersonas: map[string]string{}, interruptRandom: rand.Reader}, nil
+	return &ShipEndpoint{fleetID: fleetID, shipID: shipID, fleetEpoch: epoch, generation: generation, authority: authority, steerClock: clock, interruptClock: clock, coordinator: coordinator, manager: manager, targets: map[string]livesession.RemoteSteerTarget{}, interruptTargets: map[string]livesession.RemoteInterruptTarget{}, interruptPersonaAliases: map[string]string{}, interruptPublicPersonas: map[string]string{}, interruptRandom: rand.Reader}
 }
 
 func (s *ShipEndpoint) InstallTarget(t livesession.RemoteSteerTarget) error {
@@ -580,8 +723,10 @@ func (s *ShipEndpoint) Deliver(ctx context.Context, d DeliveryV1) livesession.Re
 	if r.FleetID != s.fleetID || r.ShipID != s.shipID || r.FleetEpoch != s.fleetEpoch || r.ConnectionGeneration != s.generation {
 		return result(r.OperationID, "refused", "stale_generation")
 	}
-	rec, err := s.authority.InspectOperator(d.Operator.CredentialID, d.Operator.CredentialGeneration)
-	if !s.trustedFleet && (err != nil || rec.Revoked || rec.FleetID != s.fleetID || rec.SubjectID != d.Operator.SubjectID || rec.Capability != livesession.RemoteSteerCapability || !s.steerClock.Now().Before(rec.ExpiresAt) || !contains(rec.ShipIDs, s.shipID)) {
+	if !s.admissiblePrincipal(d.Operator, livesession.RemoteSteerCapability) {
+		return result(r.OperationID, "refused", "unauthorized")
+	}
+	if !s.revalidated(d.Operator, livesession.RemoteSteerCapability, s.steerClock) {
 		return result(r.OperationID, "refused", "credential_revoked")
 	}
 	s.mu.Lock()
@@ -603,8 +748,17 @@ func (s *ShipEndpoint) Deliver(ctx context.Context, d DeliveryV1) livesession.Re
 // discovery; it does not widen steering authority.
 func (s *ShipEndpoint) DeliverInterrupt(ctx context.Context, d fleetinterrupt.DeliveryV1) livesession.RemoteInterruptResult {
 	r := d.Request
-	if r.FleetID != s.fleetID || r.ShipID != s.shipID || r.FleetEpoch != s.fleetEpoch || r.ConnectionGeneration != s.generation || d.Operator.Capability != fleetidentity.InterruptTurnCapability {
+	if r.FleetID != s.fleetID || r.ShipID != s.shipID || r.FleetEpoch != s.fleetEpoch || r.ConnectionGeneration != s.generation {
 		return livesession.RemoteInterruptResult{SchemaVersion: 1, OperationID: r.OperationID, Outcome: livesession.RemoteInterruptRefused, ReasonCode: "stale_generation", RetryDisposition: livesession.RemoteInterruptFreshObservation}
+	}
+	// The turn-kill capability is checked here on the same terms as steering.
+	// The sibling ship endpoint in fleetinterrupt rechecks unconditionally; this
+	// one previously performed no operator inspection at all.
+	if !s.admissiblePrincipal(d.Operator, fleetidentity.InterruptTurnCapability) {
+		return livesession.RemoteInterruptResult{SchemaVersion: 1, OperationID: r.OperationID, Outcome: livesession.RemoteInterruptRefused, ReasonCode: "unauthorized", RetryDisposition: livesession.RemoteInterruptNoRetry}
+	}
+	if !s.revalidated(d.Operator, fleetidentity.InterruptTurnCapability, s.interruptClock) {
+		return livesession.RemoteInterruptResult{SchemaVersion: 1, OperationID: r.OperationID, Outcome: livesession.RemoteInterruptRefused, ReasonCode: "credential_revoked", RetryDisposition: livesession.RemoteInterruptNoRetry}
 	}
 	s.mu.Lock()
 	t, ok := s.interruptTargets[r.TargetReference]
@@ -648,6 +802,27 @@ func (s *ShipEndpoint) InstallInterruptTarget(_ context.Context, in fleetinterru
 		}
 	}
 	return errors.New("stale_target")
+}
+
+// admissiblePrincipal enforces, without any credential store, that the
+// delivered principal is a complete operator grant for exactly this capability,
+// this Fleet, and this ship. Every ship endpoint applies it, including the
+// production one, so a delivery carrying an empty or wrong-capability principal
+// can never reach the coordinator.
+func (s *ShipEndpoint) admissiblePrincipal(p fleetidentity.OperatorPrincipal, capability string) bool {
+	return capability != "" && p.Capability == capability && p.FleetID == s.fleetID && p.SubjectID != "" && p.CredentialID != "" && p.CredentialGeneration != 0 && contains(p.ShipIDs, s.shipID)
+}
+
+// revalidated rechecks generation, revocation, expiry, capability, and ship
+// scope against the ship's own authority. An endpoint without an authority
+// cannot perform this check and says so by returning true only for that case;
+// a configured authority is always consulted and always fails closed.
+func (s *ShipEndpoint) revalidated(p fleetidentity.OperatorPrincipal, capability string, clock Clock) bool {
+	if s.authority == nil {
+		return true
+	}
+	rec, err := s.authority.InspectOperator(p.CredentialID, p.CredentialGeneration)
+	return err == nil && !rec.Revoked && rec.FleetID == s.fleetID && rec.SubjectID == p.SubjectID && rec.Capability == capability && clock.Now().Before(rec.ExpiresAt) && contains(rec.ShipIDs, s.shipID)
 }
 
 func contains(xs []string, want string) bool {

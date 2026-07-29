@@ -211,10 +211,11 @@ func onlyQuery(r *http.Request, names []string) bool {
 func validOpaque(v string) bool {
 	return len(v) >= 16 && len(v) <= 128 && !strings.ContainsAny(v, "/\\\x00\r\n\t ")
 }
+
+// allowed fails closed. An empty observer scope is not "every ship": it is a
+// credential that authorizes nothing, and the fleet-wide read it used to grant
+// was invisible to the issuer.
 func allowed(scope []string, id string) bool {
-	if len(scope) == 0 {
-		return true
-	}
 	for _, v := range scope {
 		if v == id {
 			return true
@@ -224,9 +225,6 @@ func allowed(scope []string, id string) bool {
 }
 
 func filterSnapshot(in fleetobserve.FleetSnapshotV1, scope []string) fleetobserve.FleetSnapshotV1 {
-	if len(scope) == 0 {
-		return in
-	}
 	out := in.Ships[:0]
 	for _, sh := range in.Ships {
 		if allowed(scope, sh.ShipID) {
@@ -242,9 +240,6 @@ func filterRead(r *fleetobserve.ReadResult, scope []string) {
 	if r.Snapshot != nil {
 		x := filterSnapshot(*r.Snapshot, scope)
 		r.Snapshot = &x
-	}
-	if len(scope) == 0 {
-		return
 	}
 	out := r.Events[:0]
 	for _, e := range r.Events {

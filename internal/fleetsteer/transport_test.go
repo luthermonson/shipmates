@@ -3,6 +3,7 @@ package fleetsteer
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"strings"
 	"sync"
@@ -112,7 +113,7 @@ func TestInterruptTargetBindsOpaquePersonaToPrivateTuple(t *testing.T) {
 	if stored.Persona != "backend" || stored.Backend != "codex" || ep.interruptPublicPersonas[ref] != opaque {
 		t.Fatalf("binding public=%q private persona=%q backend=%q", ep.interruptPublicPersonas[ref], stored.Persona, stored.Backend)
 	}
-	request := fleetinterrupt.DeliveryV1{Operator: fleetidentity.OperatorPrincipal{Capability: fleetidentity.InterruptTurnCapability}, Request: livesession.RemoteInterruptRequest{FleetID: "fleet", FleetEpoch: 2, ShipID: "ship", ConnectionGeneration: 3, Persona: opaque, TargetReference: ref, OperationID: "operation"}}
+	request := fleetinterrupt.DeliveryV1{Operator: shipScopedPrincipal(fleetidentity.InterruptTurnCapability), Request: livesession.RemoteInterruptRequest{FleetID: "fleet", FleetEpoch: 2, ShipID: "ship", ConnectionGeneration: 3, Persona: opaque, TargetReference: ref, OperationID: "operation"}}
 	if got := ep.DeliverInterrupt(context.Background(), request); got.ReasonCode != "shutdown" {
 		t.Fatalf("opaque binding refused before private delivery: %+v", got)
 	}
@@ -143,7 +144,7 @@ func TestAtomicLocalTargetsUseSteerClockAndInterruptRefsUseCapabilityClock(t *te
 	if err := ep.InstallInterruptTarget(context.Background(), fleetinterrupt.TargetInstallV1{FleetID: "fleet", FleetEpoch: 2, ShipID: "ship", ConnectionGeneration: 3, Persona: opaque, InterruptTargetRef: ref, ExpiresAt: expires}); err != nil {
 		t.Fatalf("frozen-clock interrupt target install: %v", err)
 	}
-	request := fleetinterrupt.DeliveryV1{Operator: fleetidentity.OperatorPrincipal{Capability: fleetidentity.InterruptTurnCapability}, Request: livesession.RemoteInterruptRequest{FleetID: "fleet", FleetEpoch: 2, ShipID: "ship", ConnectionGeneration: 3, Persona: opaque, TargetReference: ref, OperationID: "operation"}}
+	request := fleetinterrupt.DeliveryV1{Operator: shipScopedPrincipal(fleetidentity.InterruptTurnCapability), Request: livesession.RemoteInterruptRequest{FleetID: "fleet", FleetEpoch: 2, ShipID: "ship", ConnectionGeneration: 3, Persona: opaque, TargetReference: ref, OperationID: "operation"}}
 	if got := ep.DeliverInterrupt(context.Background(), request); got.ReasonCode != "shutdown" {
 		t.Fatalf("unexpired interrupt ref was not delivered: %+v", got)
 	}
@@ -193,8 +194,23 @@ func fixture(t *testing.T) (*fleetidentity.Registry, fleetidentity.IssuedOperato
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := SubmitV1{1, op.Record.FleetID, 2, ship.ShipID, 3, "backend", "target-00000000000001", "hello"}
+	in := SubmitV1{SchemaVersion: 1, FleetID: op.Record.FleetID, FleetEpoch: 2, ShipID: ship.ShipID, ConnectionGeneration: 3, Persona: "backend", SteerTargetRef: "target-00000000000001", Message: "hello", OperationID: steerOperationID(1)}
 	return r, op, s, in, clock
+}
+
+// shipScopedPrincipal is a complete operator grant for the "fleet"/"ship" pair
+// used by the endpoint tests.
+func shipScopedPrincipal(capability string) fleetidentity.OperatorPrincipal {
+	return fleetidentity.OperatorPrincipal{FleetID: "fleet", SubjectID: "operator-00000001", CredentialID: "opc_000000000000001", Capability: capability, CredentialGeneration: 1, ShipIDs: []string{"ship"}}
+}
+
+// steerOperationID builds a deterministic caller-owned 256-bit identifier.
+func steerOperationID(seed byte) string {
+	b := make([]byte, 32)
+	for i := range b {
+		b[i] = seed
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 type zeroReader struct{}
@@ -239,7 +255,9 @@ func TestCapabilityAuthenticatedOneShipTransport(t *testing.T) {
 		t.Fatal("operation id and nonce were not independent")
 	}
 	disconnect()
-	if got = service.Submit(context.Background(), op.Record.CredentialID, op.Secret, in); got.ReasonCode != "ship_offline" {
+	offline := in
+	offline.OperationID = steerOperationID(9)
+	if got = service.Submit(context.Background(), op.Record.CredentialID, op.Secret, offline); got.ReasonCode != "ship_offline" {
 		t.Fatalf("offline=%+v", got)
 	}
 }

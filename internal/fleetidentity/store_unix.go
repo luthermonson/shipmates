@@ -3,6 +3,8 @@
 package fleetidentity
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"io"
 	"path/filepath"
@@ -10,6 +12,42 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+const authorityLockFile = ".fleet-authority.lock"
+
+// lockAuthorityStore serializes load-mutate-commit against every other process
+// that opens the same authority store. Without it a long-running server never
+// observes a CLI revocation, and its next commit rewrites the whole file from
+// its own stale snapshot, un-revoking the credential on disk.
+func lockAuthorityStore(dir string) (func(), error) {
+	dirfd, err := openDirectoryPath(dir, true)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(dirfd)
+	f, e := unix.Openat(dirfd, authorityLockFile, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if e != nil {
+		return nil, storageError()
+	}
+	if unix.Flock(f, unix.LOCK_EX) != nil {
+		unix.Close(f)
+		return nil, storageError()
+	}
+	return func() {
+		_ = unix.Flock(f, unix.LOCK_UN)
+		unix.Close(f)
+	}, nil
+}
+
+// uniqueTempName keeps two writers from creating, unlinking, and renaming each
+// other's half-written temporary file into place under one fixed name.
+func uniqueTempName(prefix string) (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", storageError()
+	}
+	return prefix + hex.EncodeToString(b[:]) + ".tmp", nil
+}
 
 func readAuthority(dir string) ([]byte, bool, error) {
 	fd, err := openDirectoryPath(dir, false)
@@ -45,21 +83,32 @@ func writeAuthority(dir string, b []byte) error {
 		return err
 	}
 	defer unix.Close(fd)
-	tmp := ".fleet-authority.tmp"
-	_ = unix.Unlinkat(fd, tmp, 0)
+	tmp, err := uniqueTempName(".fleet-authority.")
+	if err != nil {
+		return err
+	}
 	f, e := unix.Openat(fd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if e != nil {
 		return storageError()
 	}
-	renamed := false
+	// Closing a raw descriptor twice can close an unrelated descriptor that a
+	// concurrent goroutine has already been given the same number.
+	closed, renamed := false, false
 	defer func() {
-		unix.Close(f)
+		if !closed {
+			unix.Close(f)
+		}
 		if !renamed {
 			_ = unix.Unlinkat(fd, tmp, 0)
 		}
 	}()
 	n, e := unix.Write(f, b)
-	if e != nil || n != len(b) || unix.Fsync(f) != nil || unix.Close(f) != nil {
+	if e != nil || n != len(b) || unix.Fsync(f) != nil {
+		return storageError()
+	}
+	closeErr := unix.Close(f)
+	closed = true
+	if closeErr != nil {
 		return storageError()
 	}
 	if unix.Renameat(fd, tmp, fd, authorityFile) != nil {
@@ -181,15 +230,19 @@ func writeShipState(dir string, b []byte, replace bool) error {
 	if !exists && replace {
 		return fail(NotFound)
 	}
-	tmp := ".identity.tmp"
-	_ = unix.Unlinkat(fd, tmp, 0)
+	tmp, err := uniqueTempName(".identity.")
+	if err != nil {
+		return err
+	}
 	t, err := unix.Openat(fd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return storageError()
 	}
-	renamed := false
+	closed, renamed := false, false
 	defer func() {
-		unix.Close(t)
+		if !closed {
+			unix.Close(t)
+		}
 		if !renamed {
 			_ = unix.Unlinkat(fd, tmp, 0)
 		}
@@ -198,7 +251,9 @@ func writeShipState(dir string, b []byte, replace bool) error {
 	if e != nil || shortWrite(n, len(b)) != nil || unix.Fsync(t) != nil {
 		return storageError()
 	}
-	if unix.Close(t) != nil {
+	closeErr := unix.Close(t)
+	closed = true
+	if closeErr != nil {
 		return storageError()
 	}
 	if unix.Renameat(fd, tmp, fd, shipStateFile) != nil {

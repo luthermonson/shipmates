@@ -118,9 +118,14 @@ func TestOperatorUIHasNoObserverReuseOrPersistence(t *testing.T) {
 	w = httptest.NewRecorder()
 	ProductHandler{}.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/steer/app.js", nil))
 	js := w.Body.String()
-	for _, want := range []string{"approval_pending", "will not be retried automatically"} {
-		if !strings.Contains(js, want) && want != "approval_pending" {
+	// The form owns one operation identifier per steer and offers replay of that
+	// exact operation instead of a second delivery into the same live turn.
+	for _, want := range []string{"operation_id:opid", "getRandomValues", "replay this same operation"} {
+		if !strings.Contains(js, want) {
 			t.Fatalf("script missing %q", want)
 		}
+	}
+	if strings.Contains(js, "will not be retried automatically") {
+		t.Fatal("script still claims a steer is never replayable")
 	}
 }

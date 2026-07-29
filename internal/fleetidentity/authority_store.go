@@ -36,8 +36,9 @@ type durableArtifact struct {
 	Result       EnrollmentResult
 }
 type durableObserver struct {
-	Credential durableCredential
-	Ships      []string
+	Credential      durableCredential
+	Ships           []string
+	Issued, Expires time.Time
 }
 type durableOperator struct {
 	Credential                   durableCredential `json:"credential"`
@@ -95,7 +96,8 @@ func (r *Registry) durableLocked() durableAuthority {
 		for id := range o.ships {
 			ids = append(ids, id)
 		}
-		d.Observers = append(d.Observers, durableObserver{dc(o.credential), ids})
+		sort.Strings(ids)
+		d.Observers = append(d.Observers, durableObserver{dc(o.credential), ids, o.issued, o.expires})
 	}
 	for _, o := range r.operators {
 		x := operatorRecord(o)
@@ -150,7 +152,7 @@ func (r *Registry) restoreLocked(d durableAuthority) error {
 		if e != nil {
 			return storageError()
 		}
-		o := &observer{credential: c, ships: map[string]struct{}{}}
+		o := &observer{credential: c, ships: map[string]struct{}{}, issued: x.Issued, expires: x.Expires}
 		for _, id := range x.Ships {
 			if !opaqueID.MatchString(id) {
 				return storageError()
@@ -195,12 +197,22 @@ func (r *Registry) restoreLocked(d durableAuthority) error {
 	}
 	return nil
 }
-func (r *Registry) loadAuthority() error {
+// loadAuthority is the open-time load. It may create the store.
+func (r *Registry) loadAuthority() error { return r.readStoreLocked(true) }
+
+// readStoreLocked replaces in-memory state with the durable state. Only the
+// open-time load may create a missing store: re-creating it under a live
+// registry would publish this process's snapshot as the whole authority and
+// discard every credential another process has committed since.
+func (r *Registry) readStoreLocked(create bool) error {
 	b, exists, err := readAuthority(filepath.Clean(r.storeDir))
 	if err != nil {
 		return err
 	}
 	if !exists {
+		if !create {
+			return storageError()
+		}
 		d := r.durableLocked()
 		b, _ = json.Marshal(d)
 		return writeAuthority(filepath.Clean(r.storeDir), append(b, '\n'))
@@ -214,6 +226,31 @@ func (r *Registry) loadAuthority() error {
 	}
 	return r.restoreLocked(d)
 }
+
+// beginLocked opens one authority transaction. It takes the cross-process file
+// lock and refreshes in-memory state from the durable store, so every decision
+// and every mutation in this call observes commits made by any other process,
+// and commitLocked can never rewrite the file from a stale snapshot. The caller
+// must defer the returned release; it is held across the commit.
+//
+// A registry with no store is purely in-memory: there is no second writer to
+// coordinate with and the snapshot is already current.
+func (r *Registry) beginLocked() (durableAuthority, func(), error) {
+	noop := func() {}
+	if r.storeDir == "" {
+		return r.durableLocked(), noop, nil
+	}
+	release, err := lockAuthorityStore(filepath.Clean(r.storeDir))
+	if err != nil {
+		return durableAuthority{}, noop, err
+	}
+	if err := r.readStoreLocked(false); err != nil {
+		release()
+		return durableAuthority{}, noop, err
+	}
+	return r.durableLocked(), release, nil
+}
+
 func (r *Registry) commitLocked(before durableAuthority) error {
 	if r.storeDir == "" {
 		return nil
