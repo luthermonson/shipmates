@@ -140,3 +140,16 @@ func TestNativeEditorHorizontallyScrollsLongInput(t *testing.T) {
 		t.Fatalf("display did not retain only the input tail: %q", display)
 	}
 }
+
+// Moved from dashboard_test.go: colorizeDashboardLine only exists in the
+// linux native-IO build, so an untagged test file referencing it broke
+// `go test` compilation for this package on windows and darwin.
+func TestDashboardColorsDistinguishPersonaStatusAndSidebar(t *testing.T) {
+	line := colorizeDashboardLine("agent: hello │ VOYAGE PLAN", "skipper", true)
+	if !strings.Contains(line, "\x1b[1;96magent: hello") || !strings.Contains(line, "\x1b[97mVOYAGE PLAN") {
+		t.Fatalf("colored line=%q", line)
+	}
+	if colorizeDashboardLine("agent: hello", "skipper", false) == colorizeDashboardLine("agent: hello", "architect", false) {
+		t.Fatal("persona colors should be stable and distinct for skipper and architect")
+	}
+}

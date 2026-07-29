@@ -83,16 +83,6 @@ func TestAgentDeltasCoalesceAndWrapWithoutEllipsis(t *testing.T) {
 	}
 }
 
-func TestDashboardColorsDistinguishPersonaStatusAndSidebar(t *testing.T) {
-	line := colorizeDashboardLine("agent: hello │ VOYAGE PLAN", "skipper", true)
-	if !strings.Contains(line, "\x1b[1;96magent: hello") || !strings.Contains(line, "\x1b[97mVOYAGE PLAN") {
-		t.Fatalf("colored line=%q", line)
-	}
-	if colorizeDashboardLine("agent: hello", "skipper", false) == colorizeDashboardLine("agent: hello", "architect", false) {
-		t.Fatal("persona colors should be stable and distinct for skipper and architect")
-	}
-}
-
 func TestStreamRejectsGapRegressionAndIdentityMismatch(t *testing.T) {
 	for name, f := range map[string]livesession.Feed{
 		"gap":      {OldestAvailable: 0, NextSequence: 2, Events: []livesession.Event{event(1, "activity", nil)}},
