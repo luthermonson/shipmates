@@ -128,11 +128,19 @@ func secureStateDir(path string, create bool) error {
 		return errors.New("remote steer storage unavailable")
 	}
 	if create {
+		// Walk up to the filesystem root: the fixed point of filepath.Dir.
+		// Comparing against filepath.Separator alone never terminates on
+		// Windows, where the walk bottoms out at a volume root like `C:\`.
 		parts := []string{}
-		for p := path; p != string(filepath.Separator); p = filepath.Dir(p) {
+		p := path
+		for {
+			parent := filepath.Dir(p)
+			if parent == p {
+				break
+			}
 			parts = append(parts, filepath.Base(p))
+			p = parent
 		}
-		p := string(filepath.Separator)
 		for i := len(parts) - 1; i >= 0; i-- {
 			p = filepath.Join(p, parts[i])
 			st, err := os.Lstat(p)
