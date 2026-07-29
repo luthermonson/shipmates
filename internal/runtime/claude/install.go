@@ -12,6 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/runtime"
 )
 
@@ -37,8 +38,11 @@ func AgentPath(name string) string {
 // memoryDir, permissions, remoteControl, berth) are elided — they live in
 // the canonical catalog and shipmates carries them out-of-band.
 func RenderPersona(p runtime.PersonaSpec) ([]byte, error) {
-	if p.Name == "" {
-		return nil, fmt.Errorf("claude: persona name required")
+	// The name becomes a path segment (AgentPath) and a --agent flag value,
+	// so it is validated here at the render chokepoint, not just at the CLI
+	// boundary — the runtime interface is a public seam.
+	if err := project.ValidatePersonaName(p.Name); err != nil {
+		return nil, fmt.Errorf("claude: %w", err)
 	}
 	var buf bytes.Buffer
 	if err := writeClaudeAgent(&buf, p); err != nil {
@@ -69,8 +73,8 @@ func (r *Runtime) InstallPersona(_ context.Context, projectDir string, p runtime
 // UninstallPersona removes .claude/agents/<name>.md if present. Missing
 // file is not an error — idempotent.
 func (r *Runtime) UninstallPersona(_ context.Context, projectDir, name string) error {
-	if name == "" {
-		return fmt.Errorf("claude: persona name required")
+	if err := project.ValidatePersonaName(name); err != nil {
+		return fmt.Errorf("claude: %w", err)
 	}
 	err := os.Remove(filepath.Join(projectDir, AgentPath(name)))
 	if err != nil && !os.IsNotExist(err) {

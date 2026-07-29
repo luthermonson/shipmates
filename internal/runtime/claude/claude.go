@@ -47,6 +47,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/runtime"
 	"github.com/luthermonson/shipmates/internal/runtime/containment"
 	"github.com/luthermonson/shipmates/internal/runtime/containment/none"
@@ -179,11 +180,28 @@ func (r *Runtime) Events() <-chan runtime.Event { return r.stream }
 // lazily on the first SendTurn; "starting" a session just mints a fresh ID
 // and remembers the persona/project binding.
 func (r *Runtime) StartSession(_ context.Context, spec runtime.SessionSpec) (runtime.Session, error) {
+	if err := validateSpecPersona(spec); err != nil {
+		return nil, err
+	}
 	id, err := mintSessionID()
 	if err != nil {
 		return nil, err
 	}
 	return r.rememberSession(id, spec, false), nil
+}
+
+// validateSpecPersona rejects persona names that could smuggle a path
+// segment or an extra CLI flag: the name is passed to the child process as
+// the --agent value and exported as SHIPMATES_PERSONA. Empty stays allowed —
+// a session without a persona is legitimate.
+func validateSpecPersona(spec runtime.SessionSpec) error {
+	if spec.Persona == "" {
+		return nil
+	}
+	if err := project.ValidatePersonaName(spec.Persona); err != nil {
+		return fmt.Errorf("claude: %w", err)
+	}
+	return nil
 }
 
 // ResumeSession implements runtime.Runtime. A resumable claude session is
@@ -193,6 +211,9 @@ func (r *Runtime) StartSession(_ context.Context, spec runtime.SessionSpec) (run
 func (r *Runtime) ResumeSession(_ context.Context, id string, spec runtime.SessionSpec) (runtime.Session, error) {
 	if id == "" {
 		return nil, errors.New("claude: empty session id")
+	}
+	if err := validateSpecPersona(spec); err != nil {
+		return nil, err
 	}
 	return r.rememberSession(id, spec, true), nil
 }

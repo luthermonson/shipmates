@@ -9,6 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/runtime"
 )
 
@@ -16,8 +17,10 @@ import (
 // agent frontmatter is a subset of the canonical spec (name, description,
 // model, tools); shipmates-only fields are elided.
 func (r *Runtime) InstallPersona(_ context.Context, projectDir string, p runtime.PersonaSpec) error {
-	if p.Name == "" {
-		return fmt.Errorf("codex: persona name required")
+	// The name becomes a path segment below, so it is validated here rather
+	// than trusted from the caller — the runtime interface is a public seam.
+	if err := project.ValidatePersonaName(p.Name); err != nil {
+		return fmt.Errorf("codex: %w", err)
 	}
 	dir := filepath.Join(projectDir, ".codex", "agents")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -34,8 +37,8 @@ func (r *Runtime) InstallPersona(_ context.Context, projectDir string, p runtime
 
 // UninstallPersona removes .codex/agents/<name>.md if present.
 func (r *Runtime) UninstallPersona(_ context.Context, projectDir, name string) error {
-	if name == "" {
-		return fmt.Errorf("codex: persona name required")
+	if err := project.ValidatePersonaName(name); err != nil {
+		return fmt.Errorf("codex: %w", err)
 	}
 	err := os.Remove(filepath.Join(projectDir, ".codex", "agents", name+".md"))
 	if err != nil && !os.IsNotExist(err) {
