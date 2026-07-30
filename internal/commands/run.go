@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/berth"
 	"github.com/luthermonson/shipmates/internal/client"
 	"github.com/luthermonson/shipmates/internal/livesession"
 	"github.com/luthermonson/shipmates/internal/policy"
@@ -138,16 +139,27 @@ func dispatchRuntimeTurn(ctx context.Context, rt runtime.Runtime, persona, promp
 		return err
 	}
 
+	// Where the turn's tool calls originate. Empty means "the project root",
+	// which is what every project without a configured berth gets. A berth is
+	// created or reused here, before the session exists, so the very first
+	// turn already lands in it.
+	cwd, err := berth.ResolveSpawnCWDAt(root, persona, cfg)
+	if err != nil {
+		return err
+	}
+
 	// Session persistence mirrors the codex marker scheme:
 	// .shipmates/sessions/<persona>.<runtime>.session with an auto-fresh on
-	// config drift.
-	fingerprint := cfg.Fingerprint()
+	// config drift. The resolved working directory is part of that drift: a
+	// session is never resumed into a different directory than the one it was
+	// created in (see berth.SessionFingerprint).
+	fingerprint := berth.SessionFingerprint(cfg.Fingerprint(), cwd)
 	meta, have := project.ReadBackendSessionMeta(persona, rt.Name())
 	if have && !fresh && meta.ConfigHash != "" && meta.ConfigHash != fingerprint {
 		fresh = true
 	}
 
-	spec := runtime.SessionSpec{Persona: persona, ProjectDir: root}
+	spec := runtime.SessionSpec{Persona: persona, ProjectDir: root, WorkingDir: cwd}
 	var session runtime.Session
 	if have && !fresh && meta.ID != "" {
 		session, err = rt.ResumeSession(ctx, meta.ID, spec)

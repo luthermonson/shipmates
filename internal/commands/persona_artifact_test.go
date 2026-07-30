@@ -205,7 +205,7 @@ func TestRemoveDeletesTheClaudeAgentAndKeepsMemory(t *testing.T) {
 		t.Fatal("precondition: no claude agent installed")
 	}
 
-	if err := runRemove("geordi", false); err != nil {
+	if err := runRemove("geordi", false, false); err != nil {
 		t.Fatalf("runRemove: %v", err)
 	}
 	if body, ok := readAgent(t); ok {
@@ -241,7 +241,7 @@ func TestRemoveRefusesWhenTheClaudeAgentWasEdited(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := runRemove("geordi", false)
+	err := runRemove("geordi", false, false)
 	if err == nil {
 		t.Fatal("expected removal to be refused for a modified claude agent")
 	}
@@ -275,7 +275,7 @@ func TestRemoveIgnoresAnUntrackedClaudeAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runRemove("geordi", false); err != nil {
+	if err := runRemove("geordi", false, false); err != nil {
 		t.Fatalf("an untracked file blocked removal: %v", err)
 	}
 	body, ok := readAgent(t)

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/luthermonson/shipmates/internal/berth"
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
@@ -47,6 +48,15 @@ const (
 // catalog, applying the four-case logic (see reconcileFile). Memory, sessions,
 // and unmanaged artifacts are never touched.
 func runUpdate(cat *catalog.Catalog, only, accept string) error {
+	// R1a: `update` is the manifest-mutating command that MUST run in the
+	// canonical tree — running it in divergent berths is the one action that
+	// genuinely fractures .shipmates/manifest.json. Gated here rather than in
+	// the command action so every caller is covered, and before the policy
+	// write lock so the operator gets the real reason instead of a lock error
+	// caused by the berth's missing .shipmates/ directory.
+	if err := berth.RefuseIfInBerth("update"); err != nil {
+		return err
+	}
 	migrated, err := migrateLegacyCaptain(cat)
 	if err != nil {
 		return err

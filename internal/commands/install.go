@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/luthermonson/shipmates/internal/berth"
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
@@ -87,6 +88,11 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			&cli.StringFlag{Name: "crew", Usage: "comma-separated personas to add immediately"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) (retErr error) {
+			// R1a: init writes the canonical manifest — refuse from a berth so
+			// a `shipmates init` inside one cannot fracture .shipmates/.
+			if err := berth.RefuseIfInBerth("init"); err != nil {
+				return err
+			}
 			m, err := project.LoadManifest()
 			if err != nil {
 				return err
@@ -423,6 +429,11 @@ func reconcileRuntimePersona(m *project.Manifest, st *updateState, name string, 
 
 // addPersona is the shared install routine used by `add` and `init --crew`.
 func addPersona(cat *catalog.Catalog, name string) error {
+	// R1a: `add` writes the manifest — refuse from a berth. Placed here rather
+	// than in the command action so `init --crew` is covered by the same gate.
+	if err := berth.RefuseIfInBerth("add"); err != nil {
+		return err
+	}
 	if !cat.Has(name) {
 		return fmt.Errorf("unknown persona %q", name)
 	}

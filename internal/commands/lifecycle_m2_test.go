@@ -202,7 +202,7 @@ func TestRemovePreflightIsAtomicAndPreservesState(t *testing.T) {
 	if err := os.WriteFile(policy, []byte("modified\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runRemove("security", false); err == nil || !strings.Contains(err.Error(), "modified") {
+	if err := runRemove("security", false, false); err == nil || !strings.Contains(err.Error(), "modified") {
 		t.Fatalf("remove error = %v", err)
 	}
 	if _, err := os.Stat(agent); err != nil {
@@ -222,7 +222,7 @@ func TestRemovePreflightIsAtomicAndPreservesState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runRemove("security", false); err != nil {
+	if err := runRemove("security", false, false); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{agent, policy} {
@@ -262,7 +262,7 @@ func TestRemoveRefusesUntrackedManagedTargetBeforeDeletingAny(t *testing.T) {
 	if err := os.WriteFile(policy, []byte("untracked\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runRemove("security", false); err == nil || !strings.Contains(err.Error(), "untracked") {
+	if err := runRemove("security", false, false); err == nil || !strings.Contains(err.Error(), "untracked") {
 		t.Fatalf("remove error = %v", err)
 	}
 	if _, err := os.Stat(agent); err != nil {
@@ -293,7 +293,7 @@ func TestRemoveRollsBackLaterDeletionFailure(t *testing.T) {
 		}
 		return original.stage(old, new)
 	}
-	if err := runRemove("security", false); err == nil || !strings.Contains(err.Error(), "injected deletion failure") {
+	if err := runRemove("security", false, false); err == nil || !strings.Contains(err.Error(), "injected deletion failure") {
 		t.Fatalf("remove error = %v", err)
 	}
 	assertRemovalStateRestored(t, agent, agentBefore, policy, policyBefore, manifestBefore)
@@ -315,7 +315,7 @@ func TestRemoveRollsBackManifestSaveFailureAndPreservesDurableState(t *testing.T
 	original := personaRemoveOps
 	t.Cleanup(func() { personaRemoveOps = original })
 	personaRemoveOps.save = func(*project.Manifest) error { return errors.New("injected manifest save failure") }
-	if err := runRemove("security", false); err == nil || !strings.Contains(err.Error(), "injected manifest save failure") {
+	if err := runRemove("security", false, false); err == nil || !strings.Contains(err.Error(), "injected manifest save failure") {
 		t.Fatalf("remove error = %v", err)
 	}
 	assertRemovalStateRestored(t, agent, agentBefore, policy, policyBefore, manifestBefore)
@@ -357,7 +357,7 @@ func TestRemovePurgeDeletesOnlyPersonaMemory(t *testing.T) {
 	if err := project.WriteBackendSessionMeta("security", "codex", "thread", "thread-1", "hash"); err != nil {
 		t.Fatal(err)
 	}
-	if err := runRemove("security", true); err != nil {
+	if err := runRemove("security", true, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(project.MemoryDir("security")); !os.IsNotExist(err) {

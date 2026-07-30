@@ -34,9 +34,11 @@ func AgentPath(name string) string {
 // clobbered.
 //
 // Only the Claude Code-relevant frontmatter fields are emitted (name,
-// description, model, tools). Shipmates-only fields (byline, domainGlob,
-// memoryDir, permissions, remoteControl, berth) are elided — they live in
-// the canonical catalog and shipmates carries them out-of-band.
+// description, model, tools). Shipmates-only frontmatter (byline, domainGlob,
+// memoryDir, permissions, remoteControl) is elided — it lives in the
+// canonical catalog and shipmates carries it out-of-band. `berth:` is elided
+// for a stronger reason: it is not a persona property at all but project
+// configuration in shipmates.yaml, so PersonaSpec no longer carries it.
 func RenderPersona(p runtime.PersonaSpec) ([]byte, error) {
 	// The name becomes a path segment (AgentPath) and a --agent flag value,
 	// so it is validated here at the render chokepoint, not just at the CLI

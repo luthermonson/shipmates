@@ -76,7 +76,7 @@ func TestLifecyclePolicyMutationsWaitForReaders(t *testing.T) {
 					t.Fatalf("policy changed during update contention: %q %v", b, err)
 				}
 			}},
-			{"remove", func() error { return runRemove("security", false) }, func() {
+			{"remove", func() error { return runRemove("security", false, false) }, func() {
 				if _, err := os.Lstat(project.PolicyPath("security")); err != nil {
 					t.Fatalf("policy removed during contention: %v", err)
 				}

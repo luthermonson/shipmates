@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/luthermonson/shipmates/internal/berth"
 	"github.com/luthermonson/shipmates/internal/policy"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/turninput"
@@ -87,8 +88,16 @@ func dispatchCodexExecInstalledImages(ctx context.Context, installed *project.In
 	// `codex exec` is non-interactive and exposes no approval-response channel.
 	_ = policySnapshot
 
+	// The berth (if any) is the child's working directory only. Policy above
+	// and memory below are still resolved against the canonical root, so a
+	// berth never moves shipmates' own state.
+	cwd, err := berth.ResolveSpawnCWDAt(root, persona, cfg)
+	if err != nil {
+		return err
+	}
+
 	meta, have := project.ReadBackendSessionMeta(persona, "codex")
-	fingerprint := cfg.Fingerprint()
+	fingerprint := berth.SessionFingerprint(cfg.Fingerprint(), cwd)
 	if have && meta.ID != "" && !validThreadID.MatchString(meta.ID) {
 		return fmt.Errorf("stored Codex session for %q has an invalid thread id; use --fresh", persona)
 	}
@@ -106,6 +115,7 @@ func dispatchCodexExecInstalledImages(ctx context.Context, installed *project.In
 		return err
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Dir = cwd // berth or cwd override; empty inherits the shipmates process cwd
 	// Codex stderr is intentionally not forwarded: it is not part of the
 	// normalized progress contract and may contain unrestricted diagnostics.
 	pipe, err := cmd.StdoutPipe()

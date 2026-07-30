@@ -35,7 +35,6 @@ type Canonical struct {
 	RemoteControl bool              `yaml:"remoteControl,omitempty"`
 	Model         string            `yaml:"model,omitempty"`
 	Tools         []string          `yaml:"tools,omitempty"`
-	Berth         string            `yaml:"berth,omitempty"`
 	Extra         map[string]any    `yaml:",inline"`
 
 	// Body is the Markdown body following the frontmatter, verbatim.
@@ -48,12 +47,17 @@ type Canonical struct {
 // interface vocabulary (Capabilities, SystemPrompt); the shipmates-only
 // fields a runtime cannot express (byline, domainGlob, memoryDir,
 // permissions, remoteControl, Extra) stop here, on purpose.
+//
+// `berth:` is one of them, and it has no typed field at all: a berth is
+// project configuration read from shipmates.yaml
+// (project.CrewOverride.Berth), not a persona property. A catalog file that
+// still carries `berth:` in its frontmatter parses into Extra and round-trips
+// unchanged, but nothing downstream reads it — see docs/persona-berths.md.
 func (c *Canonical) Spec() runtime.PersonaSpec {
 	return runtime.PersonaSpec{
 		Name:         c.Name,
 		Description:  c.Description,
 		Capabilities: c.Tools,
-		Berth:        c.Berth,
 		Model:        c.Model,
 		SystemPrompt: c.Body,
 	}
@@ -138,14 +142,13 @@ func (c *Canonical) Write(w io.Writer) error {
 		RemoteControl bool           `yaml:"remoteControl,omitempty"`
 		Model         string         `yaml:"model,omitempty"`
 		Tools         []string       `yaml:"tools,omitempty"`
-		Berth         string         `yaml:"berth,omitempty"`
 		Extra         map[string]any `yaml:",inline"`
 	}
 	h := header{
 		Name: c.Name, Description: c.Description, Byline: c.Byline,
 		DomainGlob: c.DomainGlob, MemoryDir: c.MemoryDir, Permissions: c.Permissions,
 		RemoteControl: c.RemoteControl, Model: c.Model, Tools: c.Tools,
-		Berth: c.Berth, Extra: c.Extra,
+		Extra: c.Extra,
 	}
 	if _, err := io.WriteString(w, "---\n"); err != nil {
 		return err

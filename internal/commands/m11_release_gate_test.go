@@ -43,9 +43,10 @@ func TestMain(m *testing.M) {
 // The `ship` branch itself exists on every platform (the per-host supervisor
 // is portable) and is added by m11_release_gate_other_test.go off unix.
 var m11PublicCommandTree = map[string][]string{
-	"":        {"init", "policy", "add", "list", "remove", "update", "render", "routing", "open", "ask", "live", "tell", "show", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail", "hook"},
+	"":        {"init", "policy", "add", "list", "remove", "update", "render", "routing", "berth", "open", "ask", "live", "tell", "show", "feed", "interrupt", "fanout", "drain", "drain-many", "autonomous", "beads", "plan", "sail", "hook"},
 	"policy":  {"validate", "explain"},
 	"routing": {"apply", "show"},
+	"berth":   {"ensure", "path", "list", "remove"},
 	"hook":    {"load-memory"},
 }
 

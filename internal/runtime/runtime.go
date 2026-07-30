@@ -221,13 +221,16 @@ type ApprovalDecision struct {
 
 // PersonaSpec is the canonical shipmates persona shape. Runtimes translate
 // this to their native persona file format during InstallPersona.
+// A persona's berth is deliberately absent: which working directory a
+// session runs in is shipmates' own launch concern, configured per project in
+// shipmates.yaml (project.CrewOverride.Berth) and applied through
+// SessionSpec.WorkingDir. No runtime can express it, every runtime installer
+// elided it, and carrying it here only invited two half-wired spellings of
+// one setting. See internal/berth and docs/persona-berths.md.
 type PersonaSpec struct {
 	Name         string
 	Description  string
 	Capabilities []string // canonical capability names: "read", "edit", "bash", "browse"
-	// Berth requests a per-persona git worktree; shipmates-specific concept
-	// that runtimes ignore unless they want to participate.
-	Berth string
 	// Model is optional; empty means the runtime's default.
 	Model string
 	// SystemPrompt overrides the persona's system prompt. Rarely used.

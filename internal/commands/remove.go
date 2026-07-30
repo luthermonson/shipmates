@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/luthermonson/shipmates/internal/berth"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/runtime/factory"
 	"github.com/urfave/cli/v3"
@@ -29,25 +30,37 @@ var personaRemoveOps = removeOps{
 
 type stagedRemoval struct{ target, staged, dir string }
 
-// Remove removes clean tracked Codex persona artifacts, keeping memory unless --purge.
+// Remove removes clean tracked Codex persona artifacts, keeping memory unless
+// --purge. If the persona has a berth (`.shipmates/berths/<persona>`) it is
+// torn down via git-worktree — refusing when the berth is dirty (unless
+// --force) or holds a nested per-issue worktree mid-flight.
 func Remove() *cli.Command {
 	return &cli.Command{
 		Name:      "remove",
 		Usage:     "remove a Codex persona's managed artifacts (keeps memory unless --purge)",
 		ArgsUsage: "<persona>",
-		Flags:     []cli.Flag{&cli.BoolFlag{Name: "purge", Usage: "also delete the persona's memory dir"}},
+		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "purge", Usage: "also delete the persona's memory dir"},
+			&cli.BoolFlag{Name: "force", Usage: "remove the persona's berth even if it has uncommitted changes"},
+		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			name := c.Args().First()
 			if name == "" {
 				return errors.New("usage: shipmates remove <persona>")
 			}
 
-			return runRemove(name, c.Bool("purge"))
+			return runRemove(name, c.Bool("purge"), c.Bool("force"))
 		},
 	}
 }
 
-func runRemove(name string, purge bool) error {
+func runRemove(name string, purge, force bool) error {
+	// R1a: `remove` writes the manifest — refuse from a berth, before the
+	// policy write lock, so the refusal names the berth rather than surfacing
+	// as a lock failure on the berth's missing .shipmates/ directory.
+	if err := berth.RefuseIfInBerth("remove"); err != nil {
+		return err
+	}
 	if err := project.ValidatePersonaName(name); err != nil {
 		return err
 	}
@@ -58,10 +71,10 @@ func runRemove(name string, purge bool) error {
 	if err := requireManifestV2(m, "remove"); err != nil {
 		return err
 	}
-	return withPolicyWriteLock(func() error { return runRemoveLocked(name, purge, m) })
+	return withPolicyWriteLock(func() error { return runRemoveLocked(name, purge, force, m) })
 }
 
-func runRemoveLocked(name string, purge bool, m *project.Manifest) error {
+func runRemoveLocked(name string, purge, force bool, m *project.Manifest) error {
 	targets, err := preflightPersonaRemoval(name, m)
 	if err != nil {
 		return err
@@ -122,6 +135,15 @@ func runRemoveLocked(name string, purge bool, m *project.Manifest) error {
 		slog.Info("purged persona memory", "persona", name, "dir", memDir)
 	} else {
 		slog.Info("memory preserved", "persona", name, "dir", project.MemoryDir(name))
+	}
+	// Tear down the persona's berth if one exists. Non-destructive by default:
+	// refuses when the berth is dirty or holds a nested per-issue worktree
+	// (routing work in flight). --force bypasses the dirty check; the
+	// nested-worktree refusal stands regardless. Ordered last so a berth that
+	// cannot be removed never blocks the artifact removal that already
+	// succeeded — the operator is told what is left behind.
+	if err := berth.Remove(name, force); err != nil {
+		return fmt.Errorf("remove berth: %w", err)
 	}
 	return nil
 }

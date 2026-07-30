@@ -441,10 +441,27 @@ func (o RoutingOptions) Resolved() (bylines, labels bool) {
 	return
 }
 
-// CrewOverride is a per-persona Codex launch override in shipmates.yaml.
+// CrewOverride is a per-persona launch override in shipmates.yaml.
+//
+// Berth and CWD are where a persona's session *runs*; Model and Effort are
+// how it thinks. Both are project configuration rather than persona-artifact
+// frontmatter on purpose: which directory a mate works in is a property of
+// this checkout, not of the persona's role, and persona artifacts are runtime
+// instructions rather than a second configuration source (see
+// ResolvePersonaConfigAt).
 type CrewOverride struct {
 	Model  string `yaml:"model"`
 	Effort string `yaml:"effort"`
+	// Berth is the persona's berth policy: "off" (run at the repo root —
+	// today's behavior and the fleet default), "auto" (create the worktree
+	// from origin/main if missing and use it), or "require" (fail rather than
+	// degrade). See internal/berth and docs/persona-berths.md.
+	Berth string `yaml:"berth"`
+	// CWD is an explicit working-directory override. It wins over Berth, so a
+	// persona can be pointed at a custom directory without disturbing the
+	// crew-wide berth default. Relative values resolve against the project
+	// root.
+	CWD string `yaml:"cwd"`
 }
 
 // LoadConfig reads shipmates.yaml, returning a zero Config if it's absent.
@@ -477,11 +494,25 @@ func LoadConfigAt(root string) (*Config, error) {
 type PersonaConfig struct {
 	Model  string
 	Effort string // --effort value (low|medium|high|xhigh|max); "" = default
+
+	// Berth is the persona's berth policy — "off" (default), "auto" or
+	// "require". Resolved by internal/berth into a working directory; empty
+	// means the session runs at the project root.
+	Berth string
+	// CWD is an explicit working-directory override that wins over Berth.
+	CWD string
 }
 
 // Fingerprint is a stable hash of the config settings that are baked into a
-// session at creation and cannot change on resume: model and effort. Callers
-// compare this against the stored value to auto-fresh on configuration drift.
+// session at creation and cannot change on resume: model and effort.
+// Callers compare this against the stored value to auto-fresh on
+// configuration drift.
+//
+// Berth and CWD are deliberately excluded. A resolved working directory is
+// folded in separately by berth.SessionFingerprint at the spawn site, so a
+// project with no berth configured produces byte-identical fingerprints to
+// one built before berths existed — nothing is auto-freshed by the mere
+// presence of the feature.
 func (c PersonaConfig) Fingerprint() string {
 	return SHA([]byte(fmt.Sprintf("model=%s|effort=%s", c.Model, c.Effort)))
 }
@@ -504,6 +535,12 @@ func ResolvePersonaConfigAt(root, persona string) (PersonaConfig, error) {
 		}
 		if e := strings.TrimSpace(ov.Effort); e != "" {
 			cfg.Effort = e
+		}
+		if b := strings.TrimSpace(ov.Berth); b != "" {
+			cfg.Berth = b
+		}
+		if d := strings.TrimSpace(ov.CWD); d != "" {
+			cfg.CWD = d
 		}
 	}
 	return cfg, nil
