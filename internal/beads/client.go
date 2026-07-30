@@ -104,12 +104,34 @@ func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-func boundedEnvironment() []string {
-	allow := map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "TMP": true, "TEMP": true, "SYSTEMROOT": true, "WINDIR": true}
+// boundedEnvironment is the environment bd runs with. It is an allowlist, not
+// a denylist, so a credential shipmates never thought about cannot leak into
+// an external binary by default.
+//
+// USERPROFILE is Windows' HOME: without it bd cannot resolve a home directory,
+// so it reads neither its own config nor the user's git identity and records
+// every issue as created_by "unknown". APPDATA and LOCALAPPDATA are
+// deliberately NOT included even though a normal bd invocation would have
+// them — that is where Windows keeps credential stores, which is exactly what
+// this allowlist exists to withhold.
+func boundedEnvironment() []string { return boundedEnvironmentFrom(os.Environ()) }
+
+// boundedEnvironmentFrom takes the parent environment explicitly so the
+// allowlist can be tested without depending on whatever the developer's shell
+// happens to export — which is exactly what hid the casing bug below.
+func boundedEnvironmentFrom(parent []string) []string {
+	allow := map[string]bool{"path": true, "home": true, "userprofile": true, "tmpdir": true, "tmp": true, "temp": true, "systemroot": true, "windir": true}
 	values := map[string]string{"BD_NON_INTERACTIVE": "1"}
-	for _, item := range os.Environ() {
+	for _, item := range parent {
 		key, value, ok := strings.Cut(item, "=")
-		if ok && allow[key] {
+		// Matched case-insensitively, keeping the name the OS gave us. Windows
+		// environment variables are case-insensitive, and native shells do not
+		// spell them the way this list originally assumed: cmd and PowerShell
+		// export `SystemRoot` and `windir`, so an exact uppercase match dropped
+		// both from every child bd process even though both are deliberately
+		// allowed. Git Bash exports them uppercase, which is why running the
+		// suite through it never showed the problem.
+		if ok && allow[strings.ToLower(key)] {
 			values[key] = value
 		}
 	}
