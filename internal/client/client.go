@@ -43,6 +43,13 @@ func base() (string, error) {
 	return fmt.Sprintf("http://127.0.0.1:%d", p), nil
 }
 
+// BaseURL is the exported form of base(), for callers that need to build their
+// own requests instead of going through Get/Post — `shipmates bridge` holds a
+// long-lived SSE stream per persona, which the buffered helpers can't express.
+// The address is always loopback and carries no credentials: the coordination
+// server has no auth surface of its own, its port file is the capability.
+func BaseURL() (string, error) { return base() }
+
 // Healthy reports whether a server is reachable.
 func Healthy() bool {
 	b, err := base()
