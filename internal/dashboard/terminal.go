@@ -15,7 +15,13 @@ var ErrNotTTY = errors.New("open is interactive; stdin and stdout must be TTYs; 
 // portable across linux, macOS, and Windows. It now wraps a real refusal from
 // the terminal itself, which is what a platform golang.org/x/term has no
 // implementation for (js/wasm, for instance) produces at snapshot time.
-var ErrNativeTTYUnsupported = errors.New("open interactive terminal support is unavailable on this platform; use live, tell, interrupt, and feed")
+//
+// The message says that, rather than the old "unavailable on this platform".
+// That text was accurate while the implementation was linux-only and became a
+// lie the moment it wasn't: an operator on a working Windows console who hit
+// an unrelated handle problem would have been told their OS was unsupported
+// and sent away from a command that does in fact run there.
+var ErrNativeTTYUnsupported = errors.New("this terminal would not report its state, so interactive mode cannot start safely; use live, tell, interrupt, and feed")
 
 // Terminal is intentionally small so exit-path behavior is deterministic in
 // tests and no real terminal is needed.
