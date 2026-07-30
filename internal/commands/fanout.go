@@ -32,7 +32,11 @@ func Fanout() *cli.Command {
 		Name:      "fanout",
 		Usage:     "run the same prompt across personas in parallel",
 		ArgsUsage: "<p1,p2,...> <prompt>",
+		Flags:     []cli.Flag{runtimeFlag()},
 		Action: func(ctx context.Context, c *cli.Command) error {
+			if _, err := requireClaudeLaunch(c); err != nil {
+				return err
+			}
 			list := c.Args().First()
 			prompt := strings.TrimSpace(strings.Join(c.Args().Tail(), " "))
 

@@ -19,7 +19,16 @@ func Server() *cli.Command {
 			{
 				Name:  "serve",
 				Usage: "run the coordination server (usually auto-spawned)",
+				Flags: []cli.Flag{runtimeFlag()},
 				Action: func(ctx context.Context, c *cli.Command) error {
+					// The server spawns and drives crew processes itself, over
+					// Claude Code's stream-json protocol and PTY, so it is
+					// gated on the same selection as the CLI launch path. It
+					// is also usually auto-spawned by `tell`, which is why the
+					// refusal has to happen here rather than at the call site.
+					if _, err := requireClaudeLaunch(c); err != nil {
+						return err
+					}
 					return server.New().Run(ctx)
 				},
 			},

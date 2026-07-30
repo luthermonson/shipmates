@@ -23,8 +23,12 @@ func Ask() *cli.Command {
 		ArgsUsage: "<persona> <prompt>",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "fresh", Usage: "start a new session instead of resuming (applies config changes like model/effort)"},
+			runtimeFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
+			if _, err := requireClaudeLaunch(c); err != nil {
+				return err
+			}
 			persona := c.Args().First()
 			prompt := strings.TrimSpace(strings.Join(c.Args().Tail(), " "))
 			if persona == "" || prompt == "" {
@@ -45,6 +49,12 @@ func dispatch(ctx context.Context, persona, prompt string, fresh bool) error {
 
 // dispatchTo is dispatch with caller-supplied output writers, so parallel
 // callers (drain-many) can capture each persona's output into its own buffer.
+//
+// This path is Claude Code's: the argv, the session flags and the stdin
+// contract below are all `claude`'s. Callers gate on the resolved runtime
+// (requireClaudeLaunch) before getting here, which is why it does not have to
+// ask. Routing it through runtime.Runtime is the next step — see
+// docs/runtime-interface.md.
 func dispatchTo(ctx context.Context, persona, prompt string, fresh bool, stdout, stderr io.Writer) error {
 	cfg, idArgs, id, name, fp, cwd := sessionLaunch(persona, fresh)
 	if cfg.CommandBacked() {

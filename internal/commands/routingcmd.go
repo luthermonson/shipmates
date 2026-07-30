@@ -27,8 +27,12 @@ func Routing(cat *catalog.Catalog) *cli.Command {
 				ArgsUsage: "<persona-file>...",
 				Flags: []cli.Flag{
 					&cli.BoolFlag{Name: "all", Usage: "apply to every .claude/agents/*.md"},
+					runtimeFlag(),
 				},
 				Action: func(ctx context.Context, c *cli.Command) error {
+					if _, err := requireTrackedPersonaArtifact(c); err != nil {
+						return err
+					}
 					conf, err := project.LoadConfig()
 					if err != nil {
 						return err
