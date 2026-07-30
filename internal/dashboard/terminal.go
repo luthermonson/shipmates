@@ -10,6 +10,11 @@ import (
 )
 
 var ErrNotTTY = errors.New("open is interactive; stdin and stdout must be TTYs; scripts should use live, tell, interrupt, and feed")
+
+// ErrNativeTTYUnsupported no longer means "this GOOS": the native terminal is
+// portable across linux, macOS, and Windows. It now wraps a real refusal from
+// the terminal itself, which is what a platform golang.org/x/term has no
+// implementation for (js/wasm, for instance) produces at snapshot time.
 var ErrNativeTTYUnsupported = errors.New("open interactive terminal support is unavailable on this platform; use live, tell, interrupt, and feed")
 
 // Terminal is intentionally small so exit-path behavior is deterministic in
@@ -35,11 +40,6 @@ type Guard struct {
 }
 
 func NewGuard(t Terminal, plain bool) (*Guard, error) {
-	if unsupported, ok := t.(interface{ NativeTTYError() error }); ok {
-		if err := unsupported.NativeTTYError(); err != nil {
-			return nil, err
-		}
-	}
 	if t == nil || !t.StdinTTY() || !t.StdoutTTY() {
 		return nil, ErrNotTTY
 	}

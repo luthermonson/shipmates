@@ -6,10 +6,10 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/magefile/mage v1.17.2
-	github.com/mattn/go-isatty v0.0.20
 	github.com/pelletier/go-toml v1.9.5
 	github.com/urfave/cli/v3 v3.10.0
 	golang.org/x/sys v0.44.0
+	golang.org/x/term v0.42.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

@@ -10,15 +10,23 @@ type Screen struct {
 	Lines    []string
 	Persona  string
 	Planning bool
+	// Size is the geometry Lines were laid out for. The cursor-addressed
+	// renderer needs it to tell a resize, after which its per-row cache
+	// describes nothing on screen, from ordinary content churn.
+	Size Size
 }
 
 // Render produces a semantic snapshot: no escape sequences, cursor commands,
 // credentials, raw identities, or drafts are present in the result.
 func Render(m *Model, size Size) Screen {
+	var s Screen
 	if m.Sidebar != nil && size.Width >= 96 {
-		return renderWithSidebar(m, size)
+		s = renderWithSidebar(m, size)
+	} else {
+		s = renderMain(m, size)
 	}
-	return renderMain(m, size)
+	s.Size = size
+	return s
 }
 
 func renderMain(m *Model, size Size) Screen {

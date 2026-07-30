@@ -185,6 +185,16 @@ func TestPlanningSidebarScrollsWithoutTruncatingContent(t *testing.T) {
 	}
 }
 
+func TestDashboardColorsDistinguishPersonaStatusAndSidebar(t *testing.T) {
+	line := colorizeDashboardLine("agent: hello │ VOYAGE PLAN", "skipper", true)
+	if !strings.Contains(line, "\x1b[1;96magent: hello") || !strings.Contains(line, "\x1b[97mVOYAGE PLAN") {
+		t.Fatalf("colored line=%q", line)
+	}
+	if colorizeDashboardLine("agent: hello", "skipper", false) == colorizeDashboardLine("agent: hello", "architect", false) {
+		t.Fatal("persona colors should be stable and distinct for skipper and architect")
+	}
+}
+
 func TestGuardRestorationWrapsInputCancellation(t *testing.T) {
 	f := &fakeTerminal{in: true, out: true}
 	g, _ := NewGuard(f, false)
