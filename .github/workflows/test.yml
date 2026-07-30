@@ -7,6 +7,20 @@ on:
 permissions:
   contents: read
 
+env:
+  # The Beads integration parses the external bd CLI's stdout, so it is verified
+  # against the real binary rather than a stand-in. Pin the release and its
+  # digest; bd's output *is* the contract internal/beads depends on. Bump these
+  # three together: BD_VERSION/BD_SHA256_* here, the Version constant in
+  # internal/beads/bdtest, and the Beads section of docs/sailing.md.
+  BD_VERSION: 1.1.2
+  BD_SHA256_LINUX_AMD64: a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2
+  BD_SHA256_WINDOWS_AMD64: 4591b07bf82b3203a1dc7db17a7e4962d86338e6c3d34a8a857cc11a57f9c159
+  # Turns a missing bd into a failing test instead of a silent skip. Without
+  # this, a broken install step would quietly delete the only coverage of the
+  # external contract and CI would still be green.
+  SHIPMATES_TEST_BD_REQUIRED: "1"
+
 jobs:
   test:
     strategy:
@@ -21,6 +35,43 @@ jobs:
         with:
           # go.mod pins the exact toolchain (1.26.x); setup-go resolves it.
           go-version-file: go.mod
+
+      - name: Install bd (ubuntu)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/bd.tar.gz "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz"
+          echo "${BD_SHA256_LINUX_AMD64}  /tmp/bd.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/bd.tar.gz -C "$HOME/.local/bin" bd
+          rm -f /tmp/bd.tar.gz
+          chmod +x "$HOME/.local/bin/bd"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/bd" version | tee /tmp/bd-version
+          grep -q "bd version ${BD_VERSION} " /tmp/bd-version
+
+      # pwsh, not bash: `unzip` is not guaranteed on the Windows image, while
+      # Expand-Archive and Get-FileHash always are.
+      - name: Install bd (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'bd.zip'
+          Invoke-WebRequest "https://github.com/gastownhall/beads/releases/download/v$env:BD_VERSION/beads_${env:BD_VERSION}_windows_amd64.zip" -OutFile $archive
+          $digest = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          if ($digest -ne $env:BD_SHA256_WINDOWS_AMD64) { throw "bd archive digest is $digest, expected $env:BD_SHA256_WINDOWS_AMD64" }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'bd'
+          Expand-Archive $archive -DestinationPath $unpacked -Force
+          $bin = Join-Path $HOME 'bd-bin'
+          New-Item -ItemType Directory -Force $bin | Out-Null
+          Move-Item (Join-Path $unpacked 'bd.exe') (Join-Path $bin 'bd.exe') -Force
+          Remove-Item $archive -Force
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $version = (& (Join-Path $bin 'bd.exe') version) -join "`n"
+          Write-Host $version
+          if ($version -notmatch ("bd version " + [regex]::Escape($env:BD_VERSION) + " ")) { throw "unexpected bd version: $version" }
 
       - name: Build
         run: go build ./...

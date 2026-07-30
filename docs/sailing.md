@@ -259,11 +259,53 @@ ordinary voyage-state workflow. When enabled, Sail:
    failures and Captain-input blockers as blocked.
 
 When Beads is enabled, creation and dependency linking are durable
-prerequisites: Sail stops before dispatch if it cannot establish the graph.
-Without Beads, no external graph is required. Later status synchronization is
-best-effort and visibly warns without rewriting successful code work as failed.
-Beads owns its Dolt database, schema, synchronization, and CLI behavior;
-Shipmates does not vendor or reproduce them.
+prerequisites: Sail stops before dispatch if it cannot establish the graph. The
+one exception is a dependency edge onto an **inherited** prerequisite. That Bead
+belongs to the predecessor voyage, is read-only, and may not be resolvable in
+this workspace at all — a predecessor state carried in from another checkout, or
+a `bd prune`/`bd gc` that reclaimed the closed Bead. Real `bd` rejects
+`bd dep add <id> <unresolvable-id>`, so that edge is recorded when the
+predecessor Bead is present and skipped when it is not; lost provenance never
+refuses a successor voyage. Without Beads, no external graph is required. Later
+status synchronization is best-effort and visibly warns without rewriting
+successful code work as failed. Beads owns its Dolt database, schema,
+synchronization, and CLI behavior; Shipmates does not vendor or reproduce them.
+
+`bd` is resolved from `PATH` only. A file named `bd` next to the `shipmates`
+executable is deliberately **not** used: that would turn any writable
+install directory into an implicit code-execution path for a binary the operator
+never chose to install.
+
+### Verified `bd` version and output contract
+
+Shipmates parses `bd`'s stdout to learn a new Bead's ID, so `bd`'s output is an
+external contract. The integration is verified against **`bd` 1.1.2** (upstream
+[gastownhall/beads](https://github.com/gastownhall/beads), Go, Dolt-backed,
+prebuilt release archives for Linux and Windows). What was confirmed by running
+the real binary on both platforms:
+
+| Call | Real `bd` 1.1.2 behavior |
+| --- | --- |
+| `bd create --json …` | single JSON **object** with an `"id"` field; ids look like `ship-8he` |
+| `bd show <id> --json` | JSON **array** of one record, not an object |
+| `bd prime` | markdown workflow guidance, ~4.7 KiB in a fresh workspace |
+| `bd update <id> --status=…` | `in_progress` and `blocked` are real built-in statuses (`bd statuses`) |
+| `bd close <id> --reason=…` | refuses while blockers are still open; Shipmates closes dependency-first and does not pass `--force` |
+| `bd comments add <id> --author=… -- <text>` | `--` end-of-options sentinel is honored |
+| `bd dep add <id> <depends-on>` | fails when either id does not resolve |
+
+Two things worth knowing about the external binary: `bd init` creates and commits
+to a git repository, and `bd` reports anonymous usage metrics to a network
+endpoint unless `bd metrics off` has been run.
+
+The version, the pinned release digests in `.github/workflows/test.yml`, and the
+`Version` constant in `internal/beads/bdtest` are bumped together.
+
+Integration tests run the real `bd`, never a script that imitates it. They are
+skipped when `bd` is absent so an ordinary offline `go test` still passes, and
+CI sets `SHIPMATES_TEST_BD_REQUIRED=1` so a broken install fails instead of
+silently deleting the coverage. Point `SHIPMATES_TEST_BD` at an executable to
+use a `bd` that is not on `PATH`.
 
 `sail` validates the plan and installed crew, executes ready tasks with bounded
 concurrency, persists state after every transition, and resumes unfinished work

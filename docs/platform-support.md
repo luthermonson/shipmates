@@ -11,7 +11,7 @@ and why.
 |---|---|---|---|---|
 | `init`, `add`, `list`, `remove`, `update` | ✅ | ✅ | ✅ | Every persona/policy mutation takes the project's policy write lock, which is `flock` on unix and `LockFileEx` on Windows. Windows before v0.4.1 failed here with "secure policy mutation locking is unsupported on this platform" and left a half-created project behind; both are fixed. |
 | `policy`, `render`, `routing` | ✅ | ✅ | ✅ | `policy validate` / `explain` capture a real snapshot on all three (`openat`+`O_NOFOLLOW` on unix, reparse-point refusal plus pinned directory handles on Windows). `routing apply` additionally needs an atomic directory-entry exchange and is Linux/macOS only — see below. |
-| `beads` | ✅ | ✅ | ✅ | Requires external `bd` binary on `PATH`. |
+| `beads` | ✅ | ✅ | ✅ | Requires the external `bd` binary on `PATH` — and only on `PATH`; a `bd` next to the `shipmates` executable is deliberately not used. Verified against `bd` 1.1.2 on Linux and Windows. Sail's Beads *mirroring* is unix-only, but only because `sail` is: it persists through `voyage.SaveState`, which fsyncs a directory. |
 | `plan` | ✅ | ✅ | ✅ | Planning subsystem (voyage plan validation). |
 | `open`, `ask`, `live` | ✅ | ✅ | ⚠️ | The selected runtime's CLI must be installed and authenticated. Windows: `sail` is unavailable but these dispatch commands work when the runtime CLI is present. |
 | `tell`, `feed`, `interrupt` | ✅ | ✅ | ⚠️ | Same as `ask` — depend on the local server. |

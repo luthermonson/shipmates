@@ -53,17 +53,16 @@ func New(root string) (*Client, error) {
 	return &Client{Root: resolved, Command: command, Timeout: DefaultTimeout}, nil
 }
 
+// Available resolves the external bd CLI from PATH and nowhere else.
+//
+// It deliberately does not fall back to a bd sitting next to the shipmates
+// executable: that turns any writable install directory — a downloads folder, a
+// shared tools share, an unpacked release tree — into an implicit code-execution
+// path for a binary the operator never chose to install. Beads is optional, so
+// failing closed and telling the operator to install bd is the safe answer.
 func Available() (string, error) {
 	if command, err := exec.LookPath("bd"); err == nil {
 		return command, nil
-	}
-	self, err := os.Executable()
-	if err == nil {
-		candidate := filepath.Join(filepath.Dir(self), "bd")
-		info, statErr := os.Lstat(candidate)
-		if statErr == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o111 != 0 {
-			return candidate, nil
-		}
 	}
 	return "", errors.New("bd is not installed; see https://github.com/gastownhall/beads")
 }

@@ -1,5 +1,11 @@
 //go:build !windows
 
+// The tests in this file drive a `#!/bin/sh` stand-in for bd. They exist to
+// assert things the real CLI cannot show us — the exact argv the adapter builds,
+// that the parent process's environment is not forwarded, and that a hung bd is
+// killed — so they stay POSIX-only on purpose. The real external contract is
+// verified in live_test.go against the actual bd binary on every platform, and
+// the platform-independent parsing rules live in parse_test.go.
 package beads
 
 import (
@@ -22,20 +28,6 @@ func TestWorkspaceRejectsSymlink(t *testing.T) {
 	}
 }
 
-func TestIssueIDAcceptsObjectAndSingleItemList(t *testing.T) {
-	for _, raw := range []string{`{"id":"ship-abc.1"}`, `[{"id":"ship-abc.1"}]`} {
-		id, err := issueID(raw)
-		if err != nil || id != "ship-abc.1" {
-			t.Fatalf("issueID(%q) = %q, %v", raw, id, err)
-		}
-	}
-	for _, raw := range []string{`{"id":"--bad"}`, `{"id":"bad id"}`, `[]`} {
-		if _, err := issueID(raw); err == nil {
-			t.Fatalf("issueID(%q) succeeded", raw)
-		}
-	}
-}
-
 func TestClientLifecycleUsesBoundedArgvCommands(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, ".beads"), 0o700); err != nil {
@@ -43,7 +35,10 @@ func TestClientLifecycleUsesBoundedArgvCommands(t *testing.T) {
 	}
 	logPath := filepath.Join(root, "calls.log")
 	script := filepath.Join(root, "bd")
-	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + logPath + "\ncase \"$1\" in\ncreate) printf '%s\\n' '{\"id\":\"ship-abc\"}' ;;\nprime) printf '%s\\n' 'prime context' ;;\nshow) printf '%s\\n' '{\"id\":\"ship-abc\"}' ;;\nesac\n"
+	// Output shapes mirror real bd 1.1.2: create emits a JSON object, show emits
+	// a JSON array of one record. See internal/beads/parse_test.go for the
+	// verbatim captures and live_test.go for the assertions against real bd.
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + logPath + "\ncase \"$1\" in\ncreate) printf '%s\\n' '{\"id\":\"ship-abc\",\"status\":\"open\"}' ;;\nprime) printf '%s\\n' 'prime context' ;;\nshow) printf '%s\\n' '[{\"id\":\"ship-abc\",\"status\":\"open\"}]' ;;\nesac\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -124,12 +119,5 @@ func TestClientDoesNotForwardCredentialEnvironment(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "GITHUB_TOKEN") || strings.Contains(string(raw), "must-not-reach-bd") {
 		t.Fatalf("credential environment forwarded to bd: %s", raw)
-	}
-}
-
-func TestClientRejectsUntrustedIssueIDs(t *testing.T) {
-	client := &Client{}
-	if err := client.AddDependency(context.Background(), "--help", "ship-parent"); err == nil {
-		t.Fatal("flag-like issue id accepted")
 	}
 }

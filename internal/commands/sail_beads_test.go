@@ -1,5 +1,11 @@
 //go:build unix
 
+// These tests drive a `#!/bin/sh` stand-in for bd so they can assert the exact
+// argv the adapter builds — something the real CLI cannot show. They are not
+// evidence about bd's behavior: the stand-in exits 0 for every subcommand,
+// including ones real bd rejects. The external contract is verified against the
+// real binary in sail_beads_live_test.go, sail_beads_portable_live_test.go, and
+// internal/beads/live_test.go.
 package commands
 
 import (
@@ -37,7 +43,7 @@ create)
   printf '{"id":"ship-%s"}\n' "$n"
   ;;
 prime) printf 'Use bd ready and bd show before working.\n' ;;
-show) printf '{"id":"%s","status":"open"}\n' "$2" ;;
+show) printf '[{"id":"%s","status":"open"}]\n' "$2" ;;
 esac
 `
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
@@ -109,7 +115,7 @@ func TestPrepareSailBeadsDoesNotDuplicateInheritedPrerequisite(t *testing.T) {
 	}
 	logPath := filepath.Join(root, "bd.log")
 	script := filepath.Join(bin, "bd")
-	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + logPath + "\"\ncase \"$1\" in create) printf '%s\\n' '{\"id\":\"successor-bead\"}' ;; prime) ;; show) printf '%s\\n' '{}' ;; esac\n"
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + logPath + "\"\ncase \"$1\" in create) printf '%s\\n' '{\"id\":\"successor-bead\"}' ;; prime) ;; show) printf '%s\\n' '[]' ;; esac\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}

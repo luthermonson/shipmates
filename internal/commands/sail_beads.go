@@ -30,10 +30,15 @@ func (b *sailBeads) ensureDerivativeTask(ctx context.Context, task voyage.Task, 
 	entry.BeadID = id
 	state.Tasks[task.ID] = entry
 	for _, dependency := range task.DependsOn {
-		if depID := state.Tasks[dependency].BeadID; depID != "" {
-			if err := b.client.AddDependency(ctx, id, depID); err != nil {
-				return err
+		dependencyState := state.Tasks[dependency]
+		if dependencyState.BeadID == "" {
+			continue
+		}
+		if err := b.client.AddDependency(ctx, id, dependencyState.BeadID); err != nil {
+			if dependencyState.Inherited != nil {
+				continue // See prepareSailBeads: inherited edges are provenance.
 			}
+			return err
 		}
 	}
 	entry.BeadDependenciesLinked = true
@@ -85,11 +90,23 @@ func prepareSailBeads(ctx context.Context, plan *voyage.Plan, state *voyage.Stat
 			continue
 		}
 		for _, dependency := range task.DependsOn {
-			dependencyBead := state.Tasks[dependency].BeadID
-			if dependencyBead == "" {
+			dependencyState := state.Tasks[dependency]
+			if dependencyState.BeadID == "" {
 				continue
 			}
-			if err := client.AddDependency(ctx, entry.BeadID, dependencyBead); err != nil {
+			if err := client.AddDependency(ctx, entry.BeadID, dependencyState.BeadID); err != nil {
+				// An inherited prerequisite's Bead belongs to the predecessor
+				// voyage. Shipmates never creates, reopens, or relinks it, and it
+				// may not be resolvable here at all — a predecessor state carried
+				// in from another checkout, or `bd prune`/`bd gc` having reclaimed
+				// the closed Bead. Real bd rejects `bd dep add <id> <missing-id>`,
+				// so treating that edge as a dispatch prerequisite would refuse
+				// the whole successor voyage over lost provenance. The edge is
+				// recorded when the predecessor Bead is present and skipped when
+				// it is not; the pending tasks' own Beads are still mandatory.
+				if dependencyState.Inherited != nil {
+					continue
+				}
 				return nil, fmt.Errorf("link Bead dependency for task %q: %w", task.ID, err)
 			}
 		}
