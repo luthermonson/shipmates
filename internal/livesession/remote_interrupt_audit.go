@@ -17,26 +17,12 @@ type remoteInterruptFileAudit struct {
 }
 
 func openRemoteInterruptAuditSink(dir string) (*remoteInterruptFileAudit, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, errors.New("remote interrupt audit unavailable")
-	}
-	st, err := os.Lstat(dir)
-	if err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
+	if err := secureStateDir(dir, true); err != nil {
 		return nil, errors.New("remote interrupt audit unavailable")
 	}
 	p := filepath.Join(dir, remoteInterruptAuditFile)
-	if st, err := os.Lstat(p); err == nil && (!st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0) {
-		return nil, errors.New("remote interrupt audit unavailable")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, errors.New("remote interrupt audit unavailable")
-	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := openPrivateAppendFile(p)
 	if err != nil {
-		return nil, errors.New("remote interrupt audit unavailable")
-	}
-	st, err = f.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
-		_ = f.Close()
 		return nil, errors.New("remote interrupt audit unavailable")
 	}
 	return &remoteInterruptFileAudit{f: f}, nil

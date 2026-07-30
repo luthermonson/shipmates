@@ -87,7 +87,9 @@ func ReadLiveContinuityBackendAt(root, persona, backend string) (LiveContinuity,
 
 // WriteLiveContinuity atomically replaces the marker only with a fully
 // validated, confirmed thread identity. The old marker survives every failure
-// before rename; fsync makes the rename durable before success is returned.
+// before the rename, and DurableRename does not report success until the new
+// directory entry is on stable storage — an fsync of the containing directory on
+// unix, MOVEFILE_WRITE_THROUGH on Windows.
 func WriteLiveContinuity(persona string, m LiveContinuity) error {
 	return WriteLiveContinuityAt(".", persona, m)
 }
@@ -113,16 +115,13 @@ func WriteLiveContinuityBackendAt(root, persona, backend string, m LiveContinuit
 		return err
 	}
 	b = append(b, '\n')
-	f, err := os.CreateTemp(sessionsDir, ".live-continuity-*")
+	f, err := createPrivateTemp(sessionsDir, ".live-continuity-*")
 	if err != nil {
 		return err
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
 	fail := func(e error) error { _ = f.Close(); return e }
-	if err := f.Chmod(0o600); err != nil {
-		return fail(err)
-	}
 	if _, err := f.Write(b); err != nil {
 		return fail(err)
 	}
@@ -132,13 +131,5 @@ func WriteLiveContinuityBackendAt(root, persona, backend string, m LiveContinuit
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, filepath.Join(root, LiveContinuityMarkerFor(persona, backend))); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Clean(sessionsDir))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return DurableRename(tmp, filepath.Join(root, LiveContinuityMarkerFor(persona, backend)))
 }

@@ -140,6 +140,21 @@ func Identify(h windows.Handle) (Identity, error) {
 // the type check below, so a caller that needs to tell "it is a directory"
 // apart from "permission denied" must follow up with Probe.
 func Open(path string, dir bool, access, disposition uint32) (windows.Handle, Identity, error) {
+	return OpenShared(path, dir, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, disposition)
+}
+
+// OpenShared is Open with the sharing mode named explicitly.
+//
+// Open's refusal to share delete access is deliberate and load-bearing for
+// *directory* handles, where it is what stops a component already proven to be a
+// real directory from being renamed away and replaced by a junction. On a leaf
+// file it is instead a behavioural difference from unix, where a file can always
+// be unlinked while a descriptor is still open. A caller that holds a long-lived
+// handle to something a peer may legitimately rotate — an append-only audit log,
+// for instance — wants FILE_SHARE_DELETE so that stays true, and loses nothing
+// by it: deleting a file grants no read access to its contents, and who may
+// delete it is decided by the directory's DACL, not by this sharing mode.
+func OpenShared(path string, dir bool, access, share, disposition uint32) (windows.Handle, Identity, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return windows.InvalidHandle, Identity{}, err
@@ -148,7 +163,7 @@ func Open(path string, dir bool, access, disposition uint32) (windows.Handle, Id
 	if dir {
 		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
 	}
-	h, err := windows.CreateFile(p, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, disposition, flags, 0)
+	h, err := windows.CreateFile(p, access, share, nil, disposition, flags, 0)
 	if err != nil {
 		return windows.InvalidHandle, Identity{}, err
 	}

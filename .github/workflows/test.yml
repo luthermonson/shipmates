@@ -88,7 +88,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          go vet $(go list ./... | grep -v -E 'internal/(client|codexapp|dashboard|delegation|fleetcommandermailbox|fleetconfig|fleetidentity|fleetinterrupt|installer|livesession|project|recovery|server|voyage)$')
+          go vet $(go list ./... | grep -v -E 'internal/(delegation|fleetcommandermailbox|fleetconfig|fleetidentity|fleetinterrupt|installer|recovery|voyage)$')
 
       # The fleetconfig, m3provision, and m3runtime test suites are
       # environment-dependent: they exercise the M3 authority/qualifier
@@ -111,17 +111,24 @@ jobs:
       # runtime-interface work:
       #   1. unix-only subsystems whose *test* files are not build-tag
       #      gated, so `go test` fails to compile them on Windows:
-      #      dashboard, delegation, fleetcommandermailbox, fleetconfig,
-      #      installer.
-      #   2. suites that exercise unix permission/fsync/daemon semantics
-      #      not yet ported to Windows (0600 marker bits, directory
-      #      fsync, DACL round-trips, local server + app-server spawning):
-      #      client, codexapp, fleetidentity, fleetinterrupt, livesession,
-      #      project, recovery, server, voyage.
-      # Shrinking this list is tracked in docs/platform-support.md
+      #      delegation, fleetcommandermailbox, fleetconfig, installer.
+      #      dashboard came off this list once the interactive terminal
+      #      was ported to golang.org/x/term: it is now built and tested
+      #      on Windows like any other portable package.
+      #   2. suites that still assume unix permission/fsync semantics in
+      #      their own durable stores: fleetidentity, fleetinterrupt,
+      #      recovery, voyage. Each keeps a private copy of the
+      #      `mode&0o077` check and the rename-then-fsync-the-directory
+      #      pattern, neither of which can succeed on Windows.
+      #      client, codexapp, livesession, project, and server came off
+      #      this list: the coordination server now runs on Windows, its
+      #      durable stores verify a real DACL instead of mode bits, and
+      #      renames commit through MOVEFILE_WRITE_THROUGH instead of a
+      #      directory flush Windows refuses.
+      # Shrinking what remains is tracked in docs/platform-support.md
       # ("Where to next").
       - name: Test (windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          go test -race -count=1 -timeout=10m $(go list ./... | grep -v -E 'internal/(client|codexapp|dashboard|delegation|fleetcommandermailbox|fleetconfig|fleetidentity|fleetinterrupt|installer|livesession|project|recovery|server|voyage)$')
+          go test -race -count=1 -timeout=10m $(go list ./... | grep -v -E 'internal/(delegation|fleetcommandermailbox|fleetconfig|fleetidentity|fleetinterrupt|installer|recovery|voyage)$')

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/project"
 )
 
 const remoteInterruptStoreFile = "remote-interrupt-operations.json"
@@ -43,7 +45,7 @@ func (c *RemoteInterruptCoordinator) durableLocked() durableInterruptStore {
 }
 func (c *RemoteInterruptCoordinator) loadRemoteInterruptStore() error {
 	if err := secureStateDir(c.storeDir, true); err != nil {
-		return err
+		return errors.New("remote interrupt storage unavailable")
 	}
 	p := filepath.Join(c.storeDir, remoteInterruptStoreFile)
 	b, err := os.ReadFile(p)
@@ -57,8 +59,7 @@ func (c *RemoteInterruptCoordinator) loadRemoteInterruptStore() error {
 	if json.Unmarshal(b, &d) != nil || d.Schema != 1 || len(d.Records) > RemoteInterruptMaxRecords || len(d.Tombs) > remoteInterruptMaxTombs {
 		return errors.New("remote interrupt storage unavailable")
 	}
-	st, err := os.Lstat(p)
-	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
+	if err := verifyPrivateStateFile(p); err != nil {
 		return errors.New("remote interrupt storage unavailable")
 	}
 	for _, x := range d.Records {
@@ -87,7 +88,7 @@ func (c *RemoteInterruptCoordinator) persistLocked() error {
 		return nil
 	}
 	if err := secureStateDir(c.storeDir, true); err != nil {
-		return err
+		return errors.New("remote interrupt storage unavailable")
 	}
 	b, err := json.Marshal(c.durableLocked())
 	if err != nil {
@@ -95,7 +96,7 @@ func (c *RemoteInterruptCoordinator) persistLocked() error {
 	}
 	b = append(b, '\n')
 	tmp, dst := filepath.Join(c.storeDir, ".remote-interrupt.tmp"), filepath.Join(c.storeDir, remoteInterruptStoreFile)
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := createPrivateStateFile(tmp)
 	if err != nil {
 		return errors.New("remote interrupt storage unavailable")
 	}
@@ -106,16 +107,7 @@ func (c *RemoteInterruptCoordinator) persistLocked() error {
 			_ = os.Remove(tmp)
 		}
 	}()
-	if _, err = f.Write(b); err != nil || f.Sync() != nil || f.Close() != nil || os.Rename(tmp, dst) != nil {
-		return errors.New("remote interrupt storage unavailable")
-	}
-	d, err := os.Open(c.storeDir)
-	if err != nil {
-		return errors.New("remote interrupt storage unavailable")
-	}
-	err = d.Sync()
-	_ = d.Close()
-	if err != nil {
+	if _, err = f.Write(b); err != nil || f.Sync() != nil || f.Close() != nil || project.DurableRename(tmp, dst) != nil {
 		return errors.New("remote interrupt storage unavailable")
 	}
 	ok = true

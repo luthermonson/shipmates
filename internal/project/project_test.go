@@ -248,12 +248,13 @@ func TestWriteBackendSessionMetaIsPrivate(t *testing.T) {
 	if err := WriteBackendSessionMeta("security", "codex", "thread-1", "thread-1", "hash"); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(BackendSessionMarker("security", "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("marker permissions = %o", got)
+	// VerifyPrivateFile is the platform's own statement of "nobody but the owner
+	// can read this": nine mode bits on unix, an enumerated DACL on Windows,
+	// where Go synthesizes 0666 for every file and Chmod(0600) is a no-op.
+	// Asserting the mode directly would certify the marker as private on unix
+	// and be unsatisfiable on Windows.
+	if err := VerifyPrivateFile(BackendSessionMarker("security", "codex")); err != nil {
+		t.Fatalf("marker is not private: %v", err)
 	}
 }
 

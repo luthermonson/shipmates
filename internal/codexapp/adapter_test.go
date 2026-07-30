@@ -474,7 +474,10 @@ func TestCredentialFreeEnvironmentHasNoProviderCredentialHome(t *testing.T) {
 func TestCredentialFreeEnvironmentAllowsOnlyExplicitTransportCodexHome(t *testing.T) {
 	t.Setenv("CODEX_HOME", "/secret/provider-home")
 	t.Setenv("HOME", "/secret/home")
-	const isolated = "/tmp/shipmates-transport-auth"
+	// Absolute on both platforms: controlledEnvironment refuses a
+	// TransportCodexHome that filepath.IsAbs rejects, and "/tmp/..." is not
+	// absolute on Windows.
+	isolated := filepath.Join(t.TempDir(), "shipmates-transport-auth")
 	var got map[string]string = make(map[string]string)
 	for _, entry := range controlledEnvironment(map[string]string{"CODEX_HOME": "/secret/override", "SOL_TOKEN": "secret"}, true, isolated) {
 		key, value, ok := strings.Cut(entry, "=")

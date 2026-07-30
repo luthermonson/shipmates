@@ -219,16 +219,12 @@ func WriteBackendSessionMeta(persona, backend, name, id, configHash string) erro
 		return err
 	}
 	path := BackendSessionMarker(persona, backend)
-	tmp, err := os.CreateTemp(SessionsDir(), ".session-*")
+	tmp, err := createPrivateTemp(SessionsDir(), ".session-*")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
 	if _, err := tmp.Write(b); err != nil {
 		tmp.Close()
 		return err

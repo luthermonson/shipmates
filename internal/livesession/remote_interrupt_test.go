@@ -260,11 +260,16 @@ func TestRemoteInterruptAuditRestartReadbackModeAndSymlink(t *testing.T) {
 	if err != nil || len(records) != 3 {
 		t.Fatalf("records=%d err=%v", len(records), err)
 	}
-	if st, err := os.Stat(p); err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("file mode=%v err=%v", st, err)
+	// Privacy is asserted through the platform's own notion of it rather than
+	// against 0600/0700: Windows has no mode bits to compare, so os.Stat
+	// synthesizes 0666/0777 there and a literal comparison would be
+	// unsatisfiable. project.VerifyPrivateFile/Dir is nine mode bits on unix and
+	// an enumerated DACL on Windows.
+	if err := project.VerifyPrivateFile(p); err != nil {
+		t.Fatalf("audit file is not private: %v", err)
 	}
-	if st, err := os.Stat(filepath.Dir(p)); err != nil || st.Mode().Perm() != 0o700 {
-		t.Fatalf("dir mode=%v err=%v", st, err)
+	if err := project.VerifyPrivateDir(filepath.Dir(p)); err != nil {
+		t.Fatalf("audit dir is not private: %v", err)
 	}
 	if _, err := OpenRemoteInterruptCoordinator(m, clock.Now, dir, nil); err != nil {
 		t.Fatalf("restart: %v", err)
@@ -275,7 +280,10 @@ func TestRemoteInterruptAuditRestartReadbackModeAndSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join(t.TempDir(), "victim"), filepath.Join(bad, "audit", remoteInterruptAuditFile)); err != nil {
-		t.Fatal(err)
+		// Creating a symlink on Windows needs SeCreateSymbolicLinkPrivilege,
+		// which an unelevated account does not hold. Same accommodation as
+		// winsec's own test rather than a platform skip.
+		t.Skipf("symlink unavailable, skipping the link half: %v", err)
 	}
 	if _, err := OpenRemoteInterruptCoordinator(m, clock.Now, bad, nil); err == nil {
 		t.Fatal("accepted audit symlink")

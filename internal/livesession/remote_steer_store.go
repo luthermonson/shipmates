@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/project"
 )
 
 const remoteSteerStoreFile = "remote-steer-operations.json"
@@ -44,7 +46,7 @@ func (c *RemoteSteerCoordinator) durableLocked() durableRemoteStore {
 }
 func (c *RemoteSteerCoordinator) loadRemoteSteerStore() error {
 	if err := secureStateDir(c.storeDir, true); err != nil {
-		return err
+		return errors.New("remote steer storage unavailable")
 	}
 	p := filepath.Join(c.storeDir, remoteSteerStoreFile)
 	b, err := os.ReadFile(p)
@@ -58,8 +60,7 @@ func (c *RemoteSteerCoordinator) loadRemoteSteerStore() error {
 	if json.Unmarshal(b, &d) != nil || d.Schema != 1 || len(d.Records) > RemoteSteerMaxRecords || len(d.Tombs) > remoteSteerMaxTombs {
 		return errors.New("remote steer storage unavailable")
 	}
-	st, err := os.Lstat(p)
-	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
+	if err := verifyPrivateStateFile(p); err != nil {
 		return errors.New("remote steer storage unavailable")
 	}
 	for _, x := range d.Records {
@@ -88,7 +89,7 @@ func (c *RemoteSteerCoordinator) persistLocked() error {
 		return nil
 	}
 	if err := secureStateDir(c.storeDir, true); err != nil {
-		return err
+		return errors.New("remote steer storage unavailable")
 	}
 	b, err := json.Marshal(c.durableLocked())
 	if err != nil {
@@ -97,7 +98,7 @@ func (c *RemoteSteerCoordinator) persistLocked() error {
 	b = append(b, '\n')
 	tmp := filepath.Join(c.storeDir, ".remote-steer.tmp")
 	dst := filepath.Join(c.storeDir, remoteSteerStoreFile)
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := createPrivateStateFile(tmp)
 	if err != nil {
 		return errors.New("remote steer storage unavailable")
 	}
@@ -108,64 +109,12 @@ func (c *RemoteSteerCoordinator) persistLocked() error {
 			_ = os.Remove(tmp)
 		}
 	}()
-	if _, err = f.Write(b); err != nil || f.Sync() != nil || f.Close() != nil || os.Rename(tmp, dst) != nil {
-		return errors.New("remote steer storage unavailable")
-	}
-	d, err := os.Open(c.storeDir)
-	if err != nil {
-		return errors.New("remote steer storage unavailable")
-	}
-	err = d.Sync()
-	_ = d.Close()
-	if err != nil {
+	// project.DurableRename is rename + fsync of the containing directory on
+	// unix and MOVEFILE_WRITE_THROUGH on Windows, which is the same guarantee
+	// reached two different ways — see project/durable_rename_windows.go.
+	if _, err = f.Write(b); err != nil || f.Sync() != nil || f.Close() != nil || project.DurableRename(tmp, dst) != nil {
 		return errors.New("remote steer storage unavailable")
 	}
 	ok = true
-	return nil
-}
-func secureStateDir(path string, create bool) error {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return errors.New("remote steer storage unavailable")
-	}
-	if create {
-		// Walk up to the filesystem root: the fixed point of filepath.Dir.
-		// Comparing against filepath.Separator alone never terminates on
-		// Windows, where the walk bottoms out at a volume root like `C:\`.
-		parts := []string{}
-		p := path
-		for {
-			parent := filepath.Dir(p)
-			if parent == p {
-				break
-			}
-			parts = append(parts, filepath.Base(p))
-			p = parent
-		}
-		for i := len(parts) - 1; i >= 0; i-- {
-			p = filepath.Join(p, parts[i])
-			st, err := os.Lstat(p)
-			if errors.Is(err, os.ErrNotExist) {
-				if os.Mkdir(p, 0o700) != nil {
-					return errors.New("remote steer storage unavailable")
-				}
-				st, err = os.Lstat(p)
-			}
-			if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
-				return errors.New("remote steer storage unavailable")
-			}
-		}
-	}
-	for p := path; ; p = filepath.Dir(p) {
-		st, err := os.Lstat(p)
-		if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
-			return errors.New("remote steer storage unavailable")
-		}
-		if p == path && st.Mode().Perm()&0o077 != 0 {
-			return errors.New("remote steer storage unavailable")
-		}
-		if p == filepath.Dir(p) {
-			break
-		}
-	}
 	return nil
 }

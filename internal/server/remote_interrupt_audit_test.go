@@ -1,11 +1,11 @@
 package server
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/luthermonson/shipmates/internal/livesession"
+	"github.com/luthermonson/shipmates/internal/project"
 )
 
 func TestProductionRemoteInterruptConstructorCreatesPrivateAudit(t *testing.T) {
@@ -18,8 +18,10 @@ func TestProductionRemoteInterruptConstructorCreatesPrivateAudit(t *testing.T) {
 		t.Fatal("production coordinator not installed")
 	}
 	p := filepath.Join(root, ".shipmates", "remote-interrupt", "audit", "remote-interrupt.audit")
-	st, err := os.Stat(p)
-	if err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("audit=%v err=%v", st, err)
+	// Nine mode bits on unix, an enumerated DACL on Windows — Windows has no
+	// mode bits, so os.Stat there reports a synthesized 0666 and a literal
+	// comparison could never hold.
+	if err := project.VerifyPrivateFile(p); err != nil {
+		t.Fatalf("audit file is not private: %v", err)
 	}
 }
