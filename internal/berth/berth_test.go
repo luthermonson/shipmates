@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/luthermonson/shipmates/internal/project"
@@ -145,28 +146,27 @@ func TestEnsureCreatesAndReusesBerth(t *testing.T) {
 	}
 
 	// Sanity: the berth is a real worktree of this repo.
-	out, err := exec.Command("git", "-C", dir, "worktree", "list").Output()
+	//
+	// Compared through comparablePath rather than by substring. Git prints the
+	// fully resolved path while Ensure returns the one it was given, so on a
+	// runner whose temp dir is a symlink (macOS) or an 8.3 short name (Windows)
+	// a raw match fails against a berth that is correctly registered — the same
+	// mistake this commit fixes in isWorktree.
+	out, err := exec.Command("git", "-C", dir, "worktree", "list", "--porcelain").Output()
 	if err != nil {
 		t.Fatalf("worktree list: %v", err)
 	}
-	if !containsPath(string(out), path) {
-		t.Errorf("berth not registered in worktree list:\n%s", out)
-	}
-}
-
-func containsPath(hay, needle string) bool {
-	hay = filepath.ToSlash(hay)
-	needle = filepath.ToSlash(needle)
-	return len(hay) >= len(needle) && (indexOf(hay, needle) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
+	registered := false
+	for _, line := range strings.Split(string(out), "\n") {
+		p, ok := strings.CutPrefix(line, "worktree ")
+		if ok && comparablePath(strings.TrimSpace(p)) == comparablePath(path) {
+			registered = true
+			break
 		}
 	}
-	return -1
+	if !registered {
+		t.Errorf("berth %q not registered in worktree list:\n%s", path, out)
+	}
 }
 
 func TestRemoveRefusesDirty(t *testing.T) {

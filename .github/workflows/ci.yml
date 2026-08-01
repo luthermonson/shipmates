@@ -1,0 +1,65 @@
+name: ci
+
+# Runs on every pull request and on pushes to main. Until this existed, nothing
+# in this repository was verified automatically: the only workflow was release,
+# which triggers on tags and runs GoReleaser without ever building or testing.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to a PR makes the previous run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Do not cancel the other platforms when one fails: which platforms fail
+      # is the most useful thing this matrix reports, and fail-fast throws that
+      # away. Much of the recent work in this repo is cross-platform porting.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Single source of truth: the version in go.mod, not a literal here
+          # that silently drifts from it.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # -count=1 defeats the test result cache, so a green run always means the
+      # tests actually executed on this runner.
+      - name: Test
+        run: go test -count=1 ./...
+
+  # Race detection is Linux-only here on purpose: it is slow, and running it on
+  # one platform catches the overwhelming majority of data races in portable Go.
+  race:
+    name: race (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
