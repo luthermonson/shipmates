@@ -40,6 +40,7 @@ func main() {
 			commands.Render(cat),
 			commands.Routing(cat),
 			commands.Open(),
+			commands.Bridge(),
 			commands.Ask(),
 			commands.Tell(),
 			commands.Show(),

@@ -168,17 +168,45 @@ func isWorktree(abs string) bool {
 	if err != nil {
 		return false
 	}
-	target := strings.ToLower(filepath.Clean(abs))
+	target := comparablePath(abs)
 	for _, line := range strings.Split(string(out), "\n") {
 		if !strings.HasPrefix(line, "worktree ") {
 			continue
 		}
 		p := strings.TrimPrefix(line, "worktree ")
-		if strings.ToLower(filepath.Clean(p)) == target {
+		if comparablePath(p) == target {
 			return true
 		}
 	}
 	return false
+}
+
+// comparablePath normalizes a path for comparison against what `git worktree
+// list` reports.
+//
+// Resolving symlinks is the whole point. Git reports the fully resolved path,
+// so comparing the string we happen to hold against git's answer says "not a
+// worktree" for a berth that is plainly registered:
+//
+//   - on macOS the temp dir is /var/folders/…, which is a symlink to
+//     /private/var/folders/…;
+//   - on Windows a path can arrive in 8.3 short form (RUNNER~1) whose long
+//     form is what git prints;
+//   - anywhere, a user whose project sits under a symlinked home or a
+//     directory junction hits the same mismatch.
+//
+// The failure mode is bad out of proportion to the cause: Ensure refuses with
+// "exists but is not a git worktree" and Remove refuses to clean up, so berths
+// are simply unusable on those paths.
+//
+// EvalSymlinks fails on a path that does not exist yet, which is normal here —
+// Ensure calls this before creating the berth. Fall back to the lexical form
+// in that case; a nonexistent path is not a registered worktree anyway.
+func comparablePath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return strings.ToLower(filepath.Clean(p))
 }
 
 // IsDirty reports whether the given worktree has uncommitted changes.
