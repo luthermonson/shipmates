@@ -186,9 +186,16 @@ func (b *Server) dispatchSweepLoop(ctx context.Context) {
 }
 
 // beadIDOK mirrors the captain-side guard: prefix-hash ids only, so a path
-// segment can never smuggle request-line framing into the tunnel proxy.
+// segment can never smuggle request-line framing into the tunnel proxy, nor
+// walk out of the segment it was interpolated into. url.PathEscape leaves "."
+// alone, so "/bead/../update" would reach the ship as a traversal if the
+// alphabet check were the only guard — real ids are hashes and never contain
+// "..", so rejecting it costs nothing.
 func beadIDOK(id string) bool {
 	if id == "" || len(id) > 64 {
+		return false
+	}
+	if strings.Contains(id, "..") {
 		return false
 	}
 	for _, r := range id {
