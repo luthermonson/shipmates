@@ -1,0 +1,124 @@
+name: ci
+
+# Runs on pull requests and on pushes to main, on the ephemerd self-hosted
+# fleet.
+#
+# The `feat/**` glob on pull_request is deliberate and borrowed from ephpm,
+# where its absence cost real work: a PR targeting a long-lived feature branch
+# gets NO checks at all without it, and a 1700-line change to the cluster
+# transport landed with nothing having so much as type-checked it. Shipmates
+# stacks work the same way, so stacked PRs need the same gate as main.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+  pull_request:
+    branches: [main, "feat/**"]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+
+# A new push to a PR makes the previous run's answer irrelevant — and on a small
+# fleet a superseded run is also a runner somebody else is queued behind.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: [self-hosted, "${{ matrix.os }}", "${{ matrix.arch }}"]
+    # A hung test must not pin a runner in a small fleet. The suite is a couple
+    # of minutes; 20 is generous and still bounded.
+    timeout-minutes: 20
+    strategy:
+      # Do not cancel the others when one fails: which platform failed is the
+      # most useful thing this matrix reports, and fail-fast throws that away.
+      # Concretely — the berth symlink bug failed on Windows and macOS only and
+      # passed everywhere else, including on both developer machines.
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x64
+          - os: linux
+            arch: arm64
+          - os: macos
+            arch: arm64
+          - os: windows
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Single source of truth: the version in go.mod, not a literal here
+          # that silently drifts from it.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # -count=1 defeats the test result cache, so a green run always means the
+      # tests actually executed on this runner.
+      - name: Test
+        run: go test -count=1 ./...
+
+  # Race detection on one platform: it is slow, and one platform catches the
+  # overwhelming majority of data races in portable Go. It has already earned
+  # its place — it found the remotedialer startPings/stopPings race that no
+  # amount of reading had.
+  race:
+    name: race (linux-x64)
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure a C toolchain
+        # -race requires cgo, which requires a C compiler. Neither machine used
+        # to author this project has one, so this job is the only place races
+        # are detected at all.
+        #
+        # Escalation is resolved at run time rather than assumed: some runners
+        # in this fleet come up as root without `sudo` installed, so a bare
+        # `sudo apt-get` exits 127 and reds out the job in seconds for reasons
+        # unrelated to the change under test. Borrowed from ephpm, which hit
+        # exactly that on more than one leg.
+        run: |
+          set -eu
+          if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then
+            echo "C compiler already present"
+            exit 0
+          fi
+          if ! command -v apt-get >/dev/null 2>&1; then
+            echo "::error::no C compiler and no apt-get; -race cannot run on this image"
+            exit 1
+          fi
+          if [ "$(id -u)" -eq 0 ]; then
+            SUDO=""
+          elif command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          else
+            echo "::error::not running as root and sudo is unavailable"
+            exit 1
+          fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends build-essential
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
