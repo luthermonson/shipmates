@@ -12,6 +12,19 @@
 // exact (threadId, turnId) binding, and an image attachment is revalidated by
 // localimage.go. See mediateApproval for why that changes the approval story
 // rather than just the import list.
+//
+// # Process containment
+//
+// The app-server child is spawned through [StartOptions.Supervisor], the
+// stdlib-only seam declared in supervise.go. Shipmates binds the portable Go
+// watchdog to it (RSS/CPU sampling plus native process-tree teardown — Unix
+// process groups, Windows Job Objects), which is the same containment every
+// other runtime gets and works identically on Linux, macOS and Windows.
+//
+// This replaced a Linux-only, cgroup-delegating launcher that was reachable
+// only from this transport, only under one config mode, and whose one real
+// test never ran anywhere. Portability was the whole point: containment that
+// exists on one kernel is containment most operators do not have.
 package codexapp
 
 import (
@@ -24,7 +37,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,20 +50,10 @@ const (
 	// in an ApprovalRequested event. A backend that wants to approve something
 	// larger than this is not describing a command a human can review.
 	maxApprovalCommandBytes = 16 << 10
-	// DefaultPreExecHelper is the immutable destination owned by the unified
-	// installer. An empty project override selects this path.
-	DefaultPreExecHelper = "/usr/libexec/shipmates/shipmates-cgroup-launcher"
 	// ManagedSessionEnvironment marks commands launched by a Shipmates-owned
 	// Codex session so orchestration commands cannot recursively launch crews.
 	ManagedSessionEnvironment = "SHIPMATES_MANAGED_SESSION"
 )
-
-func effectivePreExecHelper(configured string) string {
-	if strings.TrimSpace(configured) == "" {
-		return DefaultPreExecHelper
-	}
-	return configured
-}
 
 // Code is a stable, sanitized adapter failure code.
 type Code string
@@ -129,10 +131,19 @@ type StartOptions struct {
 	// TransportCodexHome supplies an explicitly provisioned, isolated Codex
 	// home to the trusted app-server transport. It is honored only with
 	// CredentialFree and does not restore HOME or ambient provider variables.
-	TransportCodexHome          string
-	RequireExecutionContainment bool
-	ExecutionID                 string
-	PreExecHelper               string
+	TransportCodexHome string
+	// Supervisor spawns the app-server child under the operator's containment
+	// policy — see supervise.go, and the binding in
+	// internal/runtime/codex/containment_bridge.go.
+	//
+	// A nil Supervisor starts the child directly, with no limits and no
+	// process-tree teardown. That is a real posture (containment mode "none",
+	// and the default for a caller that has resolved no config), not a
+	// degraded one, so it is spelled as the zero value rather than as a
+	// fallible fallback. The runtime layer reports Caps.Containment from
+	// Supervisor.Bounded, so an unsupervised transport does not claim to be
+	// contained.
+	Supervisor Supervisor
 }
 
 // Factory starts app-server transports.
@@ -141,24 +152,30 @@ type Factory struct{}
 // Adapter owns one Codex app-server child process and the JSON-RPC framing over
 // its stdio.
 type Adapter struct {
-	cmd            *exec.Cmd
-	pidfd          int
-	containment    *ExecutionContainment
-	containmentErr error
-	stdin          io.WriteCloser
-	stdout         io.ReadCloser
-	mu             sync.Mutex
-	nextID         int64
-	pending        map[int64]pendingCall
-	done           chan struct{}
-	waitDone       chan struct{}
-	terminal       error
-	closing        bool
-	closeOnce      sync.Once
-	shutdown       time.Duration
-	maxFrame       int
-	events         chan Event
-	approvals      map[string]pendingApproval
+	cmd   *exec.Cmd
+	pidfd int
+	// handle is the supervisor's grip on the child's process tree, nil when
+	// the transport was started without a Supervisor. When it is set the
+	// supervisor — not this adapter — owns cmd.Wait.
+	handle Handle
+	// superviseErr records a failure to tear the process tree down. A
+	// surviving descendant is a cleanup failure the owner has to hear about,
+	// not something to swallow.
+	superviseErr error
+	stdin        io.WriteCloser
+	stdout       io.ReadCloser
+	mu           sync.Mutex
+	nextID       int64
+	pending      map[int64]pendingCall
+	done         chan struct{}
+	waitDone     chan struct{}
+	terminal     error
+	closing      bool
+	closeOnce    sync.Once
+	shutdown     time.Duration
+	maxFrame     int
+	events       chan Event
+	approvals    map[string]pendingApproval
 }
 
 type pendingApproval struct {
@@ -309,15 +326,18 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 	if st, statErr := os.Stat(path); statErr != nil || !st.Mode().IsRegular() {
 		return nil, Capabilities{}, failure(Internal)
 	}
-	if opts.RequireExecutionContainment {
-		opts.PreExecHelper = effectivePreExecHelper(opts.PreExecHelper)
-		path, err = containedExecutable(path)
-		if err != nil {
-			return nil, Capabilities{}, failure(Internal)
-		}
-	}
 	cmd := exec.Command(path, argv[1:]...)
-	configureProcessGroup(cmd)
+	if opts.Supervisor == nil {
+		// Process-group ownership belongs to whoever tears the tree down. With
+		// a Supervisor that is the supervisor: its own prepare step does the
+		// platform setup (Setpgid on Unix, CREATE_SUSPENDED + a Job Object on
+		// Windows) and would be configuring the same SysProcAttr this call
+		// writes. Doing both would be two owners of one field, and on Windows
+		// it would race the suspended-start the Job Object assignment depends
+		// on. Unsupervised, there is no other owner, so the adapter keeps
+		// making the child a group leader as it always did.
+		configureProcessGroup(cmd)
+	}
 	cmd.Dir = opts.WorkingDirectory
 	cmd.Env = controlledEnvironment(opts.Environment, opts.CredentialFree, opts.TransportCodexHome)
 	stdin, err := cmd.StdinPipe()
@@ -332,33 +352,35 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 	if err != nil {
 		return nil, Capabilities{}, failure(Internal)
 	}
-	var containment *ExecutionContainment
-	var pidfd int
-	if opts.RequireExecutionContainment {
-		if opts.ExecutionID == "" {
-			return nil, Capabilities{}, failure(Internal)
-		}
-		containment, err = StartContainedWithHelperCurrent(opts.PreExecHelper, cmd, opts.ExecutionID)
+	// The spawn goes through the supervisor when there is one, so the child is
+	// inside its containment (process group / Job Object, and the operator's
+	// RSS and CPU limits) from the moment it runs any code.
+	var handle Handle
+	if opts.Supervisor != nil {
+		handle, err = opts.Supervisor.Start(cmd)
 		if err != nil {
 			return nil, Capabilities{}, failure(Internal)
 		}
-		pidfd = extractContainmentPidfd(containment)
-	} else {
-		if err := cmd.Start(); err != nil {
-			return nil, Capabilities{}, failure(Internal)
-		}
-		// A failure here is fatal on purpose: without a stable process identity
-		// the adapter cannot promise it will ever kill the right process. That
-		// makes openProcessIdentity load-bearing on every platform — see
-		// process_windows.go for what a stubbed implementation cost.
-		pidfd, err = openProcessIdentity(cmd.Process.Pid)
-		if err != nil {
+	} else if err := cmd.Start(); err != nil {
+		return nil, Capabilities{}, failure(Internal)
+	}
+	// A failure here is fatal on purpose: without a stable process identity
+	// the adapter cannot promise it will ever kill the right process. That
+	// makes openProcessIdentity load-bearing on every platform — see
+	// process_windows.go for what a stubbed implementation cost. It is opened
+	// identically under a supervisor, because the supervisor bounds the TREE
+	// while this names the ROOT, and Close still escalates through both.
+	pidfd, err := openProcessIdentity(cmd.Process.Pid)
+	if err != nil {
+		if handle != nil {
+			_ = handle.Close(context.Background())
+		} else {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
-			return nil, Capabilities{}, failure(Internal)
 		}
+		return nil, Capabilities{}, failure(Internal)
 	}
-	a := &Adapter{cmd: cmd, pidfd: pidfd, containment: containment, stdin: stdin, stdout: stdout, nextID: 1, pending: make(map[int64]pendingCall), done: make(chan struct{}), waitDone: make(chan struct{}), shutdown: opts.ShutdownTimeout, maxFrame: opts.MaxFrameBytes, events: make(chan Event, 256), approvals: make(map[string]pendingApproval)}
+	a := &Adapter{cmd: cmd, pidfd: pidfd, handle: handle, stdin: stdin, stdout: stdout, nextID: 1, pending: make(map[int64]pendingCall), done: make(chan struct{}), waitDone: make(chan struct{}), shutdown: opts.ShutdownTimeout, maxFrame: opts.MaxFrameBytes, events: make(chan Event, 256), approvals: make(map[string]pendingApproval)}
 	go drainBounded(stderr, opts.MaxStderrBytes)
 	go a.wait()
 	go a.readLoop()
@@ -399,47 +421,6 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 	return a, caps, nil
 }
 
-func containedExecutable(path string) (string, error) {
-	if filepath.Base(path) != "codex.js" {
-		return path, nil
-	}
-	var packageName, target string
-	switch runtime.GOOS + "/" + runtime.GOARCH {
-	case "linux/amd64":
-		packageName, target = "codex-linux-x64", "x86_64-unknown-linux-musl"
-	case "linux/arm64":
-		packageName, target = "codex-linux-arm64", "aarch64-unknown-linux-musl"
-	default:
-		return "", errors.New("contained Codex native binary is unsupported on this platform")
-	}
-	packageRoot := filepath.Dir(filepath.Dir(path))
-	candidates := []string{
-		filepath.Join(filepath.Dir(packageRoot), packageName, "vendor", target, "bin", "codex"),
-		filepath.Join(packageRoot, "vendor", target, "bin", "codex"),
-	}
-	for _, candidate := range candidates {
-		resolved, err := filepath.EvalSymlinks(candidate)
-		if err != nil {
-			continue
-		}
-		info, err := os.Stat(resolved)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-			continue
-		}
-		f, err := os.Open(resolved)
-		if err != nil {
-			continue
-		}
-		var magic [4]byte
-		_, readErr := io.ReadFull(f, magic[:])
-		_ = f.Close()
-		if readErr == nil && string(magic[:]) == "\x7fELF" {
-			return resolved, nil
-		}
-	}
-	return "", errors.New("contained Codex native binary is unavailable")
-}
-
 // ProcessGroupHandle is the narrow production cleanup seam used by bounded
 // advisory workers. It exposes no command, prompt, PID, or protocol data.
 type ProcessGroupHandle interface {
@@ -458,6 +439,10 @@ func (a *Adapter) ProcessGroupHandle() ProcessGroupHandle {
 	return &processGroupHandle{adapter: a}
 }
 
+// GracefulTerminate asks the ROOT process to stop, through the stable process
+// identity. It deliberately does not go through the supervisor: the supervisor
+// tears down the whole tree, which is the escalation ForceKill performs, not
+// the cooperative first step.
 func (h *processGroupHandle) GracefulTerminate(ctx context.Context) error {
 	if h == nil || h.adapter == nil || h.adapter.pidfd <= 0 {
 		return failure(Internal)
@@ -468,19 +453,31 @@ func (h *processGroupHandle) GracefulTerminate(ctx context.Context) error {
 	if !waitProcess(ctx, h.adapter.waitDone, h.adapter.shutdown) {
 		return failure(CleanupFailed)
 	}
-	if h.adapter.containmentErr != nil {
-		return failure(CleanupFailed)
-	}
-	return nil
+	return h.superviseResult()
 }
 
+// ForceKill tears down the whole process tree and then the root.
+//
+// The supervisor goes first because it is the only participant that can reach
+// the children the app-server spawned; the pidfd/handle kill that follows is
+// what guarantees the root itself is signalled even if the tree mechanism was
+// degraded. This is the exact shape the deleted cgroup path had (kill the
+// cgroup, then signal the process identity), with a portable Watcher in place
+// of a Linux-only kernel scope.
 func (h *processGroupHandle) ForceKill(ctx context.Context) error {
 	if h == nil || h.adapter == nil || h.adapter.pidfd <= 0 {
 		return failure(Internal)
 	}
-	if h.adapter.containment != nil {
-		if err := h.adapter.containment.killCgroup(); err != nil {
-			return failure(CleanupFailed)
+	if a := h.adapter; a.handle != nil {
+		// An already-expired deadline tells the supervisor to skip its own
+		// cooperative grace period: Adapter.Close has already closed stdin and
+		// spent that time on GracefulTerminate. Waiting is this method's job,
+		// through waitDone below, so the deadline error is not the answer.
+		killCtx, cancel := context.WithDeadline(context.Background(), time.Now())
+		err := a.handle.Close(killCtx)
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			a.setSuperviseErr(err)
 		}
 	}
 	if err := signalProcessIdentity(h.adapter.pidfd, true); err != nil {
@@ -496,7 +493,14 @@ func (h *processGroupHandle) Wait(ctx context.Context) error {
 	if !waitProcess(ctx, h.adapter.waitDone, h.adapter.shutdown) {
 		return failure(CleanupFailed)
 	}
-	if h.adapter.containmentErr != nil {
+	return h.superviseResult()
+}
+
+// superviseResult reports a tree-teardown failure as CleanupFailed. A
+// descendant that outlived the teardown is exactly the condition the owner
+// must not be told was a clean shutdown.
+func (h *processGroupHandle) superviseResult() error {
+	if h.adapter.superviseError() != nil {
 		return failure(CleanupFailed)
 	}
 	return nil
@@ -539,11 +543,35 @@ func drainBounded(r io.Reader, limit int) {
 	_, _ = io.Copy(io.Discard, r)
 }
 
+// setSuperviseErr records the first tree-teardown failure.
+func (a *Adapter) setSuperviseErr(err error) {
+	a.mu.Lock()
+	if a.superviseErr == nil {
+		a.superviseErr = err
+	}
+	a.mu.Unlock()
+}
+
+func (a *Adapter) superviseError() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.superviseErr
+}
+
+// wait reaps the child and closes waitDone.
+//
+// Which reap depends on who owns the process: a Supervisor calls cmd.Wait
+// itself and publishes the terminal event on Done(), so calling cmd.Wait here
+// too would be a double-wait. Either way os/exec closes the parent ends of the
+// pipes when the wait returns, which is what readLoop's os.ErrClosed handling
+// depends on.
 func (a *Adapter) wait() {
-	_ = a.cmd.Wait()
-	if a.containment != nil {
-		a.containmentErr = a.containment.Close()
-	} else if a.pidfd > 0 {
+	if a.handle != nil {
+		<-a.handle.Done()
+	} else {
+		_ = a.cmd.Wait()
+	}
+	if a.pidfd > 0 {
 		_ = closeProcessIdentity(a.pidfd)
 	}
 	close(a.waitDone)
@@ -1175,13 +1203,14 @@ func (a *Adapter) fail(err error) {
 // one: the children are spawned with pipes and no console, so there is no SIGINT
 // to deliver. GracefulTerminate is therefore a documented no-op there and this
 // sequence escalates to ForceKill when the child ignores the closed pipe.
+//
+// ForceKill is where the supervisor's tree teardown happens — process group on
+// Unix, Job Object on Windows — so a child that ignores both the closed pipe
+// and the cooperative signal takes its descendants with it.
 func (a *Adapter) Close(ctx context.Context) error {
 	a.closeOnce.Do(func() { a.mu.Lock(); a.closing = true; _ = a.stdin.Close(); a.mu.Unlock() })
 	if waitProcess(ctx, a.waitDone, a.shutdown) {
-		if a.containmentErr != nil {
-			return failure(CleanupFailed)
-		}
-		return nil
+		return a.cleanupResult()
 	}
 	h := a.ProcessGroupHandle()
 	if h != nil {
@@ -1190,10 +1219,7 @@ func (a *Adapter) Close(ctx context.Context) error {
 		_ = a.cmd.Process.Signal(os.Interrupt)
 	}
 	if waitProcess(ctx, a.waitDone, a.shutdown) {
-		if a.containmentErr != nil {
-			return failure(CleanupFailed)
-		}
-		return nil
+		return a.cleanupResult()
 	}
 	if h != nil {
 		_ = h.ForceKill(context.Background())
@@ -1201,12 +1227,16 @@ func (a *Adapter) Close(ctx context.Context) error {
 		_ = a.cmd.Process.Kill()
 	}
 	if waitProcess(context.Background(), a.waitDone, a.shutdown) {
-		if a.containmentErr != nil {
-			return failure(CleanupFailed)
-		}
-		return nil
+		return a.cleanupResult()
 	}
 	return failure(CleanupFailed)
+}
+
+func (a *Adapter) cleanupResult() error {
+	if a.superviseError() != nil {
+		return failure(CleanupFailed)
+	}
+	return nil
 }
 
 func waitProcess(ctx context.Context, done <-chan struct{}, limit time.Duration) bool {

@@ -18,8 +18,11 @@ import (
 // accepted for parity with Windows, where it programs Job Object caps; on
 // Linux every cap is enforced by the sampler.
 //
-// TODO: when a cgroup Watcher lands, MaxRSSBytes and MaxProcesses should be
-// delegated to memory.max and pids.max instead of polled.
+// Sampling is the deliberate choice, not a placeholder for cgroup delegation:
+// shipmates dropped its Linux-only cgroup containment precisely so every
+// platform gets the same bounds. Delegating memory.max and pids.max here would
+// need privileges or a delegated scope, and would make Linux the only place
+// enforcement behaves differently.
 func prepare(cmd *exec.Cmd, _ containment.Limits) error {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}

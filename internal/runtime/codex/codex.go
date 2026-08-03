@@ -3,15 +3,18 @@
 // to the interface already (StartThread → StartSession, StartTurn →
 // SendTurn, etc.); this file is thin glue plus event normalization.
 //
-// Containment posture: codex self-contains inside codexapp.Adapter via
-// codexapp.StartOptions.RequireExecutionContainment (kernel-enforced on Linux
-// through cgroups). The runtime.Runtime layer does NOT double-wrap here. The
-// claude runtime, by contrast, routes its exec.Cmd spawn through a containment
-// watcher because there is no equivalent in-adapter enforcement.
+// Containment posture: codex spawns its app-server through the same
+// containment.Watcher every other shipmates runtime uses. The factory resolves
+// the operator's posture into a Watcher plus Limits and hands it here as
+// codexapp.StartOptions.Supervisor via [Contain]; the transport starts the
+// child inside it, so operator RSS/CPU limits and native process-tree teardown
+// (Unix process groups, Windows Job Objects) apply on Linux, macOS and Windows
+// alike.
 //
-// TODO(cgroup-watcher): if a future codexapp surface lets us intercept
-// child-process spawns, route them through the shared containment watcher too so
-// the two runtimes share one containment story.
+// This replaced a Linux-only cgroup-delegating launcher that lived inside
+// codexapp and was reachable from no other runtime. The two containment
+// stories are now one, and it is the portable one — containment that exists
+// only on one kernel is containment most operators do not have.
 package codex
 
 import (
@@ -28,11 +31,12 @@ import (
 type Runtime struct {
 	adapter *codexapp.Adapter
 	caps    codexapp.Capabilities
-	// contained records whether the transport was started under kernel-enforced
-	// execution containment. Factory.Start fails outright when containment was
-	// requested and could not be established, so a live Runtime with this set is
-	// genuinely contained — which is what lets Caps.Containment be truthful
-	// instead of hardcoded false.
+	// contained records whether the transport was started under a supervisor
+	// that actually bounds the process — see codexapp.Supervisor.Bounded.
+	// codexapp.Factory.Start fails outright when the supervisor cannot bring
+	// the child up inside its containment, so a live Runtime with this set is
+	// genuinely contained, which is what lets Caps.Containment be truthful
+	// instead of hardcoded.
 	contained bool
 	stream    chan runtime.Event
 	stopFan   chan struct{}
@@ -54,7 +58,7 @@ func New(ctx context.Context, opts codexapp.StartOptions) (*Runtime, error) {
 	r := &Runtime{
 		adapter:   adapter,
 		caps:      caps,
-		contained: opts.RequireExecutionContainment,
+		contained: opts.Supervisor != nil && opts.Supervisor.Bounded(),
 		stream:    make(chan runtime.Event, 64),
 		stopFan:   make(chan struct{}),
 		sessions:  map[string]*session{},
@@ -85,8 +89,11 @@ func (r *Runtime) Capabilities() runtime.Caps {
 		// nothing had been.
 		Attachments: r.caps.LocalImage,
 		Refusal:     r.caps.RequestRefusal,
-		// Containment is kernel-enforced by the transport when the caller asked
-		// for it; see the field comment on Runtime.contained.
+		// Containment is true when the app-server was spawned through a watcher
+		// that bounds it — operator limits plus process-tree teardown. See the
+		// field comment on Runtime.contained and Contain's Bounded, which is
+		// where the "none" watcher is excluded so this cannot read true for a
+		// posture that bounds nothing.
 		//
 		// The grain is coarser than the interface's: containment is decided once
 		// for the transport in New, not per session, so SessionSpec.ContainExec is

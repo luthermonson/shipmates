@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -134,6 +136,17 @@ func TestFakeAppServerProcess(t *testing.T) {
 	}
 	if scenario == "ignore-close" {
 		select {}
+	}
+	// "stay-alive" differs from "ignore-close" in two ways that matter to the
+	// escalation tests: it sleeps rather than parking on an empty select (so
+	// the runtime's deadlock detector cannot end the process for us), and it
+	// ignores SIGINT (so GracefulTerminate genuinely does not finish the job on
+	// Unix). Together they guarantee Close has to escalate all the way to the
+	// supervisor's tree teardown.
+	if scenario == "stay-alive" {
+		signal.Ignore(os.Interrupt)
+		time.Sleep(5 * time.Minute)
+		os.Exit(0)
 	}
 	// A thread/turn round trip driven entirely by the fixture, so the happy path
 	// is covered without a real codex binary on PATH.
@@ -376,14 +389,110 @@ func TestProcessGroupHandleTerminatesAndReapsChild(t *testing.T) {
 	}
 }
 
-func TestProcessGroupHandleReportsContainmentCleanupFailure(t *testing.T) {
+// A tree the supervisor could not tear down must be reported as CleanupFailed,
+// never as a clean shutdown — a surviving descendant is the whole reason the
+// transport is supervised. This replaces the equivalent assertion the deleted
+// cgroup path carried; the seam moved, the guarantee did not.
+func TestProcessGroupHandleReportsSupervisorCleanupFailure(t *testing.T) {
 	done := make(chan struct{})
 	close(done)
-	a := &Adapter{waitDone: done, shutdown: time.Millisecond, containmentErr: errors.New("contained descendants remain")}
+	_, stdin := ioPipe(t)
+	a := &Adapter{waitDone: done, shutdown: time.Millisecond, stdin: stdin}
+	a.setSuperviseErr(errors.New("supervised descendants remain"))
 	if err := a.ProcessGroupHandle().Wait(context.Background()); ErrorCode(err) != CleanupFailed {
 		t.Fatalf("wait error code = %q, want %q (err=%v)", ErrorCode(err), CleanupFailed, err)
 	}
+	if err := a.Close(context.Background()); ErrorCode(err) != CleanupFailed {
+		t.Fatalf("close error code = %q, want %q (err=%v)", ErrorCode(err), CleanupFailed, err)
+	}
 }
+
+// ForceKill must record a supervisor teardown failure rather than swallow it,
+// so the CleanupFailed above can ever be reached in production.
+func TestForceKillRecordsSupervisorTeardownFailure(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	boom := errors.New("job object survived")
+	a := &Adapter{
+		waitDone: done,
+		shutdown: time.Millisecond,
+		pidfd:    liveProcessIdentity(t),
+		handle:   &stubHandle{closeErr: boom},
+	}
+	if err := a.ProcessGroupHandle().ForceKill(context.Background()); ErrorCode(err) != CleanupFailed {
+		t.Fatalf("force kill error code = %q, want %q (err=%v)", ErrorCode(err), CleanupFailed, err)
+	}
+	if a.superviseError() == nil {
+		t.Fatal("supervisor teardown failure was swallowed")
+	}
+}
+
+// The deadline ForceKill hands the supervisor is already expired on purpose:
+// it means "skip your cooperative phase, Adapter.Close already spent it". A
+// supervisor reporting that expiry back is not a cleanup failure.
+func TestForceKillDoesNotTreatItsOwnDeadlineAsCleanupFailure(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	a := &Adapter{
+		waitDone: done,
+		shutdown: time.Millisecond,
+		pidfd:    liveProcessIdentity(t),
+		handle:   &stubHandle{closeErr: context.DeadlineExceeded},
+	}
+	if err := a.ProcessGroupHandle().ForceKill(context.Background()); err != nil {
+		t.Fatalf("force kill = %v, want nil", err)
+	}
+	if a.superviseError() != nil {
+		t.Fatalf("own deadline recorded as a teardown failure: %v", a.superviseError())
+	}
+}
+
+// TestCodexAppSleeperProcess is a child fixture, not a test: re-exec of this
+// binary with the guard set produces a process that stays alive until it is
+// killed. It gives the ForceKill tests a real process identity to signal
+// instead of the test process's own.
+func TestCodexAppSleeperProcess(t *testing.T) {
+	if os.Getenv("SHIPMATES_CODEXAPP_SLEEPER") != "1" {
+		return
+	}
+	time.Sleep(5 * time.Minute)
+}
+
+// liveProcessIdentity spawns a sleeper child and returns a real identity for
+// it, so signalProcessIdentity has something it can genuinely terminate on
+// every platform.
+func liveProcessIdentity(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCodexAppSleeperProcess$")
+	cmd.Env = append(os.Environ(), "SHIPMATES_CODEXAPP_SLEEPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleeper: %v", err)
+	}
+	fd, err := openProcessIdentity(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		t.Fatalf("openProcessIdentity: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = closeProcessIdentity(fd)
+	})
+	return fd
+}
+
+// stubHandle is a Handle whose process is already gone; only Close's error
+// matters to the tests above.
+type stubHandle struct{ closeErr error }
+
+func (*stubHandle) Pid() int { return 0 }
+func (*stubHandle) Done() <-chan Terminal {
+	ch := make(chan Terminal)
+	close(ch)
+	return ch
+}
+func (h *stubHandle) Close(context.Context) error { return h.closeErr }
 
 func TestCorrelationRejectsDuplicateAndHandlesOutOfOrder(t *testing.T) {
 	serverRead, clientWrite := ioPipe(t)
@@ -700,100 +809,188 @@ func TestCredentialFreeEnvironmentAllowsOnlyExplicitTransportCodexHome(t *testin
 	}
 }
 
-func TestContainedExecutableResolvesNativeCodexPackage(t *testing.T) {
-	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
-		t.Skip("native Codex containment mapping is Linux-only")
-	}
-	root := t.TempDir()
-	script := filepath.Join(root, "node_modules", "@openai", "codex", "bin", "codex.js")
-	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(script, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	packageName, target := "codex-linux-x64", "x86_64-unknown-linux-musl"
-	if runtime.GOARCH == "arm64" {
-		packageName, target = "codex-linux-arm64", "aarch64-unknown-linux-musl"
-	}
-	native := filepath.Join(root, "node_modules", "@openai", packageName, "vendor", target, "bin", "codex")
-	if err := os.MkdirAll(filepath.Dir(native), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(native, append([]byte("\x7fELF"), make([]byte, 64)...), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	got, err := containedExecutable(script)
-	if err != nil || got != native {
-		t.Fatalf("contained executable = %q, %v; want %q", got, err, native)
-	}
+// --- Supervisor seam -------------------------------------------------------
+//
+// These cover the wiring only: that the transport spawns through the
+// Supervisor, that it hands over a cmd it has not already configured, and that
+// Adapter.Close really reaches the supervisor's tree teardown. Proof that the
+// containment BOUNDS anything lives in internal/runtime/codex, which is the
+// layer allowed to import the watchdog.
+
+// plainSupervisor is a minimal Supervisor: it starts the process and reaps it,
+// exactly as the real bridge does, without any containment of its own.
+type plainSupervisor struct {
+	bounded bool
+
+	mu                sync.Mutex
+	starts            int
+	sysProcAttrWasNil bool
+	handle            *plainHandle
 }
 
-// Containment is cgroup-based and therefore Linux-only by nature. Everywhere
-// else the fallback must be a loud refusal, never a silent pass that would let a
-// caller believe an uncontained child was contained.
-func TestContainmentRefusedOffLinux(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		t.Skip("containment is implemented on linux")
+func (s *plainSupervisor) Bounded() bool { return s.bounded }
+
+func (s *plainSupervisor) Start(cmd *exec.Cmd) (Handle, error) {
+	s.mu.Lock()
+	s.starts++
+	s.sysProcAttrWasNil = cmd.SysProcAttr == nil
+	s.mu.Unlock()
+	if err := cmd.Start(); err != nil {
+		return nil, err
 	}
-	if _, err := StartContainedWithHelperCurrent(DefaultPreExecHelper, exec.Command(os.Args[0]), "id"); err == nil {
-		t.Fatal("containment must not report success on a platform without cgroups")
+	h := &plainHandle{cmd: cmd, done: make(chan Terminal, 1), exited: make(chan struct{})}
+	go h.wait()
+	s.mu.Lock()
+	s.handle = h
+	s.mu.Unlock()
+	return h, nil
+}
+
+type plainHandle struct {
+	cmd    *exec.Cmd
+	done   chan Terminal
+	exited chan struct{}
+	once   sync.Once
+	closes atomic.Int32
+}
+
+func (h *plainHandle) Pid() int              { return h.cmd.Process.Pid }
+func (h *plainHandle) Done() <-chan Terminal { return h.done }
+func (h *plainHandle) closeCount() int       { return int(h.closes.Load()) }
+
+func (h *plainHandle) Close(ctx context.Context) error {
+	h.closes.Add(1)
+	if h.cmd.Process != nil {
+		_ = h.cmd.Process.Kill()
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-h.exited:
+	case <-ctx.Done():
+	}
+	return nil
+}
+
+func (h *plainHandle) wait() {
+	err := h.cmd.Wait()
+	close(h.exited)
+	ev := Terminal{Reason: "exited", ExitCode: -1, At: time.Now()}
+	if h.cmd.ProcessState != nil {
+		ev.ExitCode = h.cmd.ProcessState.ExitCode()
+	}
+	if err != nil {
+		ev.Detail = err.Error()
+	}
+	h.once.Do(func() { h.done <- ev; close(h.done) })
+}
+
+// The transport must spawn through the Supervisor rather than beside it, and
+// it must not have configured the process group itself: the supervisor's own
+// platform setup is the single owner of SysProcAttr. Two owners would
+// double-configure on Unix and race the suspended start a Windows Job Object
+// assignment depends on.
+func TestStartSpawnsThroughTheSupervisorWhichOwnsTheProcessGroup(t *testing.T) {
+	sup := &plainSupervisor{bounded: true}
 	opts := fakeOptions(t, "ok")
-	opts.RequireExecutionContainment = true
-	opts.ExecutionID = "probe"
-	if _, _, err := (Factory{}).Start(context.Background(), opts); err == nil {
-		t.Fatal("Start must refuse a contained transport where containment is unavailable")
+	opts.Supervisor = sup
+	a, _, err := Factory{}.Start(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close(context.Background()) }()
+	sup.mu.Lock()
+	starts, sawNil := sup.starts, sup.sysProcAttrWasNil
+	sup.mu.Unlock()
+	if starts != 1 {
+		t.Fatalf("supervisor Start calls = %d, want 1", starts)
+	}
+	if !sawNil {
+		t.Fatal("adapter pre-configured SysProcAttr; the supervisor must be the only owner")
+	}
+	if a.handle == nil {
+		t.Fatal("adapter did not retain the supervisor handle")
+	}
+	// The process identity is still opened under a supervisor: it names the
+	// ROOT, which is what Close escalates through, while the supervisor bounds
+	// the tree.
+	if a.pidfd <= 0 {
+		t.Fatalf("process identity = %d, want a real handle/descriptor", a.pidfd)
 	}
 }
 
-func TestContainedRealCodexTransport(t *testing.T) {
-	if os.Getenv("SHIPMATES_REAL_CONTAINMENT_TEST") != "1" {
-		t.Skip("set SHIPMATES_REAL_CONTAINMENT_TEST=1 inside a delegated Linux scope")
-	}
-	home, err := os.UserHomeDir()
+// Without a Supervisor the adapter remains the process-group owner, so the
+// unsupervised posture is not a regression in teardown reach.
+func TestStartWithoutSupervisorKeepsConfiguringItsOwnProcessGroup(t *testing.T) {
+	a, _, err := Factory{}.Start(context.Background(), fakeOptions(t, "ok"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer func() { _ = a.Close(context.Background()) }()
+	if a.handle != nil {
+		t.Fatal("no supervisor was configured but the adapter recorded a handle")
+	}
+	if runtime.GOOS != "windows" && a.cmd.SysProcAttr == nil {
+		t.Fatal("unsupervised spawn left SysProcAttr unset; nobody owns the process group")
+	}
+}
+
+// A child that ignores the closed stdin and the cooperative signal must reach
+// the supervisor's tree teardown. This is the production path the whole change
+// exists to create: without it Close would kill only the root and leave the
+// app-server's descendants running.
+func TestCloseEscalatesIntoSupervisorTreeTeardown(t *testing.T) {
+	sup := &plainSupervisor{bounded: true}
+	opts := fakeOptions(t, "stay-alive")
+	opts.Supervisor = sup
+	a, _, err := Factory{}.Start(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	wrapper, err := exec.LookPath("codex")
-	if err != nil {
+	if err := a.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
-	wrapper, err = filepath.EvalSymlinks(wrapper)
-	if err != nil {
-		t.Fatal(err)
+	sup.mu.Lock()
+	h := sup.handle
+	sup.mu.Unlock()
+	if h == nil {
+		t.Fatal("supervisor never produced a handle")
 	}
-	native, err := containedExecutable(wrapper)
-	if err != nil {
-		t.Fatal(err)
+	if h.closeCount() == 0 {
+		t.Fatal("Close never reached the supervisor's tree teardown")
 	}
-	probe := exec.Command(native, "--version")
-	probe.Env = controlledEnvironment(nil, true, filepath.Join(home, ".codex"))
-	var probeStderr bytes.Buffer
-	probe.Stderr = &probeStderr
-	contained, err := StartContainedWithHelperCurrent("/usr/libexec/shipmates/shipmates-cgroup-launcher", probe, "native-probe")
-	if err != nil {
-		t.Fatalf("native containment: %v; helper stderr: %q", err, probeStderr.String())
+	select {
+	case <-a.waitDone:
+	default:
+		t.Fatal("child was not reaped")
 	}
-	_ = probe.Wait()
-	if err := contained.Close(); err != nil {
-		t.Fatalf("native containment cleanup: %v", err)
+}
+
+// The supervisor owns cmd.Wait. If the adapter waited too, one of the two
+// would get "wait: no child processes" and the reap would be reported wrong;
+// the terminal event on Done() is the adapter's only reap signal.
+func TestSupervisedAdapterReapsThroughTheHandleNotCmdWait(t *testing.T) {
+	sup := &plainSupervisor{bounded: true}
+	opts := fakeOptions(t, "eof")
+	opts.Supervisor = sup
+	// Scenario "eof" makes the child exit right after the handshake read, so
+	// Start fails — but the reap must still complete and be observable.
+	_, _, err := Factory{}.Start(context.Background(), opts)
+	if ErrorCode(err) != UnexpectedEOF {
+		t.Fatalf("error = %v, want %q", err, UnexpectedEOF)
 	}
-	adapter, _, err := (Factory{}).Start(ctx, StartOptions{
-		WorkingDirectory:            t.TempDir(),
-		CredentialFree:              true,
-		TransportCodexHome:          filepath.Join(home, ".codex"),
-		RequireExecutionContainment: true,
-		ExecutionID:                 "real-codex-probe",
-		// Empty configuration must resolve to the unified installer's helper.
-		PreExecHelper: "",
-	})
-	if err != nil {
-		t.Fatal(err)
+	sup.mu.Lock()
+	h := sup.handle
+	sup.mu.Unlock()
+	if h == nil {
+		t.Fatal("supervisor never produced a handle")
 	}
-	if err := adapter.Close(ctx); err != nil {
-		t.Fatal(err)
+	select {
+	case <-h.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("supervisor's cmd.Wait never returned")
 	}
 }

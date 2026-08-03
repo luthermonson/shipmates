@@ -166,7 +166,7 @@ func TestContain_NilWatcherFallsBackToDirect(t *testing.T) {
 // TestContain_PropagatesStartFailure proves a watcher that refuses the spawn
 // surfaces its error rather than a nil handle.
 func TestContain_PropagatesStartFailure(t *testing.T) {
-	boom := errors.New("cgroup delegation unavailable")
+	boom := errors.New("containment unavailable")
 	sup := Contain(refusingWatcher{err: boom}, containment.Limits{})
 	h, err := sup.Start(exec.Command("irrelevant"))
 	if !errors.Is(err, boom) {

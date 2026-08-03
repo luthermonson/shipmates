@@ -45,9 +45,9 @@ import (
 // the operator configured and hands back a Handle for observing and tearing
 // down the resulting process tree.
 //
-// Start must attach its containment (process group, job object, cgroup
-// delegation) and then start the process; the caller has already wired
-// cmd.Stdin/Stdout/Stderr and must not have them replaced.
+// Start must attach its containment (process group, job object) and then start
+// the process; the caller has already wired cmd.Stdin/Stdout/Stderr and must
+// not have them replaced.
 type Supervisor interface {
 	Start(cmd *exec.Cmd) (Handle, error)
 }

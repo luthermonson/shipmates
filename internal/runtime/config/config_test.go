@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -304,6 +305,29 @@ func TestResolve_ContainmentModeValidated(t *testing.T) {
 	_, err := Resolve("", ProjectFile{}, UserFile{Containment: Containment{Mode: "sandbox"}})
 	if err == nil {
 		t.Fatal("expected an error for an unknown containment mode")
+	}
+}
+
+// `mode: cgroup` was accepted for as long as the Linux-only cgroup launcher
+// existed. Now that it is gone, a config naming it must FAIL rather than
+// resolve to something else: an operator who chose kernel-enforced containment
+// and quietly received polling containment has been told a lie about their own
+// deployment. The error has to name the replacement, because "unknown mode"
+// would send someone who once had this working looking for a typo.
+func TestResolve_CgroupModeIsRefusedWithAnActionableError(t *testing.T) {
+	for _, spelling := range []string{"cgroup", "  CGroup "} {
+		got, err := Resolve("", ProjectFile{}, UserFile{Containment: Containment{Mode: spelling}})
+		if err == nil {
+			t.Fatalf("mode %q resolved to %+v; cgroup containment no longer exists", spelling, got.Containment)
+		}
+		for _, want := range []string{"cgroup", "removed", "watchdog"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("mode %q: error %q does not mention %q", spelling, err, want)
+			}
+		}
+	}
+	if slices.Contains(ContainmentModes, "cgroup") {
+		t.Error("cgroup is still advertised as an accepted mode")
 	}
 }
 

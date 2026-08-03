@@ -20,7 +20,7 @@ func TestCapabilities_AreExactlyWhatIsImplemented(t *testing.T) {
 		Steer:       true,  // mid-turn user message folded into the live turn
 		Attachments: true,  // image content blocks; anything else is an error
 		Refusal:     false, // claude surfaces refusals as ordinary text
-		Containment: false, // SessionSpec.ContainExec (cgroup) is not honored
+		Containment: false, // SessionSpec.ContainExec is not honored
 		Environment: true,  // SessionSpec.Environment reaches every spawn
 		Approvals:   true,  // can_use_tool mediated through ResolveApproval
 	}
@@ -126,7 +126,7 @@ func TestSendTurn_RejectsUnencodableAttachment(t *testing.T) {
 }
 
 // TestContainExecIsIgnoredNotHonored keeps Caps.Containment = false honest in
-// the other direction: a spec asking for cgroup containment is accepted and
+// the other direction: a spec asking for contained execution is accepted and
 // run WITHOUT it, exactly as a false capability advertises. If this package
 // ever starts honoring ContainExec, Caps.Containment has to flip with it.
 func TestContainExecIsIgnoredNotHonored(t *testing.T) {

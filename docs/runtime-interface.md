@@ -136,7 +136,7 @@ runtimes:
     api_key_env: INFERENCE_TOKEN          # the NAME of the env var, never the key
 
 containment:
-  mode: watchdog          # none | watchdog | cgroup
+  mode: watchdog          # none | watchdog
   memory_limit_mb: 8192   # 0 = uncapped
   cpu_limit_seconds: 0
   max_processes: 0        # kernel-enforced on Windows only
@@ -164,7 +164,12 @@ runtime spawns.
 | --- | --- |
 | `watchdog` | **default.** Native process-tree teardown — Unix process groups, Windows Job Objects — plus a sampler that reads RSS and CPU time every `poll_interval_ms` and kills the tree on breach. Zero privileges, no install step. On Windows the memory and process-count caps are additionally programmed on the Job Object, so the kernel enforces them with no polling gap. |
 | `none` | No bounds. An explicit escape hatch, and a real implementation rather than a nil watcher, so "containment off" is a choice in config instead of a special case in every caller. |
-| `cgroup` | Kernel-enforced, Linux. Meaningful for codex, which contains its own execution through `codexapp`. For runtimes that go through a `containment.Watcher` there is no cgroup implementation yet, so it degrades to `watchdog` — with a warning, because an operator who asked for kernel enforcement should not quietly believe they got it. |
+
+Every process-spawning runtime goes through the same watcher. `claude` binds it
+as its `Supervisor`; `codex` binds it into `codexapp.StartOptions.Supervisor`
+through `codex.Contain`, so the app-server child and everything it spawns are
+inside one process group (or one Job Object) with the operator's limits on it.
+`openai` spawns nothing and reports `Caps.Containment: false`.
 
 The default imposes **no resource caps**. `watchdog` with an empty budget buys
 process-tree teardown and nothing else, which is the right default: it fixes
@@ -172,6 +177,21 @@ orphaned children without inventing a memory limit nobody asked for.
 
 `Limits` treats a zero field as unlimited, and a watchdog with no limits starts
 no sampler at all rather than polling for a breach that cannot happen.
+
+### The removed `cgroup` mode
+
+`mode: cgroup` used to select a Linux-only, kernel-enforced containment path
+that lived inside `internal/codexapp`, was reachable from no other runtime, and
+whose only real test was gated behind an environment variable and had therefore
+never run in CI. It has been **removed**, implementation and mode alike.
+
+A config that still names it now **fails to resolve**, with an error pointing at
+`watchdog`. It is deliberately not accepted-and-degraded: an operator who chose
+kernel enforcement and silently received polling enforcement has been told
+something untrue about their own deployment. Limits carry over unchanged —
+`memory_limit_mb`, `cpu_limit_seconds` and `max_processes` all mean the same
+thing under `watchdog`, and on Windows the memory and process-count caps are
+still kernel-enforced through the Job Object.
 
 ## How `--runtime` is honored
 

@@ -91,7 +91,7 @@ type UserFile struct {
 // only — see the trust-boundary note on this package.
 //
 //	containment:
-//	  mode: watchdog          # none | watchdog | cgroup
+//	  mode: watchdog          # none | watchdog
 //	  memory_limit_mb: 8192   # 0 = uncapped
 //	  cpu_limit_seconds: 0    # 0 = uncapped
 //	  max_processes: 0         # 0 = uncapped; kernel-enforced on Windows only
@@ -114,7 +114,24 @@ type Containment struct {
 const DefaultContainmentMode = "watchdog"
 
 // ContainmentModes lists the accepted containment modes.
-var ContainmentModes = []string{"none", "watchdog", "cgroup"}
+var ContainmentModes = []string{"none", "watchdog"}
+
+// RemovedContainmentModes maps a mode shipmates once accepted onto the reason
+// it no longer does. A removed mode gets its own error rather than falling
+// into the generic "unknown mode" one: an operator who wrote it had it working
+// at some point, and "unknown" would send them looking for a typo.
+var RemovedContainmentModes = map[string]string{
+	"cgroup": ErrCgroupModeRemoved,
+}
+
+// ErrCgroupModeRemoved is what an operator sees for `mode: cgroup`.
+//
+// It is a hard error, not a downgrade. The mode is not merely unimplemented —
+// the Linux-only cgroup launcher behind it has been removed from shipmates, so
+// there is no kernel-enforced posture left to ask for. Silently accepting the
+// name and running the watchdog instead would tell an operator who wanted
+// kernel enforcement that they had it.
+const ErrCgroupModeRemoved = "containment mode \"cgroup\" has been removed: shipmates now contains every runtime with the portable watchdog (RSS/CPU sampling plus process-tree teardown on Linux, macOS and Windows). Use mode: watchdog — your memory_limit_mb, cpu_limit_seconds and other limits carry over unchanged"
 
 // SourceOverride is the Resolved.Source value for a caller-supplied override —
 // the cliRuntime argument to Resolve. It is deliberately layer-neutral: this
@@ -171,6 +188,9 @@ func Resolve(cliRuntime string, project ProjectFile, user UserFile) (Resolved, e
 		contain.Mode = DefaultContainmentMode
 	}
 	contain.Mode = strings.ToLower(strings.TrimSpace(contain.Mode))
+	if gone, removed := RemovedContainmentModes[contain.Mode]; removed {
+		return Resolved{}, errors.New(gone)
+	}
 	if !slices.Contains(ContainmentModes, contain.Mode) {
 		return Resolved{}, fmt.Errorf("unknown containment mode %q in user config (known: %s)",
 			contain.Mode, strings.Join(ContainmentModes, ", "))

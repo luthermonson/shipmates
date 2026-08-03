@@ -9,6 +9,9 @@ import (
 
 	"github.com/luthermonson/shipmates/internal/codexapp"
 	"github.com/luthermonson/shipmates/internal/runtime"
+	"github.com/luthermonson/shipmates/internal/runtime/containment"
+	"github.com/luthermonson/shipmates/internal/runtime/containment/none"
+	"github.com/luthermonson/shipmates/internal/runtime/containment/watchdog"
 )
 
 // TestSessionEnvironmentUnsupported verifies the codex runtime rejects
@@ -71,6 +74,34 @@ func TestCapabilitiesAreBackedByImplementation(t *testing.T) {
 	}
 	if (&Runtime{contained: true}).Capabilities().Containment != true {
 		t.Error("Containment must be true when the transport was started contained")
+	}
+}
+
+// Caps.Containment is only as honest as the supervisor it is derived from.
+// This pins the derivation itself, because over-claiming here is the failure
+// nobody downstream can detect: a caller told its processes are bounded has no
+// way to check, and finds out when a runaway one is not stopped.
+func TestContainmentCapabilityIsDerivedFromWhatActuallyBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sup  codexapp.Supervisor
+		want bool
+	}{
+		{"watchdog bounds the tree", Contain(watchdog.New(), containment.Limits{}), true},
+		{"none bounds nothing", Contain(none.New(), containment.Limits{}), false},
+		{"nil watcher yields no supervisor", Contain(nil, containment.Limits{}), false},
+		{"no supervisor at all", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.sup != nil && tc.sup.Bounded()
+			if got != tc.want {
+				t.Fatalf("Bounded() = %v, want %v", got, tc.want)
+			}
+			// And that value is exactly what New stores and Capabilities reports.
+			if (&Runtime{contained: got}).Capabilities().Containment != tc.want {
+				t.Fatalf("Caps.Containment = %v, want %v", !tc.want, tc.want)
+			}
+		})
 	}
 }
 

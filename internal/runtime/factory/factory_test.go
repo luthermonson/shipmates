@@ -72,12 +72,13 @@ func TestContainmentFor(t *testing.T) {
 			wantKind: "none",
 		},
 		{
-			name:     "cgroup degrades to watchdog but keeps the limits",
-			in:       config.Containment{Mode: "cgroup", MemoryLimitMB: 256},
-			wantKind: "watchdog",
-			wantLimits: containment.Limits{
-				MaxRSSBytes: 256 * 1024 * 1024,
-			},
+			// cgroup used to degrade to the watchdog with a warning. It is now
+			// a hard error: the Linux-only launcher behind it is gone, so
+			// accepting the name would tell an operator who asked for kernel
+			// enforcement that they had got it.
+			name:    "cgroup is refused, not silently degraded",
+			in:      config.Containment{Mode: "cgroup", MemoryLimitMB: 256},
+			wantErr: true,
 		},
 		{
 			name:    "unknown mode is an error",
@@ -107,6 +108,21 @@ func TestContainmentFor(t *testing.T) {
 				t.Errorf("limits = %+v, want %+v", limits, tc.wantLimits)
 			}
 		})
+	}
+}
+
+// A removed mode has to be more than "no". The operator wrote `cgroup` because
+// it once worked, so the refusal must name the replacement and say the limits
+// carry over — otherwise they go hunting for a typo that isn't there.
+func TestContainmentFor_CgroupRefusalIsActionable(t *testing.T) {
+	_, _, err := containmentFor(config.Containment{Mode: "cgroup"})
+	if err == nil {
+		t.Fatal("cgroup was accepted; it no longer exists")
+	}
+	for _, want := range []string{"cgroup", "removed", "watchdog"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }
 

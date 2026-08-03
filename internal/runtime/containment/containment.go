@@ -11,9 +11,18 @@
 //     debugging, and a first-class implementation so "containment off" does
 //     not become a nil-Watcher special case in every caller.
 //
-// A "cgroup" mode is named in the config schema for Linux deployments that
-// want kernel-enforced limits, but no cgroup Watcher exists yet; the factory
-// degrades it to watchdog and says so.
+// These two are the whole set. A "cgroup" mode was once named in the config
+// schema for Linux deployments wanting kernel-enforced limits; it has been
+// removed, along with the Linux-only launcher that backed it inside
+// internal/codexapp. Naming it now is a hard error rather than a silent
+// downgrade — see config.ErrCgroupModeRemoved.
+//
+// The reason is portability, not simplicity. Containment that works on one
+// kernel is containment most operators do not have, and shipmates would rather
+// give every platform the same bounds — sampled RSS/CPU plus real tree
+// teardown — than give one platform better ones and the rest a footnote.
+// Windows still gets kernel enforcement for free, because Job Objects express
+// memory and process-count caps natively.
 //
 // The interface is deliberately minimal, and every limit travels through
 // [Limits], so a factory can build any Watcher from operator config the same

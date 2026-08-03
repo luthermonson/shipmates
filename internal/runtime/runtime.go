@@ -179,7 +179,7 @@ type Turn interface {
 // internal/runtime/containment). A per-session limits field would be one more
 // place for a caller — or a project checkout that reached a caller — to ask
 // for less containment than the operator chose. ContainExec below is only a
-// request for the kernel-enforced flavor, never a way to ask for less.
+// request to be contained, never a way to ask for less.
 type SessionSpec struct {
 	// Persona is the shipmates persona name (matching a directory under
 	// catalog/ or .shipmates/personas/).
@@ -194,10 +194,14 @@ type SessionSpec struct {
 	// only when Caps.Environment is true; a runtime that reports false must
 	// reject a non-empty value with ErrUnsupported.
 	Environment map[string]string
-	// ContainExec requests kernel-enforced process containment (cgroup
-	// delegation) for this session's execution, over and above the watcher
-	// the runtime was constructed with. Honored only when Caps.Containment
-	// is true.
+	// ContainExec requests that this session's execution be bounded by the
+	// containment watcher — operator RSS/CPU limits and process-tree
+	// teardown. Honored only when Caps.Containment is true.
+	//
+	// It named cgroup delegation once, when a Linux-only kernel-enforced
+	// upgrade sat above the portable watcher. That upgrade is gone: every
+	// runtime is contained the same portable way now, so this is a request
+	// for containment rather than for a better flavor of it.
 	//
 	// Unlike the other optional features, a runtime that cannot honor it
 	// IGNORES it rather than failing: the operator's baseline containment

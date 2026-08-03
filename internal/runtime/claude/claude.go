@@ -186,10 +186,11 @@ func (r *Runtime) Name() string { return "claude" }
 //   - Refusal: false. Claude Code surfaces model refusals as ordinary
 //     assistant text; there is no protocol-level refusal signal to
 //     distinguish, so claiming otherwise would be a lie.
-//   - Containment: false. This is specifically SessionSpec.ContainExec, the
-//     cgroup launcher, which claude does not use; process bounds are applied
-//     shipmates-side by whichever Supervisor is configured. SendTurn ignores
-//     ContainExec, so reporting false is what tells callers it is ignored.
+//   - Containment: false. This is specifically SessionSpec.ContainExec, which
+//     this package never consults; process bounds are applied shipmates-side
+//     by whichever Supervisor is configured, and the zero Config supervises
+//     nothing. SendTurn ignores ContainExec, so reporting false is what tells
+//     callers it is ignored.
 //   - Environment: true. spawn applies SessionSpec.Environment to the child.
 //   - Approvals: true. `--permission-prompt-tool stdio` routes unresolved
 //     tool permissions to us as can_use_tool control_requests, which surface

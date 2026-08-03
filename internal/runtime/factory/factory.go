@@ -7,11 +7,13 @@
 //   - claude: the `claude` CLI over stdio streaming. Session processes are
 //     spawned through the containment watcher this factory resolves from
 //     operator config.
-//   - codex: the codex app-server transport. It contains its own execution
-//     (kernel-enforced cgroups on Linux) rather than going through the
-//     watcher, so containment mode maps onto its own switch instead.
+//   - codex: the codex app-server transport. Its app-server child is spawned
+//     through the same watcher, bound in as a supervisor by codex.Contain.
 //   - openai: any OpenAI-compatible HTTP endpoint. It spawns no processes, so
 //     there is nothing for a watcher to hold.
+//
+// Both process-spawning runtimes therefore share one containment story, and it
+// is the portable one.
 //
 // Two seams sit alongside New because installing a persona or a memory hook
 // is a file operation that `shipmates init`, `add` and `update` must be able
@@ -94,11 +96,11 @@ func New(ctx context.Context, r config.Resolved, o Options) (runtime.Runtime, er
 	case "codex":
 		opts := codexapp.StartOptions{
 			WorkingDirectory: o.workingDir(),
-			// Codex enforces its own execution containment inside the
-			// app-server; the watcher cannot reach the children it spawns.
-			// "cgroup" is therefore the mode that means something here, and
-			// the only one that does — see containmentFor.
-			RequireExecutionContainment: r.Containment.Mode == "cgroup",
+			// Bind the operator's containment posture into the supervisor the
+			// app-server child is spawned through — the same watcher claude
+			// gets. containmentFor never returns a nil watcher, so this is
+			// never silently "unbounded".
+			Supervisor: codex.Contain(watcher, limits),
 		}
 		// An explicit argv is the operator's escape hatch for a codex that is
 		// not on PATH. Production callers leave it unset and get
@@ -168,12 +170,14 @@ func (Registry) Names() []string { return Names() }
 // containmentFor translates the config-side containment block into a
 // runtime-side Watcher plus Limits.
 //
-// Mode "cgroup" degrades to the watchdog for the runtimes that use a Watcher:
-// kernel-enforced cgroup containment exists in shipmates only inside
-// codexapp, and there is no cgroup Watcher yet. Degrading loudly beats
-// failing, because the operator asked for bounded processes and the watchdog
-// does bound them — just with a polling gap. It is logged at warn precisely
-// so nobody concludes they got the kernel-enforced flavor.
+// Mode "cgroup" no longer exists and is REJECTED rather than degraded. It used
+// to warn and fall back to the watchdog, which meant an operator asking for
+// kernel-enforced limits could get polling ones and only find out by reading
+// logs. Now that cgroup containment is gone from shipmates entirely there is
+// nothing left to degrade to something else — accepting the name would be
+// accepting a posture that cannot be delivered. config.Resolve rejects it
+// first; this arm exists so a caller that builds a config.Containment by hand
+// gets the same answer and the same instruction.
 func containmentFor(c config.Containment) (containment.Watcher, containment.Limits, error) {
 	limits := containment.Limits{
 		MaxRSSBytes:     c.MemoryLimitMB * 1024 * 1024,
@@ -192,9 +196,7 @@ func containmentFor(c config.Containment) (containment.Watcher, containment.Limi
 		// watcher with limits attached would be the confusing half-answer.
 		return none.New(), containment.Limits{}, nil
 	case "cgroup":
-		slog.Warn("containment mode cgroup has no Watcher implementation; falling back to the polling watchdog for this runtime",
-			"limits_still_applied", true)
-		return watchdog.New(), limits, nil
+		return nil, containment.Limits{}, fmt.Errorf("factory: %s", config.ErrCgroupModeRemoved)
 	default:
 		return nil, containment.Limits{}, fmt.Errorf("factory: unknown containment mode %q", c.Mode)
 	}
