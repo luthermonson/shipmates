@@ -85,6 +85,30 @@ type UserFile struct {
 	Runtimes map[string]map[string]any `yaml:"runtimes,omitempty"`
 	// Containment configures process containment for spawned turns.
 	Containment Containment `yaml:"containment,omitempty"`
+	// Brig configures the Ship's Articles subsystem (see internal/brig and
+	// docs/brig.md). User config only, exactly like Runtimes and Containment:
+	// security posture is the operator's decision, and a cloned repository
+	// must not be able to un-sign the Articles for the operator's machine.
+	// ProjectFile deliberately has no field for it, so a `brig:` block in a
+	// project checkout lands in ProjectFile.Ignored and is warned about.
+	Brig Brig `yaml:"brig,omitempty"`
+}
+
+// Brig is the on-disk shape of the brig: block. User config only — see the
+// trust-boundary note on this package.
+//
+//	brig:
+//	  enabled: true                       # false turns the Brig off entirely
+//	  disabled_articles: [twelve-factor]  # waive individual Articles by handle
+type Brig struct {
+	// Enabled defaults to true when absent: installed means bound by the
+	// Articles; opting out is the explicit act. A pointer so "absent" is
+	// distinguishable from an explicit false.
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// DisabledArticles lists Article handles (e.g. "no-piped-execution")
+	// the operator waives while keeping the rest of the Brig. Unknown
+	// handles are warned about and ignored by internal/brig.
+	DisabledArticles []string `yaml:"disabled_articles,omitempty"`
 }
 
 // Containment is the on-disk shape for the containment: block. User config
