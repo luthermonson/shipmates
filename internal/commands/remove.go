@@ -25,10 +25,14 @@ func Remove() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "purge", Usage: "also delete the persona's memory dir"},
 			&cli.BoolFlag{Name: "force", Usage: "remove the berth even if it has uncommitted changes"},
+			runtimeFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			// R1a: `remove` writes the manifest — refuse from a berth.
 			if err := berth.RefuseIfInBerth("remove"); err != nil {
+				return err
+			}
+			if _, err := requireTrackedPersonaArtifact(c); err != nil {
 				return err
 			}
 			name := c.Args().First()

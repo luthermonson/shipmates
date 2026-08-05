@@ -24,12 +24,16 @@ func Update(cat *catalog.Catalog) *cli.Command {
 		ArgsUsage: "[persona]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "accept", Usage: "non-interactive conflict resolution: ours|theirs"},
+			runtimeFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			// R1a: `update` is the manifest-mutating command that MUST run in
 			// the canonical root — running it in divergent berths would
 			// fracture .shipmates/manifest.json (guardrail R1a).
 			if err := berth.RefuseIfInBerth("update"); err != nil {
+				return err
+			}
+			if _, err := requireTrackedPersonaArtifact(c); err != nil {
 				return err
 			}
 			accept := strings.ToLower(strings.TrimSpace(c.String("accept")))

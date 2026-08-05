@@ -96,8 +96,12 @@ func Drain(cat *catalog.Catalog) *cli.Command {
 			&cli.IntFlag{Name: "cap", Value: 5, Usage: "max issues to ship this session"},
 			&cli.StringFlag{Name: "prompt", Usage: "extra context appended to the drain charter"},
 			&cli.BoolFlag{Name: "fresh", Usage: "start a new session"},
+			runtimeFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
+			if _, err := requireClaudeLaunch(c); err != nil {
+				return err
+			}
 			persona := c.Args().First()
 			if persona == "" {
 				return errors.New("usage: shipmates drain <persona>")
@@ -134,8 +138,12 @@ func DrainMany(cat *catalog.Catalog) *cli.Command {
 			&cli.BoolFlag{Name: "all", Usage: "drain every fleet persona"},
 			&cli.IntFlag{Name: "cap", Value: 5, Usage: "per-persona issue cap"},
 			&cli.IntFlag{Name: "max-concurrent", Value: 4, Usage: "max personas draining at once"},
+			runtimeFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
+			if _, err := requireClaudeLaunch(c); err != nil {
+				return err
+			}
 			personas := c.Args().Slice()
 			if c.Bool("all") {
 				p, err := installedPersonas()

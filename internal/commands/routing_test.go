@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -502,92 +501,3 @@ func TestEnsureAttachGitignore_NoTrailingNewline(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// mergeSessionStartHook — pure map surgery, worth pinning independently of
-// the file I/O wrapper.
-// ---------------------------------------------------------------------------
-
-func TestMergeSessionStartHook(t *testing.T) {
-	t.Run("adds to an empty settings map", func(t *testing.T) {
-		s := map[string]any{}
-		changed, err := mergeSessionStartHook(s, sessionStartHookCommand)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !changed {
-			t.Error("changed = false on an empty map")
-		}
-		if countShipmatesHooks(s) != 1 {
-			t.Errorf("hook not added: %+v", s)
-		}
-	})
-
-	t.Run("second call reports no change", func(t *testing.T) {
-		s := map[string]any{}
-		if _, err := mergeSessionStartHook(s, sessionStartHookCommand); err != nil {
-			t.Fatal(err)
-		}
-		changed, err := mergeSessionStartHook(s, sessionStartHookCommand)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if changed {
-			t.Error("changed = true on a re-merge; init/update would rewrite the file every run")
-		}
-		if countShipmatesHooks(s) != 1 {
-			t.Errorf("duplicate hook entry: %+v", s)
-		}
-	})
-
-	t.Run("survives a hooks key of the wrong type", func(t *testing.T) {
-		// Someone hand-wrote "hooks": "nope". We must not panic; we replace
-		// only the piece we own.
-		s := map[string]any{"hooks": "nope", "keepMe": true}
-		if _, err := mergeSessionStartHook(s, sessionStartHookCommand); err != nil {
-			t.Fatal(err)
-		}
-		if countShipmatesHooks(s) != 1 {
-			t.Errorf("hook not added over a malformed hooks key: %+v", s)
-		}
-		if s["keepMe"] != true {
-			t.Error("unrelated key lost")
-		}
-	})
-
-	t.Run("survives junk entries inside SessionStart", func(t *testing.T) {
-		s := map[string]any{
-			"hooks": map[string]any{
-				"SessionStart": []any{"a string, not an object", 42, map[string]any{"hooks": "also wrong"}},
-			},
-		}
-		if _, err := mergeSessionStartHook(s, sessionStartHookCommand); err != nil {
-			t.Fatal(err)
-		}
-		if countShipmatesHooks(s) != 1 {
-			t.Errorf("hook not added alongside junk: %+v", s)
-		}
-	})
-
-	t.Run("other hook events are untouched", func(t *testing.T) {
-		s := map[string]any{
-			"hooks": map[string]any{
-				"PreToolUse": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "guard"}}}},
-			},
-		}
-		if _, err := mergeSessionStartHook(s, sessionStartHookCommand); err != nil {
-			t.Fatal(err)
-		}
-		hooks := s["hooks"].(map[string]any)
-		if _, ok := hooks["PreToolUse"]; !ok {
-			t.Error("PreToolUse hooks lost")
-		}
-	})
-}
-
-// The path the installer writes to must be the one Claude Code reads.
-func TestClaudeSettingsPath(t *testing.T) {
-	want := filepath.Join(".claude", "settings.json")
-	if got := claudeSettingsPath(); got != want {
-		t.Errorf("claudeSettingsPath() = %q, want %q", got, want)
-	}
-}

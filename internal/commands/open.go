@@ -22,8 +22,12 @@ func Open() *cli.Command {
 		ArgsUsage: "<persona>",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "fresh", Usage: "start a new session instead of resuming (applies config changes like model/effort)"},
+			runtimeFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
+			if _, err := requireClaudeLaunch(c); err != nil {
+				return err
+			}
 			persona := c.Args().First()
 			if persona == "" {
 				return errors.New("usage: shipmates open <persona>")
