@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/permissions"
 )
 
@@ -533,30 +534,62 @@ func TestPersonaPermissiveUnknownPersonaFailsClosed(t *testing.T) {
 	}
 }
 
-// TestBypassModeSkipsTheEvaluator documents a sharp edge. A persona in bypass
-// mode short-circuits decidePermission BEFORE the evaluator runs, so it also
-// escapes the fleet-wide deny list that fleet_policy.go documents as
-// un-shadowable ("checked BEFORE anything else so nothing on the ship can
-// shadow it"). Ship-local persona frontmatter therefore CAN shadow an
-// Admiral's deny. This test pins the behavior as it actually is; changing it
-// is a policy decision, not a test fix.
+// TestBypassModeSkipsTheEvaluator pins the resolution of what used to be a
+// sharp edge, decided via Article 14 (No Self-Escalation): a persona in
+// bypass mode still skips the ship-side layers (persona overlay, project
+// settings, the Brig's kernel rules), but the FLEET-WIDE deny list now binds
+// it — decidePermission consults FleetDeny before the bypass allow, so
+// ship-local persona frontmatter can no longer shadow an Admiral's deny.
+// This is a deliberate behavior change from the previously pinned "bypass
+// escapes everything" state.
 func TestBypassModeSkipsTheEvaluator(t *testing.T) {
 	s, _ := newTestServer(t)
 	writePersona(t, "cowboy", "dangerouslySkipPermissions: true")
 	s.perms = permissions.NewEvaluatorWithRules(rulesFromRaw(nil, nil, []string{"Bash(rm *)"}))
-	s.perms.SetFleetPolicy(&permissions.FleetPolicy{Deny: []string{"Bash(rm *)"}})
+	s.perms.SetFleetPolicy(&permissions.FleetPolicy{Deny: []string{"Bash(kubectl *)"}})
 
-	// Sanity: a normal mate is denied by both layers.
+	// Sanity: a normal mate is denied by the ship-side deny.
 	if d, _ := s.decidePermission("backend", "Bash", map[string]any{"command": "rm -rf /"}, "rm -rf /"); d != "deny" {
 		t.Fatalf("normal mate = %q, want deny", d)
 	}
-	// The bypass mate is not.
+	// The bypass mate skips the ship-side layers: the same command that the
+	// ship denies is allowed for it.
 	d, _ := s.decidePermission("cowboy", "Bash", map[string]any{"command": "rm -rf /"}, "rm -rf /")
 	if d != "allow" {
-		t.Fatalf("bypass mate = %q; if this now denies, the fleet-deny precedence was intentionally changed", d)
+		t.Fatalf("bypass mate = %q, want allow: bypass must still skip persona/project layers", d)
 	}
 	if !hasEventType(s, "permission:auto-allow") {
 		t.Fatal("a bypassed call must still be recorded in the feed")
+	}
+	// Article 14: the fleet-wide deny is NOT skippable. The bypass mate is
+	// denied the fleet-denied command.
+	d, reason := s.decidePermission("cowboy", "Bash", map[string]any{"command": "kubectl delete ns prod"}, "kubectl delete ns prod")
+	if d != "deny" {
+		t.Fatalf("bypass mate vs fleet deny = %q, want deny (Article 14: bypass must not shadow fleet policy)", d)
+	}
+	if !strings.Contains(reason, "fleet-deny") {
+		t.Fatalf("deny reason %q should name the fleet layer", reason)
+	}
+}
+
+// TestBypassModeFleetDenyHoldsWithBrigDisabled pins the hard exception in
+// the brig's configurability contract: the fleet-wide deny list is not the
+// Brig's to disable. `brig.enabled: false` returns the ship to the pre-brig
+// posture — it does not grant a NEW escape from fleet policy, so a
+// bypass-mode persona is still denied a fleet-denied tool.
+func TestBypassModeFleetDenyHoldsWithBrigDisabled(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.brigConf = brig.Settings{Enabled: false} // operator turned the brig off
+	writePersona(t, "cowboy", "dangerouslySkipPermissions: true")
+	s.perms = permissions.NewEvaluatorWithRules(rulesFromRaw(nil, nil, nil))
+	s.perms.SetFleetPolicy(&permissions.FleetPolicy{Deny: []string{"Bash(kubectl *)"}})
+
+	d, reason := s.decidePermission("cowboy", "Bash", map[string]any{"command": "kubectl delete ns prod"}, "kubectl delete ns prod")
+	if d != "deny" {
+		t.Fatalf("brig disabled + fleet deny + bypass = %q, want deny: brig off must not waive fleet policy", d)
+	}
+	if !strings.Contains(reason, "fleet-deny") {
+		t.Fatalf("deny reason %q should name the fleet layer", reason)
 	}
 }
 

@@ -63,6 +63,11 @@ type Evaluator struct {
 	// pointer would work but the slot keeps the lock semantics obvious.
 	fleet *fleetSlot
 
+	// brig holds the Brig's compiled kernel rules (internal/brig), applied
+	// to every persona ahead of persona overlays and project settings.
+	// Installed once by SetBrigPolicy at server construction.
+	brig *brigSlot
+
 	// personaRules memoizes the per-persona overlay merged onto the base
 	// rules. Reset by Invalidate alongside the base settings.
 	personaRules *personaCache
@@ -80,6 +85,7 @@ func NewEvaluator(projectRoot string) *Evaluator {
 	return &Evaluator{
 		projectRoot:  projectRoot,
 		fleet:        newFleetSlot(),
+		brig:         newBrigSlot(),
 		personaRules: newPersonaCache(),
 		timeboxes:    newTimeboxStore(),
 	}
@@ -91,6 +97,7 @@ func NewEvaluatorWithRules(rules MergedRules) *Evaluator {
 		rules:        rules,
 		loaded:       true,
 		fleet:        newFleetSlot(),
+		brig:         newBrigSlot(),
 		personaRules: newPersonaCache(),
 		timeboxes:    newTimeboxStore(),
 	}
@@ -119,6 +126,32 @@ func (e *Evaluator) SetFleetPolicy(pol *FleetPolicy) {
 		return
 	}
 	e.fleet.set(pol)
+}
+
+// SetBrigPolicy installs (or replaces) the Brig's compiled kernel rules —
+// the Ship's Articles subset the operator has in force. The rules apply to
+// EVERY persona this evaluator serves, ahead of persona overlays and
+// project settings for the same effect: a Brig deny cannot be shadowed by
+// a persona allow (deny beats everything) and a Brig ask cannot be skipped
+// by one either (ask beats allow). Passing empty slices clears the policy —
+// that is what `brig.enabled: false` resolves to.
+func (e *Evaluator) SetBrigPolicy(ask, deny []Rule) {
+	if e.brig == nil {
+		return
+	}
+	e.brig.set(ask, deny)
+}
+
+// FleetDeny consults ONLY the fleet-wide deny list for a tool call. It is
+// the seam the server's bypass-mode path uses: Article 14 (No
+// Self-Escalation) requires the fleet layer to bind even personas running
+// with dangerouslySkipPermissions, while bypass still skips every ship-side
+// layer (Brig, persona overlay, project settings).
+func (e *Evaluator) FleetDeny(tool string, input map[string]any) (Decision, bool) {
+	if e.fleet == nil {
+		return Decision{}, false
+	}
+	return matchFleetDeny(tool, input, e.fleet.snapshot())
 }
 
 // RegisterTimeBox records a "allow this exact command for the next duration"
@@ -191,6 +224,13 @@ func (e *Evaluator) Evaluate(tool string, input map[string]any) Decision {
 func (e *Evaluator) EvaluateFor(persona, tool string, input map[string]any) Decision {
 	e.ensureLoaded()
 	rules := e.rulesFor(persona)
+
+	// The Brig's kernel rules overlay every persona. Prepended so a Brig
+	// rule's reason string (which names the Article) wins over a same-effect
+	// project rule matching the same command.
+	if e.brig != nil {
+		rules = e.brig.overlay(rules)
+	}
 
 	// Fleet-wide deny is checked BEFORE anything else so nothing on the ship
 	// can shadow it. A deny match here short-circuits the whole evaluation.

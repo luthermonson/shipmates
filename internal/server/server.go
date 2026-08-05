@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/luthermonson/shipmates/internal/berth"
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/permissions"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/streamjson"
@@ -112,6 +113,14 @@ type Server struct {
 	// Attach uploads and the inbox sweeper both anchor against it so a chdir
 	// during a request can't redirect writes.
 	projectRoot string
+
+	// brigConf is the operator's resolved Brig posture (the Ship's
+	// Articles), loaded from user config at construction. It gates the
+	// freeze check in decidePermission; the kernel rules it compiles to are
+	// installed on the permissions evaluator by New. Note the fleet-wide
+	// deny list is NOT the Brig's: FleetDeny stays in force in
+	// decidePermission even with the Brig disabled.
+	brigConf brig.Settings
 }
 
 // idleTimeoutEphemeral is the lifecycle bound for a server spawned by a
@@ -133,7 +142,7 @@ const idleTimeoutFleeted = 1 * time.Hour
 // this is where `.claude/settings.json` lives.
 func New() *Server {
 	root, _ := os.Getwd()
-	return &Server{
+	s := &Server{
 		live:         map[string]*liveProc{},
 		ptys:         map[string]*ptyProc{},
 		pendings:     map[string]*pending{},
@@ -143,7 +152,13 @@ func New() *Server {
 		beadsTrigger: make(chan struct{}, 1),
 		perms:        permissions.NewEvaluator(root),
 		projectRoot:  root,
+		brigConf:     brig.Load(""),
 	}
+	// Compile the in-force Articles into evaluator rules. A disabled brig
+	// (or a waived Article) compiles to nothing — rules from every OTHER
+	// source (fleet, persona overlays, project settings) are untouched.
+	s.perms.SetBrigPolicy(brig.KernelRules(s.brigConf))
+	return s
 }
 
 func (s *Server) addEvent(e Event) {
@@ -447,16 +462,55 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("{}"))
 }
 
-// decidePermission is the PreToolUse decision engine. It short-circuits on
-// personas running in bypass mode, then consults the permissions evaluator
-// (which mirrors Claude Code's settings-driven rules). Only an "ask" verdict
-// blocks on the human — allow and deny both return immediately. All three
-// outcomes emit an event so the UI shows what was auto-decided and why.
+// decidePermission is the PreToolUse decision engine. The freeze gate and
+// the fleet-wide deny list come first — neither can be shadowed by a
+// persona's bypass mode. Then bypass-mode personas are allowed without
+// consulting the ship-side layers, and everything else goes through the
+// permissions evaluator (which mirrors Claude Code's settings-driven rules
+// plus the Brig's kernel Articles). Only an "ask" verdict blocks on the
+// human — allow and deny both return immediately. Every outcome emits an
+// event so the UI shows what was auto-decided and why.
 func (s *Server) decidePermission(persona, tool string, input map[string]any, inputSummary string) (string, string) {
-	// Persona in permissive/bypass mode: allow without evaluating rules.
-	// This preserves the existing escape hatch and skips even the deny
-	// list — the user asked for no gate.
+	// Article 12 — Respect the Freeze. When the marker is present, every
+	// Write-class tool call is refused, bypass-mode personas included: the
+	// freeze is the admiral's emergency stop, and an emergency stop a crew
+	// member can opt out of is not one. Skipped when the operator has the
+	// brig (or this Article) disabled in user config.
+	if !s.brigConf.Disabled("respect-the-freeze") && isWriteClassTool(tool) {
+		if frozen, marker := brig.CheckFreeze(s.projectRoot); frozen {
+			reason := "brig: Article 12 (respect-the-freeze) freeze engaged"
+			if marker != nil && marker.Reason != "" {
+				reason += ": " + marker.Reason
+			}
+			s.addEvent(Event{
+				Persona: persona, Type: "permission:auto-deny",
+				Text:  tool + ": " + reason,
+				Tool:  tool, Input: inputSummary,
+			})
+			s.logBrigDenial(persona, 12, tool, inputSummary)
+			return "deny", reason
+		}
+	}
+
+	// Persona in permissive/bypass mode: allow without evaluating the
+	// ship-side layers (Brig, persona overlay, project settings) — the user
+	// asked for no gate. The FLEET-WIDE deny list is the exception, per
+	// Article 14 (No Self-Escalation): fleet policy comes from the Admiral,
+	// not from the ship, and ship-local persona frontmatter must not be able
+	// to shadow it. This holds even when the brig itself is disabled — the
+	// fleet deny is not the Brig's to waive; brig off restores the pre-brig
+	// posture, it does not grant a new escape from fleet policy.
 	if personaPermissive(persona) {
+		if s.perms != nil {
+			if d, ok := s.perms.FleetDeny(tool, input); ok {
+				s.addEvent(Event{
+					Persona: persona, Type: "permission:auto-deny",
+					Text:  tool + ": " + d.Reason + " (bypass mode does not shadow fleet policy)",
+					Tool:  tool, Input: inputSummary,
+				})
+				return "deny", d.Reason
+			}
+		}
 		s.addEvent(Event{
 			Persona: persona, Type: "permission:auto-allow",
 			Text:  tool + ": bypass mode",
@@ -498,6 +552,11 @@ func (s *Server) decidePermission(persona, tool string, input map[string]any, in
 			Text:  tool + ": " + d.Reason,
 			Tool:  tool, Input: inputSummary,
 		})
+		// A deny attributed to a Brig Article also lands in the JSONL
+		// denial log — same decision, same event, one extra durable line.
+		if article, ok := brig.DenialArticle(d.Reason); ok {
+			s.logBrigDenial(persona, article, tool, inputSummary)
+		}
 		return "deny", d.Reason
 	case permissions.EffectAsk:
 		// Human-gated path: block on awaitDecision, which posts a
@@ -514,6 +573,30 @@ func (s *Server) decidePermission(persona, tool string, input map[string]any, in
 			return "deny", "denied by operator"
 		}
 		return human, ""
+	}
+}
+
+// isWriteClassTool reports whether a tool call mutates files — the class the
+// Brig freeze refuses. Bash is deliberately not in the class: a frozen ship
+// still answers read-only questions, and gating every shell command would
+// turn the emergency stop into a full outage.
+func isWriteClassTool(tool string) bool {
+	switch tool {
+	case "Write", "Edit", "MultiEdit", "NotebookEdit":
+		return true
+	}
+	return false
+}
+
+// logBrigDenial appends a Brig refusal to .shipmates/brig.log. Best-effort:
+// the denial stands whether or not the log write succeeds.
+func (s *Server) logBrigDenial(persona string, article int, tool, inputSummary string) {
+	command := inputSummary
+	if command == "" {
+		command = tool
+	}
+	if err := brig.LogDenial(s.projectRoot, persona, article, command); err != nil {
+		slog.Warn("brig: could not append to denial log", "err", err)
 	}
 }
 

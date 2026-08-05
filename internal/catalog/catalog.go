@@ -124,6 +124,14 @@ func (c *Catalog) HasPolicyFile(name string) bool {
 	return err == nil
 }
 
+// ArticlesFile returns the canonical Ship's Articles document
+// (catalog/ARTICLES.md) — the full text of the brig's fifteen rules.
+// Vendored to .shipmates/ARTICLES.md on install so the persona prompt
+// block's pointer resolves inside any project.
+func (c *Catalog) ArticlesFile() ([]byte, error) {
+	return fs.ReadFile(c.fsys, "catalog/ARTICLES.md")
+}
+
 // MemorySeeds returns the starter memory files for a persona, keyed by base
 // filename. Returns an empty map if the persona ships no seeds.
 func (c *Catalog) MemorySeeds(name string) (map[string][]byte, error) {

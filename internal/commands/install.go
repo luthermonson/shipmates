@@ -13,6 +13,7 @@ import (
 	"text/template"
 
 	"github.com/luthermonson/shipmates/internal/berth"
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/runtime/factory"
@@ -109,6 +110,9 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			if err := installCommands(cat, m); err != nil {
 				return err
 			}
+			if err := installArticlesDoc(cat, m); err != nil {
+				return err
+			}
 			if err := ensureAttachGitignore(); err != nil {
 				// Non-fatal: the inbox is regenerable and a missing
 				// gitignore only means the operator has to add it by
@@ -195,10 +199,28 @@ func List(cat *catalog.Catalog) *cli.Command {
 
 // composeAgent returns the persona's agent file with the project's routing
 // block appended (wrapped in markers) when shipmates.yaml declares a routing
-// layer. Composition is deterministic so `update` can recompose and diff
-// against what was installed. With no routing declared (or an unknown routing
-// name) the base file is returned unchanged.
+// layer, and the Ship's Articles reminder appended (marker-delimited) when
+// the operator's brig is enabled. Composition is deterministic so `update`
+// can recompose and diff against what was installed: disabling the brig and
+// re-running `shipmates update` removes the Articles block, re-enabling
+// re-injects it.
 func composeAgent(cat *catalog.Catalog, base []byte) ([]byte, error) {
+	// Strip any existing Articles block first and re-append it last, so the
+	// composed order is always body → routing → Articles no matter what the
+	// input carried — that is what keeps applyRouting idempotent.
+	stripped := brig.SplicePrompt(string(base), "")
+	composed, err := composeRouting(cat, []byte(stripped))
+	if err != nil {
+		return nil, err
+	}
+	spliced := brig.SplicePrompt(string(composed), brig.PromptBlock(brig.Load("")))
+	return []byte(spliced), nil
+}
+
+// composeRouting appends the routing block when shipmates.yaml declares a
+// routing layer. With no routing declared (or an unknown routing name) the
+// base file is returned unchanged.
+func composeRouting(cat *catalog.Catalog, base []byte) ([]byte, error) {
 	conf, err := project.LoadConfig()
 	if err != nil {
 		return nil, err
@@ -362,6 +384,35 @@ func installCommands(cat *catalog.Catalog, m *project.Manifest) error {
 		m.Files[dst] = project.SHA(b)
 		slog.Info("installed command", "command", name, "path", dst)
 	}
+	return nil
+}
+
+// installArticlesDoc vendors the canonical Ship's Articles document to
+// .shipmates/ARTICLES.md, so the reminder block spliced into every persona
+// points at a file that exists inside the project. Same "don't clobber user
+// edits" discipline as installCommands. Skipped entirely when the operator
+// has the brig disabled; an already-vendored copy is left in place (it is
+// documentation, and history is not the brig's to erase).
+func installArticlesDoc(cat *catalog.Catalog, m *project.Manifest) error {
+	if !brig.Load("").Enabled {
+		return nil
+	}
+	b, err := cat.ArticlesFile()
+	if err != nil {
+		return fmt.Errorf("read catalog ARTICLES.md: %w", err)
+	}
+	dst := project.ArticlesPath()
+	if existing, err := os.ReadFile(dst); err == nil && project.SHA(existing) != m.Files[dst] {
+		return nil // user-edited or pre-existing — don't clobber
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(dst, b, 0o644); err != nil {
+		return err
+	}
+	m.Files[dst] = project.SHA(b)
+	slog.Info("installed the Ship's Articles", "path", dst)
 	return nil
 }
 

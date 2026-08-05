@@ -11,8 +11,59 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/runtime"
 )
+
+// pinHome points os.UserHomeDir at a fresh temp dir so tests never read the
+// developer's real ~/.shipmates/config.yaml — the brig posture under test is
+// always the default (enabled) unless a test writes its own config.
+func pinHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home) // Windows
+	t.Setenv("HOME", home)        // Unix
+	return home
+}
+
+// TestRenderPersona_ArticlesBlockFollowsBrigConfig proves the prompt layer
+// obeys the operator's switch: enabled (default) splices the reminder,
+// disabled removes it, and re-rendering is idempotent either way.
+func TestRenderPersona_ArticlesBlockFollowsBrigConfig(t *testing.T) {
+	home := pinHome(t)
+	spec := runtime.PersonaSpec{Name: "backend", SystemPrompt: "# Role\n\nBody.\n"}
+
+	rendered, err := RenderPersona(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rendered), brig.PromptStartMarker) {
+		t.Fatalf("default posture: artifact lacks the Articles reminder:\n%s", rendered)
+	}
+	again, err := RenderPersona(runtime.PersonaSpec{Name: "backend", SystemPrompt: string(rendered[strings.Index(string(rendered), "# Role"):])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(again), brig.PromptStartMarker) != 1 {
+		t.Errorf("re-rendering a body that already carries the block must not stack a second copy:\n%s", again)
+	}
+
+	// Disable the brig in the operator's config: the block disappears.
+	confDir := filepath.Join(home, ".shipmates")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "config.yaml"), []byte("brig:\n  enabled: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	off, err := RenderPersona(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(off), brig.PromptStartMarker) {
+		t.Fatalf("disabled brig: artifact still carries the Articles reminder:\n%s", off)
+	}
+}
 
 func TestInstallPersona_WritesFileWithFrontmatter(t *testing.T) {
 	rt := New(Config{})
@@ -183,6 +234,7 @@ func splitFrontmatter(t *testing.T, artifact []byte) ([]byte, string) {
 // base, so the frontmatter is decoded directly here instead. Restore the
 // round-trip through persona.Parse once it lands.
 func TestRenderPersona_EmitsOnlyClaudeFrontmatter(t *testing.T) {
+	pinHome(t) // default brig posture regardless of the developer's config
 	spec := runtime.PersonaSpec{
 		Name:         "backend",
 		Description:  "APIs and request lifecycle.",
@@ -223,8 +275,17 @@ func TestRenderPersona_EmitsOnlyClaudeFrontmatter(t *testing.T) {
 	if strings.Join(got, ",") != "Read,Glob,Grep,Bash" {
 		t.Errorf("tools = %v, want [Read Glob Grep Bash]", got)
 	}
-	if strings.TrimSpace(body) != strings.TrimSpace(spec.SystemPrompt) {
-		t.Errorf("body changed:\n--- got\n%q\n--- want\n%q", body, spec.SystemPrompt)
+	// The body is the system prompt verbatim, plus the marker-delimited
+	// Ship's Articles reminder the brig splices in (default posture).
+	idx := strings.Index(body, brig.PromptStartMarker)
+	if idx < 0 {
+		t.Fatalf("body lacks the Ship's Articles reminder block:\n%s", body)
+	}
+	if !strings.Contains(body, brig.PromptEndMarker) {
+		t.Errorf("Articles block is never closed:\n%s", body)
+	}
+	if got := strings.TrimSpace(body[:idx]); got != strings.TrimSpace(spec.SystemPrompt) {
+		t.Errorf("body changed:\n--- got\n%q\n--- want\n%q", got, spec.SystemPrompt)
 	}
 	// Exactly one blank line between the closing fence and the body, whichever
 	// caller produced the spec.
@@ -279,7 +340,12 @@ func readSessionStart(t *testing.T, proj string) (map[string]any, []any) {
 
 // countMemoryHooks counts our marker command across every SessionStart
 // matcher group, in the nested shape Claude Code actually executes.
-func countMemoryHooks(groups []any) int {
+func countMemoryHooks(groups []any) int { return countHookCommand(groups, "load-memory") }
+
+// countBrigHooks counts the Brig reminder hook the same way.
+func countBrigHooks(groups []any) int { return countHookCommand(groups, "brig-reminder") }
+
+func countHookCommand(groups []any, marker string) int {
 	n := 0
 	for _, g := range groups {
 		m, ok := g.(map[string]any)
@@ -292,7 +358,7 @@ func countMemoryHooks(groups []any) int {
 			if !ok {
 				continue
 			}
-			if cmd, _ := hm["command"].(string); strings.Contains(cmd, "load-memory") {
+			if cmd, _ := hm["command"].(string); strings.Contains(cmd, marker) {
 				n++
 			}
 		}
@@ -312,24 +378,27 @@ func TestInstallMemoryHook_WritesTheShapeClaudeExecutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, groups := readSessionStart(t, proj)
-	if len(groups) != 1 {
-		t.Fatalf("SessionStart len = %d, want 1", len(groups))
+	if len(groups) != 2 {
+		t.Fatalf("SessionStart len = %d, want 2 (load-memory + brig-reminder)", len(groups))
 	}
-	group := groups[0].(map[string]any)
-	if _, flat := group["command"]; flat {
-		t.Fatal("hook written in the flat shape claude ignores")
-	}
-	inner, _ := group["hooks"].([]any)
-	if len(inner) != 1 {
-		t.Fatalf("group hooks len = %d, want 1: %v", len(inner), group)
-	}
-	entry := inner[0].(map[string]any)
-	if entry["type"] != "command" || entry["command"] != MemoryHookCommand {
-		t.Errorf("hook entry = %v", entry)
-	}
-	// No matcher: memory must load on resumed sessions too, not only fresh ones.
-	if _, ok := group["matcher"]; ok {
-		t.Errorf("group pins a matcher, which would skip non-startup sessions: %v", group)
+	wantCommands := []string{MemoryHookCommand, BrigHookCommand}
+	for i, g := range groups {
+		group := g.(map[string]any)
+		if _, flat := group["command"]; flat {
+			t.Fatal("hook written in the flat shape claude ignores")
+		}
+		inner, _ := group["hooks"].([]any)
+		if len(inner) != 1 {
+			t.Fatalf("group hooks len = %d, want 1: %v", len(inner), group)
+		}
+		entry := inner[0].(map[string]any)
+		if entry["type"] != "command" || entry["command"] != wantCommands[i] {
+			t.Errorf("hook entry %d = %v, want command %q", i, entry, wantCommands[i])
+		}
+		// No matcher: hooks must fire on resumed sessions too, not only fresh ones.
+		if _, ok := group["matcher"]; ok {
+			t.Errorf("group pins a matcher, which would skip non-startup sessions: %v", group)
+		}
 	}
 }
 
@@ -365,11 +434,14 @@ func TestInstallMemoryHook_IdempotentAndPreservesExisting(t *testing.T) {
 	if _, ok := settings["hooks"].(map[string]any)["PreToolUse"]; !ok {
 		t.Errorf("unrelated hook event lost; got %v", settings)
 	}
-	if len(groups) != 2 {
-		t.Errorf("SessionStart len = %d, want 2 (the operator's group + ours, not doubled)", len(groups))
+	if len(groups) != 3 {
+		t.Errorf("SessionStart len = %d, want 3 (the operator's group + load-memory + brig-reminder, not doubled)", len(groups))
 	}
 	if n := countMemoryHooks(groups); n != 1 {
 		t.Errorf("found %d load-memory hooks, want exactly 1", n)
+	}
+	if n := countBrigHooks(groups); n != 1 {
+		t.Errorf("found %d brig-reminder hooks, want exactly 1", n)
 	}
 	// The operator's own hook must survive verbatim.
 	first := groups[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
@@ -392,14 +464,19 @@ func TestInstallMemoryHook_MigratesTheLegacyFlatEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, groups := readSessionStart(t, proj)
-	if len(groups) != 1 {
-		t.Fatalf("SessionStart len = %d, want 1 (migrated in place)", len(groups))
+	if len(groups) != 2 {
+		t.Fatalf("SessionStart len = %d, want 2 (memory migrated in place + brig-reminder)", len(groups))
 	}
-	if _, flat := groups[0].(map[string]any)["command"]; flat {
-		t.Fatal("legacy flat entry survived migration")
+	for _, g := range groups {
+		if _, flat := g.(map[string]any)["command"]; flat {
+			t.Fatal("legacy flat entry survived migration")
+		}
 	}
 	if n := countMemoryHooks(groups); n != 1 {
 		t.Errorf("found %d load-memory hooks after migration, want 1", n)
+	}
+	if n := countBrigHooks(groups); n != 1 {
+		t.Errorf("found %d brig-reminder hooks after migration, want 1", n)
 	}
 }
 

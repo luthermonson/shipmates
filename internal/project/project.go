@@ -58,6 +58,12 @@ func PolicyPath(persona string) string {
 	return filepath.Join(PoliciesDir(), persona+".yaml")
 }
 
+// ArticlesPath is the vendored location of the Ship's Articles document
+// (the brig's canonical rules — see internal/brig and docs/brig.md).
+func ArticlesPath() string {
+	return filepath.Join(Dir, "ARTICLES.md")
+}
+
 // ManifestPath is the location of the install manifest.
 func ManifestPath() string {
 	return filepath.Join(Dir, ManifestName)
