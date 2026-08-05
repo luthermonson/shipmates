@@ -113,5 +113,61 @@ func TestAttemptLedgerHashReplayAndCorruption(t *testing.T) {
 	}
 }
 
+// TestAttemptLedgerDetectsTamperedAndRechainedRecords pins the hash chain
+// itself: a record whose payload was rewritten in place (its own hash no
+// longer matches) and a record that was re-hashed but detached from its
+// predecessor (previous_hash broken) must both fail closed. The generic
+// corruption test above only proves malformed JSON is rejected; these prove
+// the chain is what rejects well-formed forgeries.
+func TestAttemptLedgerDetectsTamperedAndRechainedRecords(t *testing.T) {
+	write := func(t *testing.T, mutate func(records []LedgerRecord)) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "attempts.jsonl")
+		l, err := OpenAttemptLedger(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.Append("reservation", "attempt-one", map[string]any{"tokens": 10}, time.Unix(1, 0).UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.Append("result", "attempt-one", map[string]any{"outcome": "completed"}, time.Unix(2, 0).UTC()); err != nil {
+			t.Fatal(err)
+		}
+		records := append([]LedgerRecord(nil), l.Records...)
+		mutate(records)
+		var out []byte
+		for _, r := range records {
+			b, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, append(b, '\n')...)
+		}
+		if err := os.WriteFile(path, out, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("payload rewritten in place", func(t *testing.T) {
+		path := write(t, func(records []LedgerRecord) {
+			records[0].Payload = json.RawMessage(`{"tokens":10000}`)
+		})
+		if _, err := OpenAttemptLedger(path); err == nil {
+			t.Fatal("tampered payload accepted")
+		}
+	})
+	t.Run("record re-hashed but detached from predecessor", func(t *testing.T) {
+		path := write(t, func(records []LedgerRecord) {
+			records[1].Payload = json.RawMessage(`{"outcome":"no_go"}`)
+			records[1].PreviousHash = strings.Repeat("0", 64)
+			records[1].Hash = ledgerHash(records[1])
+		})
+		if _, err := OpenAttemptLedger(path); err == nil {
+			t.Fatal("re-chained record accepted")
+		}
+	})
+}
+
 // jsonMarshal keeps the fixture explicit without exposing a second parser.
 func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
