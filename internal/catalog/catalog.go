@@ -31,7 +31,7 @@ func (c *Catalog) Personas() ([]string, error) {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() && c.isPersona(e.Name()) {
 			names = append(names, e.Name())
 		}
 	}
@@ -39,10 +39,35 @@ func (c *Catalog) Personas() ([]string, error) {
 	return names, nil
 }
 
+// isPersona reports whether a catalog subdirectory is a persona rather than a
+// shared resource directory.
+//
+// "Is a directory under catalog/" is not the same question. The catalog also
+// holds charters/, commands/, routing/ and skills/, which are shared resources
+// every persona draws on. Treating those as personas made `shipmates list`
+// offer four things that cannot be added, and let `shipmates add charters` past
+// validation only to fail deeper with a raw file-not-found:
+//
+//	read agent file: open catalog/charters/.claude/agents/charters.md: file does not exist
+//
+// The agent definition is the thing that actually makes a persona usable — it
+// is what AgentFile reads and what gets vendored into a project — so its
+// presence is the honest test, and it stays correct if more resource
+// directories are added later.
+func (c *Catalog) isPersona(name string) bool {
+	_, err := fs.Stat(c.fsys, path.Join("catalog", name, ".claude", "agents", name+".md"))
+	return err == nil
+}
+
 // Has reports whether a persona exists in the catalog.
+// Has reports whether the catalog offers this persona.
+//
+// It asks the same question as Personas, deliberately: this is the gate `add`
+// runs before vendoring, so a name that Has accepts but Personas never lists
+// is exactly the mismatch that let `shipmates add charters` through.
 func (c *Catalog) Has(name string) bool {
 	info, err := fs.Stat(c.fsys, path.Join("catalog", name))
-	return err == nil && info.IsDir()
+	return err == nil && info.IsDir() && c.isPersona(name)
 }
 
 // AgentFile returns the raw bytes of a persona's subagent markdown file.
