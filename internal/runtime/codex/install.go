@@ -10,6 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/runtime"
 )
 
@@ -111,6 +112,10 @@ func writeCodexAgent(w io.Writer, p runtime.PersonaSpec) error {
 	if body == "" {
 		body = fmt.Sprintf("# %s\n\n%s\n", p.Name, p.Description)
 	}
+	// The Ship's Articles reminder rides the persona body — codex has no
+	// session-start hook seam, so the prompt layer IS the artifact. Spliced
+	// idempotently per the operator's brig posture (user config only).
+	body = brig.SplicePrompt(body, brig.PromptBlock(brig.Load("")))
 	_, err := io.WriteString(w, body)
 	return err
 }

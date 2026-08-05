@@ -12,6 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/runtime"
 )
 
@@ -89,6 +90,13 @@ func (r *Runtime) UninstallPersona(_ context.Context, projectDir, name string) e
 // as the marker that makes installation idempotent.
 const MemoryHookCommand = "shipmates hook load-memory"
 
+// BrigHookCommand is the SessionStart command that reminds every session it
+// is bound by the Ship's Articles (and announces an engaged freeze). The
+// hook is installed unconditionally and gates itself at run time on the
+// operator's brig config: a disabled brig makes it emit nothing, so
+// re-enabling the brig needs no re-init.
+const BrigHookCommand = "shipmates hook brig-reminder"
+
 // InstallMemoryHook implements runtime.Runtime by delegating to
 // InstallMemoryHookAt, which callers that only need the file (persona
 // install, project init) can use without constructing a Runtime.
@@ -148,8 +156,8 @@ func InstallMemoryHookAt(projectDir string) error {
 	}
 	sessionStart, _ := hooks["SessionStart"].([]any)
 
-	groups := make([]any, 0, len(sessionStart)+1)
-	installed := false
+	groups := make([]any, 0, len(sessionStart)+2)
+	hasMemory, hasBrig := false, false
 	for _, entry := range sessionStart {
 		m, ok := entry.(map[string]any)
 		if !ok {
@@ -158,17 +166,25 @@ func InstallMemoryHookAt(projectDir string) error {
 		}
 		// Drop a legacy flat entry of ours; it never fired, and re-adding it
 		// below in group form is the migration.
-		if cmd, _ := m["command"].(string); cmd == MemoryHookCommand && m["hooks"] == nil {
+		if cmd, _ := m["command"].(string); (cmd == MemoryHookCommand || cmd == BrigHookCommand) && m["hooks"] == nil {
 			continue
 		}
 		if groupHasCommand(m, MemoryHookCommand) {
-			installed = true
+			hasMemory = true
+		}
+		if groupHasCommand(m, BrigHookCommand) {
+			hasBrig = true
 		}
 		groups = append(groups, entry)
 	}
-	if !installed {
+	if !hasMemory {
 		groups = append(groups, map[string]any{
 			"hooks": []any{map[string]any{"type": "command", "command": MemoryHookCommand}},
+		})
+	}
+	if !hasBrig {
+		groups = append(groups, map[string]any{
+			"hooks": []any{map[string]any{"type": "command", "command": BrigHookCommand}},
 		})
 	}
 	hooks["SessionStart"] = groups
@@ -282,6 +298,11 @@ func writeClaudeAgent(w io.Writer, p runtime.PersonaSpec) error {
 	if !strings.HasSuffix(body, "\n") {
 		body += "\n"
 	}
+	// Splice the Ship's Articles reminder per the operator's brig posture
+	// (user config only). Idempotent — a body that already carries the
+	// marker-delimited block gets it replaced, never stacked; a disabled
+	// brig removes it.
+	body = brig.SplicePrompt(body, brig.PromptBlock(brig.Load("")))
 	_, err := io.WriteString(w, body)
 	return err
 }

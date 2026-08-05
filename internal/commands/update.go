@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/luthermonson/shipmates/internal/berth"
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/catalog"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
@@ -104,6 +105,18 @@ func runUpdate(cat *catalog.Catalog, only, accept string) error {
 				return err
 			}
 			if err := reconcileFile(m, st, project.CommandPath(name), catBytes, "command"); err != nil {
+				return err
+			}
+		}
+		// The Ship's Articles document rides the same reconcile discipline.
+		// Skipped when the brig is disabled — update must not re-vendor a
+		// document the operator opted out of (an existing copy stays put).
+		if brig.Load("").Enabled {
+			articles, err := cat.ArticlesFile()
+			if err != nil {
+				return fmt.Errorf("read catalog ARTICLES.md: %w", err)
+			}
+			if err := reconcileFile(m, st, project.ArticlesPath(), articles, "articles"); err != nil {
 				return err
 			}
 		}
