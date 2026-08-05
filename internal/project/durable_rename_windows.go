@@ -40,9 +40,10 @@ import (
 // Concurrent replacers of the same destination are legal for callers (voyage
 // state publication is explicitly retry-idempotent), but on NTFS the losing
 // replacer can observe the winner's in-flight delete-pending state as a
-// transient ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION. Those are retried
-// briefly; a genuine permission problem still surfaces after the bounded
-// window.
+// transient ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION. Those are
+// retried; the window is sized for a saturated disk (a fully loaded test
+// suite has held the delete-pending state for seconds at a time), and a
+// genuine permission problem still surfaces once the window closes.
 func DurableRename(oldpath, newpath string) error {
 	from, err := windows.UTF16PtrFromString(oldpath)
 	if err != nil {
@@ -52,7 +53,7 @@ func DurableRename(oldpath, newpath string) error {
 	if err != nil {
 		return err
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		err = windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 		if err == nil {

@@ -323,8 +323,14 @@ func StateHash(raw []byte) string { return Hash(raw) }
 // restarted migrations). On Windows the loser of the replace race can observe
 // the winner's in-flight delete-pending file as a transient access/sharing
 // error, so those — and only those — are retried within a bounded window.
+// The window is generous because the delete-pending state persists for as
+// long as the winner's fsync-heavy write takes, which on a saturated disk
+// (the full test suite, a busy CI runner) has been observed above 9 seconds;
+// only classified contention errors wait, so a genuine permission problem
+// on a non-contended path still fails on its first attempt's error once the
+// window closes.
 func PublishSuccessor(path string, state *State, plan *Plan, hash string) (*State, error) {
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for {
 		published, err := publishSuccessorOnce(path, state, plan, hash)
 		if err == nil || !transientFSContention(err) || time.Now().After(deadline) {
