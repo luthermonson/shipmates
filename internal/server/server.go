@@ -184,6 +184,94 @@ func (s *Server) Run(ctx context.Context) error {
 	defer os.Remove(project.PortFile())
 	defer os.Remove(project.PidFile())
 
+	mux := s.routes()
+
+	httpSrv := &http.Server{Handler: mux}
+	go func() {
+		<-s.stopCh
+		s.closeLive()
+		s.closePTYs()
+		shCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shCtx)
+	}()
+
+	// Decide the idle bound BEFORE the idle watcher starts. The watcher reads
+	// s.idleBound under s.mu, so publishing it afterwards (as this used to do,
+	// with an unsynchronized write) was a data race — and a watcher tick that
+	// landed in the window would have seen a zero bound and shut the captain
+	// down as "idle".
+	conf, confErr := project.LoadConfig()
+	fleeted := confErr == nil && conf != nil && strings.TrimSpace(conf.Fleet.URL) != ""
+	idleBound := idleTimeoutEphemeral
+	if fleeted {
+		idleBound = idleTimeoutFleeted
+	}
+	s.mu.Lock()
+	s.idleBound = idleBound
+	s.fleeted = fleeted
+	s.mu.Unlock()
+
+	// Idle-timeout auto-shutdown: once nothing has happened for idleTimeout,
+	// trigger the same graceful shutdown as POST /shutdown.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.stopCh:
+				return
+			case <-ticker.C:
+				s.mu.Lock()
+				idle := time.Since(s.lastActivity)
+				bound := s.idleBound
+				fleeted := s.fleeted
+				s.mu.Unlock()
+				if idle > bound {
+					if fleeted {
+						// reap idle crew but keep the ship reachable — the
+						// fleet can wake it with a tell/pty-start any time
+						slog.Info("idle timeout: reaping crew, staying connected", "idle", idle)
+						s.closeLive()
+						s.closePTYs()
+						s.mu.Lock()
+						s.lastActivity = time.Now()
+						s.mu.Unlock()
+						continue
+					}
+					slog.Info("idle timeout reached, shutting down", "idle", idle, "bound", bound)
+					s.stopOnce.Do(func() { close(s.stopCh) })
+					return
+				}
+			}
+		}
+	}()
+
+	// Open the outbound fleet connection if one is configured. No-op when not.
+	// The fleet can then dial back through the tunnel to reach this server's
+	// localhost endpoints (which the fleet proxies under its /api/* surface).
+	if confErr == nil {
+		s.startFleet(ctx, conf)
+		// Fleet-wide deny list: fetch once on boot and refresh every 5 min.
+		// No-op when the ship isn't wired to a fleet.
+		s.startFleetPolicy(ctx, conf)
+	}
+
+	go s.beadsSyncLoop(ctx)
+	go s.attachSweeperLoop(ctx)
+
+	slog.Info("shipmates server listening", "port", port, "pid", os.Getpid())
+	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// routes builds the captain's complete HTTP surface. Split out of Run so tests
+// can exercise the real route table — path patterns, method constraints, and
+// the inline /register and /deregister ref-count handlers included — without
+// binding a port or spawning crew.
+func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /events", s.handleEventsJSON)
@@ -227,78 +315,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-
-	httpSrv := &http.Server{Handler: mux}
-	go func() {
-		<-s.stopCh
-		s.closeLive()
-		s.closePTYs()
-		shCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = httpSrv.Shutdown(shCtx)
-	}()
-
-	// Idle-timeout auto-shutdown: once nothing has happened for idleTimeout,
-	// trigger the same graceful shutdown as POST /shutdown.
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-s.stopCh:
-				return
-			case <-ticker.C:
-				s.mu.Lock()
-				idle := time.Since(s.lastActivity)
-				bound := s.idleBound
-				fleeted := s.fleeted
-				s.mu.Unlock()
-				if idle > bound {
-					if fleeted {
-						// reap idle crew but keep the ship reachable — the
-						// fleet can wake it with a tell/pty-start any time
-						slog.Info("idle timeout: reaping crew, staying connected", "idle", idle)
-						s.closeLive()
-						s.closePTYs()
-						s.mu.Lock()
-						s.lastActivity = time.Now()
-						s.mu.Unlock()
-						continue
-					}
-					slog.Info("idle timeout reached, shutting down", "idle", idle, "bound", bound)
-					s.stopOnce.Do(func() { close(s.stopCh) })
-					return
-				}
-			}
-		}
-	}()
-
-	// Open the outbound fleet connection if one is configured. No-op when not.
-	// The fleet can then dial back through the tunnel to reach this server's
-	// localhost endpoints (which the fleet proxies under its /api/* surface).
-	idleBound := idleTimeoutEphemeral
-	if conf, err := project.LoadConfig(); err == nil {
-		s.startFleet(ctx, conf)
-		// Fleet-wide deny list: fetch once on boot and refresh every 5 min.
-		// No-op when the ship isn't wired to a fleet.
-		s.startFleetPolicy(ctx, conf)
-		if conf != nil && strings.TrimSpace(conf.Fleet.URL) != "" {
-			idleBound = idleTimeoutFleeted
-			s.mu.Lock()
-			s.fleeted = true
-			s.mu.Unlock()
-		}
-	}
-	s.idleBound = idleBound
-
-	go s.beadsSyncLoop(ctx)
-	go s.attachSweeperLoop(ctx)
-
-	slog.Info("shipmates server listening", "port", port, "pid", os.Getpid())
-	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		return err
-	}
-	return nil
+	return mux
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -657,8 +674,17 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	p.ch <- body.Behavior
-	w.WriteHeader(http.StatusAccepted)
+	// Non-blocking send. p.ch is buffered to exactly one decision, so a
+	// blocking send would wedge this HTTP handler forever the moment a second
+	// resolve raced in for the same id (double-click in the UI, a retry from
+	// the fleet proxy, two operators approving at once). First decision wins;
+	// the loser gets 409 instead of a hung request and a leaked goroutine.
+	select {
+	case p.ch <- body.Behavior:
+		w.WriteHeader(http.StatusAccepted)
+	default:
+		http.Error(w, "already resolved", http.StatusConflict)
+	}
 }
 
 // hookSettings builds a --settings JSON string that routes a crew member's
