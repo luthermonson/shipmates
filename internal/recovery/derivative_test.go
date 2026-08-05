@@ -11,7 +11,7 @@ import (
 
 func derivativeFixture(t *testing.T) (*voyage.Plan, []byte, ChangeEnvelope, DerivativeProposal, time.Time) {
 	t.Helper()
-	plan := &voyage.Plan{Version: 1, Title: "approved", Objective: "bounded work", Scope: []string{"local"}, AcceptanceCriteria: []string{"pass"}, Approved: true, Tasks: []voyage.Task{{ID: "task-one", Persona: "backend", Summary: "inspect", Prompt: "inspect files", Models: []string{"gpt-5.6-luna"}, Efforts: []string{"low"}, RetrySafe: true}}}
+	plan := &voyage.Plan{Version: 1, Title: "commissioned", Objective: "bounded work", Scope: []string{"local"}, AcceptanceCriteria: []string{"pass"}, Commissioned: true, Tasks: []voyage.Task{{ID: "task-one", Persona: "backend", Summary: "inspect", Prompt: "inspect files", Models: []string{"gpt-5.6-luna"}, Efforts: []string{"low"}, RetrySafe: true}}}
 	canonical, _ := json.Marshal(plan)
 	now := time.Now().UTC()
 	env := ChangeEnvelope{SchemaVersion: SchemaVersion, ID: "env-one", ParentPlanHash: voyage.Hash(canonical), ExpiresAt: now.Add(time.Hour), MaxOperations: 2, MaxRetries: 2, MaxSuccessors: 1, MaxAssessments: 1, AllowedCapabilities: []string{"retry.model"}, AllowedEffects: []string{"bounded_retry"}, AllowedModels: []string{"gpt-5.6-terra"}}

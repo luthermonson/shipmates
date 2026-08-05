@@ -11,7 +11,7 @@ import (
 )
 
 func lineagePlan() Plan {
-	return Plan{Version: 1, Title: "Voyage", Objective: "Execute safely", Scope: []string{"backend"}, Approved: true, Tasks: []Task{
+	return Plan{Version: 1, Title: "Voyage", Objective: "Execute safely", Scope: []string{"backend"}, Commissioned: true, Tasks: []Task{
 		{ID: "task-one", Persona: "backend", Summary: "First", Prompt: "complete first"},
 		{ID: "task-two", Persona: "tester", Summary: "Second", Prompt: "complete second", DependsOn: []string{"task-one"}},
 		{ID: "task-three", Persona: "security", Summary: "Third", Prompt: "complete third", DependsOn: []string{"task-two"}},
@@ -127,19 +127,19 @@ func TestMigrateSuccessorConservativeGlobalAndEvidenceInvalidation(t *testing.T)
 	}
 }
 
-func TestMigrateSuccessorRejectsUnapprovedOrUnsafePredecessor(t *testing.T) {
+func TestMigrateSuccessorRejectsUncommissionedOrUnsafePredecessor(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "plan.json")
 	plan := lineagePlan()
 	hash, _ := writeLineagePlan(t, planPath, plan)
 	statePath := filepath.Join(dir, "state.json")
 	completedLineageState(t, &plan, hash, statePath)
-	unapproved := plan
-	unapproved.Approved = false
-	unapprovedPath := filepath.Join(dir, "unapproved.json")
-	writeLineagePlan(t, unapprovedPath, unapproved)
-	if _, err := MigrateSuccessor(planPath, unapprovedPath, statePath, filepath.Join(dir, "out.json"), time.Now().UTC()); err == nil {
-		t.Fatal("unapproved predecessor accepted")
+	uncommissioned := plan
+	uncommissioned.Commissioned = false
+	uncommissionedPath := filepath.Join(dir, "uncommissioned.json")
+	writeLineagePlan(t, uncommissionedPath, uncommissioned)
+	if _, err := MigrateSuccessor(planPath, uncommissionedPath, statePath, filepath.Join(dir, "out.json"), time.Now().UTC()); err == nil {
+		t.Fatal("uncommissioned predecessor accepted")
 	}
 	link := filepath.Join(dir, "link.json")
 	if err := os.Symlink(statePath, link); err == nil {
@@ -434,7 +434,7 @@ func TestMigrateSuccessorRejectsStaleProvenanceHashMismatchAndAmbiguousPredecess
 func TestFleetShapedAmendmentPreservesCompletedTaskOne(t *testing.T) {
 	// This fixture mirrors the preserved Fleet voyage's public plan/state shape
 	// and opaque Bead evidence without importing credentials or Codex data.
-	pre := Plan{Version: 1, Title: "Validate Fleet Command and adapt Codex for v0.4.0-beta.2", Objective: "Observe and control already-active turns safely", Scope: []string{"bootstrap", "observation", "control"}, NonGoals: []string{"remote start", "shell", "file transfer"}, BlastArea: []string{"Fleet identity", "observer", "exact-turn control"}, Risks: []string{"stale targets", "credential leakage"}, AcceptanceCriteria: []string{"bounded observation", "exact-turn refusal"}, OpenDecisions: []string{"Linux and WSL only"}, Approved: true, Tasks: []Task{
+	pre := Plan{Version: 1, Title: "Validate Fleet Command and adapt Codex for v0.4.0-beta.2", Objective: "Observe and control already-active turns safely", Scope: []string{"bootstrap", "observation", "control"}, NonGoals: []string{"remote start", "shell", "file transfer"}, BlastArea: []string{"Fleet identity", "observer", "exact-turn control"}, Risks: []string{"stale targets", "credential leakage"}, AcceptanceCriteria: []string{"bounded observation", "exact-turn refusal"}, OpenDecisions: []string{"Linux and WSL only"}, Commissioned: true, Tasks: []Task{
 		{ID: "zero-to-observed-real-codex", Persona: "backend", Summary: "Build the public bootstrap and prove zero-to-observed real Codex", Prompt: "Use public commands to prove one already-active turn", Models: []string{"gpt-5.6-luna", "gpt-5.6-terra"}, Efforts: []string{"medium", "high"}, RetrySafe: true},
 		{ID: "real-exact-turn-control", Persona: "backend", Summary: "Prove real TLS observation, steering, and interruption", Prompt: "Use the completed first-task state and prove exact-turn control", DependsOn: []string{"zero-to-observed-real-codex"}, Models: []string{"gpt-5.6-luna", "gpt-5.6-terra"}, Efforts: []string{"medium", "high"}, RetrySafe: true},
 		{ID: "security-lifecycle-boundaries", Persona: "security", Summary: "Verify credential lifecycle and privacy", Prompt: "Audit the control surface", DependsOn: []string{"real-exact-turn-control"}},

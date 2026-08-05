@@ -12,7 +12,7 @@ import (
 
 const MaxLineagePathBytes = MaxPlanBytes
 
-// MigrateSuccessor validates one explicit, approved predecessor and prepares
+// MigrateSuccessor validates one explicit, commissioned predecessor and prepares
 // a separately hashed successor. The predecessor plan/state are read-only;
 // only the successor state path may be created.
 func MigrateSuccessor(successorPlanPath, predecessorPlanPath, predecessorStatePath, successorStatePath string, now time.Time) (*State, error) {
@@ -38,11 +38,11 @@ func buildSuccessor(successorPlanPath, predecessorPlanPath, predecessorStatePath
 	}
 	successor, successorCanonical, err := Load(successorPlanPath)
 	if err != nil {
-		return nil, nil, "", errors.New("successor plan is invalid or unapproved")
+		return nil, nil, "", errors.New("successor plan is invalid or uncommissioned")
 	}
 	predecessor, predecessorCanonical, err := Load(predecessorPlanPath)
 	if err != nil {
-		return nil, nil, "", errors.New("predecessor plan is invalid or unapproved")
+		return nil, nil, "", errors.New("predecessor plan is invalid or uncommissioned")
 	}
 	predecessorHash := Hash(predecessorCanonical)
 	successorHash := Hash(successorCanonical)

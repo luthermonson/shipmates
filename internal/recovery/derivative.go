@@ -332,7 +332,7 @@ func contains(items []string, want string) bool {
 }
 
 func Derive(parent *voyage.Plan, parentCanonical []byte, env ChangeEnvelope, proposal DerivativeProposal, now time.Time, previous []MachineApprovalAttestation) (DerivativeResult, error) {
-	if parent == nil || !parent.Approved {
+	if parent == nil || !parent.Commissioned {
 		return DerivativeResult{}, errors.New("parent voyage must be approved")
 	}
 	if err := parent.Validate(); err != nil {
@@ -507,12 +507,12 @@ func invariantHash(p *voyage.Plan) string {
 		Version                                                              int
 		Title, Objective                                                     string
 		Scope, NonGoals, BlastArea, Risks, AcceptanceCriteria, OpenDecisions []string
-		Approved                                                             bool
+		Commissioned                                                             bool
 		Tasks                                                                []struct {
 			ID, Persona, Summary string
 			DependsOn            []string
 		}
-	}{p.Version, p.Title, p.Objective, p.Scope, p.NonGoals, p.BlastArea, p.Risks, p.AcceptanceCriteria, p.OpenDecisions, p.Approved, invariantTasks(p)}))
+	}{p.Version, p.Title, p.Objective, p.Scope, p.NonGoals, p.BlastArea, p.Risks, p.AcceptanceCriteria, p.OpenDecisions, p.Commissioned, invariantTasks(p)}))
 }
 
 func invariantHashExisting(parent, child *voyage.Plan) string {

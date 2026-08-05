@@ -9,7 +9,7 @@ import (
 )
 
 func validPlan() Plan {
-	return Plan{Version: 1, Title: "Release", Objective: "Ship safely", Approved: true, Tasks: []Task{
+	return Plan{Version: 1, Title: "Release", Objective: "Ship safely", Commissioned: true, Tasks: []Task{
 		{ID: "build", Persona: "backend", Summary: "Build it", Prompt: "Implement and test."},
 		{ID: "verify", Persona: "tester", Summary: "Verify it", Prompt: "Run release tests.", DependsOn: []string{"build"}},
 	}}
@@ -29,9 +29,9 @@ func TestPlanValidateAndOrder(t *testing.T) {
 	}
 }
 
-func TestLoadDraftAcceptsUnapprovedStructuredPlanningFields(t *testing.T) {
+func TestLoadDraftAcceptsUncommissionedStructuredPlanningFields(t *testing.T) {
 	p := validPlan()
-	p.Approved = false
+	p.Commissioned = false
 	p.Scope = []string{"API"}
 	p.BlastArea = []string{"Worker"}
 	p.AcceptanceCriteria = []string{"Tests pass"}
@@ -41,22 +41,22 @@ func TestLoadDraftAcceptsUnapprovedStructuredPlanningFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _, err := LoadDraft(path)
-	if err != nil || got.Approved || got.BlastArea[0] != "Worker" {
+	if err != nil || got.Commissioned || got.BlastArea[0] != "Worker" {
 		t.Fatalf("draft = %+v, %v", got, err)
 	}
-	if _, _, err := Load(path); err == nil || !strings.Contains(err.Error(), "not captain-approved") {
+	if _, _, err := Load(path); err == nil || !strings.Contains(err.Error(), "not commissioned") {
 		t.Fatalf("execution accepted draft: %v", err)
 	}
 }
 
-func TestPlanRejectsUnapprovedCyclesAndUnknownFields(t *testing.T) {
-	unapproved := validPlan()
-	unapproved.Approved = false
-	cycle := Plan{Version: 1, Title: "x", Objective: "y", Approved: true, Tasks: []Task{
+func TestPlanRejectsUncommissionedCyclesAndUnknownFields(t *testing.T) {
+	uncommissioned := validPlan()
+	uncommissioned.Commissioned = false
+	cycle := Plan{Version: 1, Title: "x", Objective: "y", Commissioned: true, Tasks: []Task{
 		{ID: "one", Persona: "backend", Summary: "one", Prompt: "one", DependsOn: []string{"two"}},
 		{ID: "two", Persona: "tester", Summary: "two", Prompt: "two", DependsOn: []string{"one"}},
 	}}
-	for name, plan := range map[string]Plan{"unapproved": unapproved, "cycle": cycle} {
+	for name, plan := range map[string]Plan{"uncommissioned": uncommissioned, "cycle": cycle} {
 		t.Run(name, func(t *testing.T) {
 			if err := plan.Validate(); err == nil {
 				t.Fatal("expected validation error")
@@ -65,13 +65,13 @@ func TestPlanRejectsUnapprovedCyclesAndUnknownFields(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "plan.json")
-	if err := os.WriteFile(path, []byte(`{"version":1,"title":"x","objective":"y","approved":true,"tasks":[],"surprise":true}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"version":1,"title":"x","objective":"y","commissioned":true,"tasks":[],"surprise":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := Load(path); err == nil {
 		t.Fatal("expected unknown field error")
 	}
-	if err := os.WriteFile(path, []byte(`{"version":1,"title":"x","objective":"y","approved":true,"tasks":[]} garbage`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"version":1,"title":"x","objective":"y","commissioned":true,"tasks":[]} garbage`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := Load(path); err == nil {

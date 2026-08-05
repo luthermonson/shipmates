@@ -32,8 +32,12 @@ type Plan struct {
 	// final acceptance marker. Empty preserves legacy plans, whose acceptance
 	// remains unknown rather than implicitly passing.
 	AcceptanceGateTask string `json:"acceptance_gate_task,omitempty"`
-	Approved           bool   `json:"approved"`
-	Tasks              []Task `json:"tasks"`
+	// Commissioned is the admiral's execution authorization. The first mate
+	// writes the plan with commissioned false; only the admiral commissions
+	// it (shipmates commission, or a documented manual edit) — never a
+	// persona turn.
+	Commissioned bool   `json:"commissioned"`
+	Tasks        []Task `json:"tasks"`
 }
 
 type Task struct {
@@ -130,14 +134,14 @@ func Load(path string) (*Plan, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if !p.Approved {
-		return nil, nil, errors.New("voyage is not captain-approved")
+	if !p.Commissioned {
+		return nil, nil, errors.New("voyage is not commissioned; the admiral must run: shipmates commission")
 	}
 	return p, canonical, nil
 }
 
-// LoadDraft accepts an unapproved planning document while preserving every
-// structural and safety validation used by execution.
+// LoadDraft accepts an uncommissioned planning document while preserving
+// every structural and safety validation used by execution.
 func LoadDraft(path string) (*Plan, []byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -172,15 +176,15 @@ func (p *Plan) Validate() error {
 	return p.validate(true)
 }
 
-func (p *Plan) validate(requireApproval bool) error {
+func (p *Plan) validate(requireCommission bool) error {
 	if p.Version != 1 {
 		return errors.New("voyage plan version must be 1")
 	}
 	if strings.TrimSpace(p.Title) == "" || strings.TrimSpace(p.Objective) == "" {
 		return errors.New("voyage title and objective are required")
 	}
-	if requireApproval && !p.Approved {
-		return errors.New("voyage is not captain-approved")
+	if requireCommission && !p.Commissioned {
+		return errors.New("voyage is not commissioned; the admiral must run: shipmates commission")
 	}
 	for label, values := range map[string][]string{"scope": p.Scope, "non_goals": p.NonGoals, "blast_area": p.BlastArea, "risks": p.Risks, "acceptance_criteria": p.AcceptanceCriteria, "open_decisions": p.OpenDecisions} {
 		if len(values) > 64 {

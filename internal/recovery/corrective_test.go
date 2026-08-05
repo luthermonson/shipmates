@@ -12,7 +12,7 @@ import (
 
 func correctiveFixture() (*voyage.Plan, voyage.Task, CrewResult) {
 	task := voyage.Task{ID: "task-one", Persona: "crew", Summary: "original", Prompt: "original", RetrySafe: true, Recovery: &voyage.RecoveryTask{Enabled: true, MaxAttempts: 2, MaxInfrastructureRetries: 2, MaxTokens: 1000, Models: []string{"luna", "terra"}, Efforts: []string{"medium", "high"}, ApprovedCriterionIDs: []string{"criterion-one"}, CorrectiveTemplates: []voyage.CorrectiveTemplate{{ID: "template-one", Summary: "correct", Prompt: "correct", VerificationSummary: "verify", VerificationPrompt: "verify", CriterionIDs: []string{"criterion-one"}, RetrySafe: true}}}}
-	plan := &voyage.Plan{Version: 1, Title: "p", Objective: "o", Approved: true, Tasks: []voyage.Task{task}}
+	plan := &voyage.Plan{Version: 1, Title: "p", Objective: "o", Commissioned: true, Tasks: []voyage.Task{task}}
 	canonical, _ := json.Marshal(plan)
 	result := CrewResult{Schema: CrewResultSchema, PlanHash: voyage.Hash(canonical), GlobalFingerprint: voyage.GlobalFingerprint(plan), TaskID: task.ID, TaskFingerprint: voyage.TaskFingerprint(task), AttemptID: "task-one-1", Model: "luna", Effort: "medium", Outcome: OutcomeNoGo, Reason: ReasonVerifierNoGo, Summary: "verification failed", Tokens: TokenUsage{Reserved: 100, Used: 100}, Verifier: VerifierResult{Status: VerifierNoGo, Role: "designated-verifier", CriterionIDs: []string{"criterion-one"}, Evidence: []CrewEvidence{{Code: "check", Digest: strings.Repeat("d", 64)}}}, CorrectiveTemplateID: "template-one", CreatedAt: time.Now().UTC()}
 	return plan, task, result
