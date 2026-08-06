@@ -37,16 +37,16 @@ Shipmates uses a naval hierarchy that maps 1:1 to real roles:
     run on the same machine (this workstation runs 4-5).
 
           ┌───────────────────────────────────────┐
-          │  card-cannon                          │
-          │    Captain (picard) ── ► mates        │
+          │  project-one                          │
+          │    Captain ── ► mates                 │
           │      architect, security, frontend,   │
           │      backend, tester                  │
           └───────────────────────────────────────┘
 
           ┌───────────────────────────────────────┐
-          │  better                               │
-          │    Captain (coach) ── ► mates         │
-          │      (hockey lineup)                  │
+          │  project-two                          │
+          │    Captain ── ► mates                 │
+          │      (a smaller crew)                 │
           └───────────────────────────────────────┘
 
           ┌───────────────────────────────────────┐
@@ -186,7 +186,7 @@ Drag a file into the Fleet Command UI (or use the 📷 Camera button on mobile).
 Same thing works from CLI:
 
 ```bash
-shipmates fleet show card-cannon:picard bug.png --caption "login redirect misaligned on iPhone"
+shipmates fleet show project-one:captain bug.png --caption "login redirect misaligned on iPhone"
 ```
 
 ## Permission model

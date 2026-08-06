@@ -35,11 +35,11 @@ func TestOriginFromGitConfig(t *testing.T) {
 	if err := os.MkdirAll(git, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = git@github.com:other/thing.git\n[remote \"origin\"]\n\turl = git@github.com:luthermonson/card-cannon.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+	cfg := "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = git@github.com:other/thing.git\n[remote \"origin\"]\n\turl = git@github.com:example/project-one.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
 	if err := os.WriteFile(filepath.Join(git, "config"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := originFromGitConfig(dir); got != "git@github.com:luthermonson/card-cannon.git" {
+	if got := originFromGitConfig(dir); got != "git@github.com:example/project-one.git" {
 		t.Fatalf("originFromGitConfig = %q", got)
 	}
 	if got := originFromGitConfig(t.TempDir()); got != "" {

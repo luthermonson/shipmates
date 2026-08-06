@@ -145,16 +145,16 @@ func TestSessionLaunchCreatesWhenTrackedIDMissing(t *testing.T) {
 
 func TestSessionLaunchUsesConfiguredPrefix(t *testing.T) {
 	t.Chdir(t.TempDir())
-	if err := os.WriteFile(ConfigName, []byte("sessionPrefix: card-cannon\n"), 0o644); err != nil {
+	if err := os.WriteFile(ConfigName, []byte("sessionPrefix: project-one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, args, _, name, _, _ := SessionLaunch("picard", false)
-	if name != "card-cannon-picard" {
-		t.Fatalf("name = %q, want card-cannon-picard", name)
+	if name != "project-one-picard" {
+		t.Fatalf("name = %q, want project-one-picard", name)
 	}
 	// The prefixed name is what lands in --name.
-	if args[3] != "card-cannon-picard" {
-		t.Fatalf("args = %v, want --name card-cannon-picard", args)
+	if args[3] != "project-one-picard" {
+		t.Fatalf("args = %v, want --name project-one-picard", args)
 	}
 }
 
