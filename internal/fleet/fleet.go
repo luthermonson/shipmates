@@ -2,32 +2,28 @@
 // they want a single pane across many shipmates captains. Captains dial out
 // to the fleet over a websocket (rancher/remotedialer); the fleet then
 // proxies operator-facing /api/* calls back through the tunnel to each
-// captain's local 127.0.0.1 server. Optional SQLite persistence mirrors
-// captain events for replay.
-//
-// The fleet is *not* a UI host. It exposes a JSON API consumed by the
-// shipmates CLI (`shipmates fleet ls / tail / tell / pending / resolve`). A
-// browser frontend could be glued on later via the same API.
+// captain's local 127.0.0.1 server. It also hosts the embedded Fleet Command
+// browser UI, which consumes the same JSON API as the shipmates CLI.
 package fleet
 
 import (
-	"bufio"
+	"bytes"
 	"context"
-	"database/sql"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/rancher/remotedialer"
-	_ "modernc.org/sqlite"
+
+	"github.com/luthermonson/shipmates/internal/api"
 )
 
 //go:embed all:ui
@@ -50,7 +46,6 @@ type Server struct {
 	// already on the graph, so the work isn't lost, just un-nudged).
 	dispatchQ []queuedDispatch
 
-	store  *store       // nil when --store wasn't passed
 	conv   *convConfig  // nil unless voice/conversation flags are set
 	policy *policyState // fleet-wide deny list source; served via /api/fleet-policy
 
@@ -67,44 +62,33 @@ type Server struct {
 // OpenAI-compatible or whisper.cpp transcription server). The http client is
 // reused so connections stay pooled.
 type convConfig struct {
-	url      string // OpenAI-compatible base URL (…/v1); "" disables /api/conversation
-	model    string // model tag/name sent in requests
-	key      string // bearer key for hosted OAI-compatible endpoints; "" = no auth (local)
+	url      string       // OpenAI-compatible base URL (…/v1); "" disables /api/conversation
+	model    string       // model tag/name sent in requests
+	key      string       // bearer key for hosted OAI-compatible endpoints; "" = no auth (local)
 	brain    *claudeBrain // non-nil when --llm-backend=claude-cli
-	voice    string // voice tag: Edge (en-US-AriaNeural) or the OAI server's voice name
-	ttsURL   string // OpenAI-compatible /v1/audio/speech endpoint; "" = Edge websocket
-	ttsModel string // model field for OAI-style TTS servers
-	sttURL   string // transcription endpoint; "" disables /api/stt
-	sttModel string // model field sent to the transcription server (OAI-style)
+	voice    string       // voice tag: Edge (en-US-AriaNeural) or the OAI server's voice name
+	ttsURL   string       // OpenAI-compatible /v1/audio/speech endpoint; "" = Edge websocket
+	ttsModel string       // model field for OAI-style TTS servers
+	sttURL   string       // transcription endpoint; "" disables /api/stt
+	sttModel string       // model field sent to the transcription server (OAI-style)
 	client   *http.Client
 }
 
-// Captain is the fleet's record of one connected shipmates captain.
-type Captain struct {
-	ClientKey   string    `json:"client_key"`
-	Repo        string    `json:"repo"`
-	RepoURL     string    `json:"repo_url,omitempty"` // browsable origin URL (for gh links)
-	InstallID   string    `json:"install_id"`
-	Persona     string    `json:"persona"`
-	Port        int       `json:"port"` // captain's local server port (for tunnel dial)
-	FirstSeen   time.Time `json:"first_seen"`
-	LastSeen    time.Time `json:"last_seen"`
-}
+type Captain = api.Captain
 
 // Options configures the fleet.
 type Options struct {
-	Addr        string // listen address (e.g. ":8443")
-	Token       string // shared secret; if empty, auth is disabled (dev only)
-	Store       string // optional SQLite path; empty = ephemeral
-	LLMBackend  string // "openai" (default: chat-completions HTTP) or "claude-cli" (spawn claude -p on this host)
-	LLMURL      string // OpenAI-compatible base URL incl. /v1 (ollama, llama.cpp, LM Studio, OpenAI…); enables /api/conversation
-	LLMModel    string // model name for the conversation loop, e.g. "qwen2.5:7b" or "haiku"
-	LLMKey      string // bearer key for hosted endpoints (read from env by the CLI layer); "" = no auth
-	TTSVoice    string // voice tag (Edge: en-US-AriaNeural; OAI servers: e.g. af_heart); empty + no TTSURL disables /api/tts
-	TTSURL      string // optional OpenAI-compatible /v1/audio/speech endpoint (kokoro-fastapi etc.); overrides Edge
-	TTSModel    string // model field for OAI-style TTS servers
-	STTURL      string // optional transcription endpoint (whisper.cpp /inference or OAI /v1/audio/transcriptions); empty disables /api/stt
-	STTModel    string // model name forwarded to OAI-style STT servers; whisper.cpp ignores it
+	Addr       string // listen address (e.g. ":8443")
+	Token      string // shared secret; if empty, auth is disabled (dev only)
+	LLMBackend string // "openai" (default: chat-completions HTTP) or "claude-cli" (spawn claude -p on this host)
+	LLMURL     string // OpenAI-compatible base URL incl. /v1 (ollama, llama.cpp, LM Studio, OpenAI…); enables /api/conversation
+	LLMModel   string // model name for the conversation loop, e.g. "qwen2.5:7b" or "haiku"
+	LLMKey     string // bearer key for hosted endpoints (read from env by the CLI layer); "" = no auth
+	TTSVoice   string // voice tag (Edge: en-US-AriaNeural; OAI servers: e.g. af_heart); empty + no TTSURL disables /api/tts
+	TTSURL     string // optional OpenAI-compatible /v1/audio/speech endpoint (kokoro-fastapi etc.); overrides Edge
+	TTSModel   string // model field for OAI-style TTS servers
+	STTURL     string // optional transcription endpoint (whisper.cpp /inference or OAI /v1/audio/transcriptions); empty disables /api/stt
+	STTModel   string // model name forwarded to OAI-style STT servers; whisper.cpp ignores it
 	// PolicyPath overrides the on-disk fleet-policy YAML location. Empty =
 	// use the SHIPMATES_FLEET_POLICY env var or ~/.shipmates/fleet-policy.yaml.
 	PolicyPath string
@@ -113,15 +97,8 @@ type Options struct {
 // New constructs the fleet. The returned Server is ready to Run.
 func New(opts Options) (*Server, error) {
 	b := &Server{
-		token: strings.TrimSpace(opts.Token),
+		token:    strings.TrimSpace(opts.Token),
 		captains: map[string]*Captain{},
-	}
-	if opts.Store != "" {
-		s, err := openStore(opts.Store)
-		if err != nil {
-			return nil, fmt.Errorf("open store %s: %w", opts.Store, err)
-		}
-		b.store = s
 	}
 	if opts.LLMURL != "" || opts.LLMBackend == "claude-cli" || opts.TTSVoice != "" || opts.TTSURL != "" || opts.STTURL != "" {
 		b.conv = &convConfig{
@@ -152,8 +129,10 @@ func New(opts Options) (*Server, error) {
 	return b, nil
 }
 
-// Run binds the fleet HTTP listener and serves until ctx is cancelled.
-func (b *Server) Run(ctx context.Context, addr string) error {
+// Handler returns Fleet Command's complete authenticated HTTP surface. Keeping
+// route construction separate from listener ownership lets production Run and
+// autonomous integration tests exercise the exact same mux.
+func (b *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/connect", b.dialer)
 	mux.HandleFunc("GET /login", b.handleLogin)
@@ -163,9 +142,7 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /api/fleet-policy", b.handleFleetPolicy)
 	mux.HandleFunc("GET /api/pending", b.handleAggregatePending)
 	mux.HandleFunc("GET /api/captain/{key}/feed", b.proxyGet("/feed"))
-	mux.HandleFunc("GET /api/captain/{key}/events", b.proxyGet("/events"))
 	mux.HandleFunc("GET /api/captain/{key}/pending", b.proxyGet("/pending"))
-	mux.HandleFunc("GET /api/captain/{key}/status", b.proxyGet("/status.json"))
 	mux.HandleFunc("GET /api/captain/{key}/beads", b.proxyGet("/beads.json"))
 	mux.HandleFunc("GET /api/captain/{key}/beads/summary", b.proxyGet("/beads/summary"))
 	mux.HandleFunc("GET /api/status", b.handleAggregateStatus)
@@ -193,24 +170,19 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /api/voice/config", b.handleVoiceConfig)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 
-	// Mount the embedded UI at /. fs.Sub drops the "ui" prefix so paths like
-	// /style.css and /app.js resolve to ui/style.css and ui/app.js. The
-	// individual UI files (style.css, app.js) need to be readable without
-	// auth so the /login page can style itself; auth-gating is enforced by
-	// authGate based on path, and the login.html / style.css / app.js assets
-	// are harmless on their own.
 	if sub, err := fs.Sub(uiFS, "ui"); err == nil {
 		fsrv := http.FileServer(http.FS(sub))
-		// no-cache: the UI ships embedded in the binary and changes on every
-		// deploy; a stale cached app.js against fresh index.html breaks the
-		// page in confusing ways. Revalidating a ~300KB UI per load is cheap.
 		mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-cache")
 			fsrv.ServeHTTP(w, r)
 		}))
 	}
+	return b.authGate(mux)
+}
 
-	srv := &http.Server{Addr: addr, Handler: b.authGate(mux)}
+// Run binds the fleet HTTP listener and serves until ctx is cancelled.
+func (b *Server) Run(ctx context.Context, addr string) error {
+	srv := &http.Server{Addr: addr, Handler: b.Handler()}
 	go func() {
 		<-ctx.Done()
 		shCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -218,12 +190,9 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 		_ = srv.Shutdown(shCtx)
 	}()
 
-	if b.store != nil {
-		go b.mirrorLoop(ctx)
-	}
 	go b.dispatchSweepLoop(ctx)
 
-	slog.Info("fleet listening", "addr", addr, "auth", b.token != "", "store", b.store != nil)
+	slog.Info("fleet listening", "addr", addr, "auth", b.token != "")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -262,30 +231,21 @@ func (b *Server) authorize(req *http.Request) (clientKey string, authed bool, er
 	existing.Port = port
 	existing.LastSeen = now
 	b.mu.Unlock()
-	if b.store != nil {
-		_ = b.store.upsertCaptain(existing)
-	}
 	slog.Info("fleet: captain connected", "client_key", clientKey, "port", port)
 	return clientKey, true, nil
 }
 
-// handleCaptains lists all captains the fleet knows about, intersected with
-// the set currently connected (so stale entries from prior runs don't show
-// up). When a store is configured, disconnected captains still surface from
-// the store so an operator can replay their history.
+// handleCaptains lists all captains this Fleet process has seen and marks
+// which currently have a live tunnel session.
 func (b *Server) handleCaptains(w http.ResponseWriter, r *http.Request) {
 	connected := map[string]bool{}
 	for _, k := range b.dialer.ListClients() {
 		connected[k] = true
 	}
-	type wire struct {
-		Captain
-		Connected bool `json:"connected"`
-	}
 	b.mu.Lock()
-	out := make([]wire, 0, len(b.captains))
+	out := make([]api.CaptainStatus, 0, len(b.captains))
 	for k, l := range b.captains {
-		out = append(out, wire{Captain: *l, Connected: connected[k]})
+		out = append(out, api.CaptainStatus{Captain: *l, Connected: connected[k]})
 	}
 	b.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -323,31 +283,20 @@ func (b *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	writeProxied(w, status, body, err)
 }
 
-// handleAggregatePending fans out to every connected captain's /pending.json,
+// handleAggregatePending fans out to every connected captain's /pending,
 // flattens the results, and returns one array tagged with client_key. Lets the
 // UI poll once per tick instead of (N leads) calls.
 func (b *Server) handleAggregatePending(w http.ResponseWriter, r *http.Request) {
-	type entry struct {
-		ClientKey string `json:"client_key"`
-		Repo      string `json:"repo"`
-		ID        string `json:"id"`
-		Persona   string `json:"persona"`
-		Tool      string `json:"tool"`
-	}
 	clients := b.dialer.ListClients()
-	results := make(chan []entry, len(clients))
+	results := make(chan []api.FleetPending, len(clients))
 	for _, key := range clients {
 		go func(key string) {
-			body, status, err := b.proxy(r.Context(), key, "GET", "/pending.json", nil)
+			body, status, err := b.proxy(r.Context(), key, "GET", "/pending", nil)
 			if err != nil || status >= 300 {
 				results <- nil
 				return
 			}
-			var raw []struct {
-				ID      string `json:"id"`
-				Persona string `json:"persona"`
-				Tool    string `json:"tool"`
-			}
+			var raw []api.Pending
 			if err := json.Unmarshal(body, &raw); err != nil {
 				results <- nil
 				return
@@ -359,14 +308,14 @@ func (b *Server) handleAggregatePending(w http.ResponseWriter, r *http.Request) 
 			if captain != nil {
 				repo = captain.Repo
 			}
-			out := make([]entry, 0, len(raw))
+			out := make([]api.FleetPending, 0, len(raw))
 			for _, p := range raw {
-				out = append(out, entry{ClientKey: key, Repo: repo, ID: p.ID, Persona: p.Persona, Tool: p.Tool})
+				out = append(out, api.FleetPending{Pending: p, ClientKey: key, Repo: repo})
 			}
 			results <- out
 		}(key)
 	}
-	all := make([]entry, 0)
+	all := make([]api.FleetPending, 0)
 	for range clients {
 		all = append(all, <-results...)
 	}
@@ -374,11 +323,8 @@ func (b *Server) handleAggregatePending(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(all)
 }
 
-// handleStream is an SSE endpoint that polls the captain's /events through the
-// tunnel and pushes new events to the connected browser. The connection lives
-// for as long as the client holds it open; closing the EventSource (e.g. the
-// operator navigates away from the tab) ends the goroutine and drops history,
-// matching the "ephemeral live stream" model we picked for v1.
+// handleStream is an SSE endpoint that advances through the captain's bounded
+// event log by sequence cursor and pushes new events to the browser.
 func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	b.mu.Lock()
@@ -404,11 +350,12 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	keepalive := time.NewTicker(30 * time.Second)
 	defer keepalive.Stop()
-	// Index watermark, not timestamp: the captain's event log is append-only, so
-	// "everything past what we already sent" is exact. A timestamp watermark
-	// silently dropped all-but-the-first of any same-second batch — which is
-	// precisely what a broadcast tell produces.
-	sent := 0
+	cursor := uint64(0)
+	if last := r.Header.Get("Last-Event-ID"); last != "" {
+		if parsed, err := strconv.ParseUint(last, 10, 64); err == nil {
+			cursor = parsed
+		}
+	}
 
 	for {
 		select {
@@ -424,29 +371,30 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			continue
 		case <-ticker.C:
 		}
-		body, status, err := b.proxy(r.Context(), key, "GET", "/events", nil)
+		path := fmt.Sprintf("/events?after=%d", cursor)
+		body, status, err := b.proxy(r.Context(), key, "GET", path, nil)
 		if err != nil || status >= 300 {
 			continue
 		}
-		// Raw passthrough: the captain's event schema grows (timeline stats,
-		// permission fields) and re-marshaling a named subset here silently
-		// stripped every field this proxy didn't know about.
-		var events []json.RawMessage
+		var events []api.Event
 		if err := json.Unmarshal(body, &events); err != nil {
 			continue
 		}
-		if len(events) < sent {
-			sent = 0 // captain restarted and its log reset; replay from the top
-		}
-		if len(events) == sent {
+		if len(events) == 0 {
 			continue
 		}
-		for _, e := range events[sent:] {
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", e); err != nil {
+		for _, e := range events {
+			payload, err := json.Marshal(e)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", e.Seq, payload); err != nil {
 				return
 			}
+			if e.Seq > cursor {
+				cursor = e.Seq
+			}
 		}
-		sent = len(events)
 		flusher.Flush()
 	}
 }
@@ -456,62 +404,29 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 // http.NewRequestWithContext + http.ReadResponse on a hand-rolled connection
 // because the standard http.Transport doesn't accept an arbitrary net.Conn.
 func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body []byte) ([]byte, int, error) {
-	b.mu.Lock()
-	captain, ok := b.captains[clientKey]
-	b.mu.Unlock()
-	if !ok {
-		return nil, http.StatusNotFound, fmt.Errorf("no such captain: %s", clientKey)
-	}
-	if !b.dialer.HasSession(clientKey) {
-		return nil, http.StatusGatewayTimeout, fmt.Errorf("captain %s not currently connected", clientKey)
-	}
-	dial := b.dialer.Dialer(clientKey)
-	addr := fmt.Sprintf("127.0.0.1:%d", captain.Port)
-	conn, err := dial(ctx, "tcp", addr)
+	rt, status, err := b.captainTransport(clientKey)
 	if err != nil {
-		return nil, http.StatusBadGateway, fmt.Errorf("dial captain: %w", err)
+		return nil, status, err
 	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-
-	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: captain\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", method, path, len(body))
-	if _, err := io.WriteString(conn, req); err != nil {
-		return nil, http.StatusBadGateway, err
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, "http://captain"+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
 	}
 	if len(body) > 0 {
-		if _, err := conn.Write(body); err != nil {
-			return nil, http.StatusBadGateway, err
-		}
+		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := readHTTPResponse(conn)
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		return nil, http.StatusBadGateway, fmt.Errorf("request captain: %w", err)
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, http.StatusBadGateway, err
 	}
-	return resp.Body, resp.Status, nil
-}
-
-type proxyResp struct {
-	Status int
-	Body   []byte
-}
-
-// readHTTPResponse reads one HTTP/1.1 response off a net.Conn via the stdlib
-// parser, which decodes Transfer-Encoding: chunked. The previous hand-rolled
-// header/body split did not — Go servers only chunk responses that outgrow
-// the 2KB write buffer, so small payloads worked while anything bigger (a
-// grown /events history) returned chunk-size framing glued into the body and
-// broke every JSON consumer downstream.
-func readHTTPResponse(conn net.Conn) (*proxyResp, error) {
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	return &proxyResp{Status: resp.StatusCode, Body: body}, nil
+	return out, resp.StatusCode, nil
 }
 
 func writeProxied(w http.ResponseWriter, status int, body []byte, err error) {
@@ -521,104 +436,4 @@ func writeProxied(w http.ResponseWriter, status int, body []byte, err error) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
-}
-
-// mirrorLoop polls each connected captain's /events endpoint at a fixed interval
-// and persists any new events to SQLite. The captain-side feed is monotonically
-// appended, so we dedupe by tracking the highest (Time, Persona, Type, Text)
-// composite per client_key.
-func (b *Server) mirrorLoop(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	lastTS := map[string]string{} // clientKey -> max Time string seen
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		for _, key := range b.dialer.ListClients() {
-			body, status, err := b.proxy(ctx, key, "GET", "/events", nil)
-			if err != nil || status >= 300 {
-				continue
-			}
-			var events []struct {
-				Time    string `json:"time"`
-				Persona string `json:"persona"`
-				Type    string `json:"type"`
-				Text    string `json:"text"`
-			}
-			if err := json.Unmarshal(body, &events); err != nil {
-				continue
-			}
-			high := lastTS[key]
-			for _, e := range events {
-				if e.Time <= high {
-					continue
-				}
-				_ = b.store.insertEvent(key, e.Time, e.Persona, e.Type, e.Text)
-			}
-			if len(events) > 0 {
-				if t := events[len(events)-1].Time; t > high {
-					lastTS[key] = t
-				}
-			}
-		}
-	}
-}
-
-// store is the optional SQLite mirror.
-type store struct {
-	db *sql.DB
-}
-
-func openStore(path string) (*store, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, err
-	}
-	const schema = `
-	CREATE TABLE IF NOT EXISTS captains (
-		client_key TEXT PRIMARY KEY,
-		repo TEXT, install_id TEXT, persona TEXT,
-		first_seen INTEGER, last_seen INTEGER
-	);
-	CREATE TABLE IF NOT EXISTS events (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		client_key TEXT, ts TEXT, persona TEXT, kind TEXT, text TEXT
-	);
-	CREATE INDEX IF NOT EXISTS events_client_ts ON events(client_key, ts);
-	`
-	if _, err := db.Exec(schema); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return &store{db: db}, nil
-}
-
-func (s *store) upsertCaptain(l *Captain) error {
-	_, err := s.db.Exec(`
-		INSERT INTO captains (client_key, repo, install_id, persona, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(client_key) DO UPDATE SET
-			repo=excluded.repo,
-			install_id=excluded.install_id,
-			persona=excluded.persona,
-			last_seen=excluded.last_seen
-	`, l.ClientKey, l.Repo, l.InstallID, l.Persona, l.FirstSeen.Unix(), l.LastSeen.Unix())
-	return err
-}
-
-func (s *store) insertEvent(clientKey, ts, persona, kind, text string) error {
-	_, err := s.db.Exec(`INSERT INTO events (client_key, ts, persona, kind, text) VALUES (?, ?, ?, ?, ?)`,
-		clientKey, ts, persona, kind, text)
-	return err
-}
-
-// Close releases the SQLite store, if any.
-func (b *Server) Close() error {
-	if b.store != nil {
-		return b.store.db.Close()
-	}
-	return nil
 }

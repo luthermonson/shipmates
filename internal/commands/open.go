@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/luthermonson/shipmates/internal/backend"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
 )
@@ -37,7 +38,11 @@ func Open() *cli.Command {
 				return err
 			}
 
-			cfg, idArgs, id, name, fp := sessionLaunch(persona, c.Bool("fresh"))
+			cfg, idArgs, id, name, fp := project.SessionLaunch(persona, c.Bool("fresh"))
+			descriptor := cfg.BackendDescriptor()
+			if !descriptor.Supports(backend.Interactive) || descriptor.Kind != backend.Claude {
+				return fmt.Errorf("persona %s backend %q does not support interactive open", persona, descriptor.Kind)
+			}
 			args := append([]string{}, idArgs...) // interactive: no -p
 			args = append(args, cfg.LaunchFlags(true)...)
 			if cfg.RemoteControl != "" {

@@ -24,11 +24,9 @@ func TestFetchFleetPolicy_HappyPath(t *testing.T) {
 	defer fake.Close()
 
 	s := &Server{
-		perms:  permissions.NewEvaluatorWithRules(permissions.MergedRules{}),
+		perms:  permissions.NewEvaluator(t.TempDir()),
 		stopCh: make(chan struct{}),
 	}
-	// Broadly allow so only the fleet deny would gate the call.
-	s.perms = permissions.NewEvaluatorWithRules(rulesFromRaw([]string{"Bash"}, nil, nil))
 
 	if err := s.fetchFleetPolicy(context.Background(), fake.URL, "secret-token"); err != nil {
 		t.Fatalf("fetch: %v", err)
@@ -57,7 +55,7 @@ func TestFetchFleetPolicy_ErrorKeepsLastKnown(t *testing.T) {
 	defer fake.Close()
 
 	s := &Server{
-		perms:  permissions.NewEvaluatorWithRules(rulesFromRaw([]string{"Bash"}, nil, nil)),
+		perms:  permissions.NewEvaluator(t.TempDir()),
 		stopCh: make(chan struct{}),
 	}
 	if err := s.fetchFleetPolicy(context.Background(), fake.URL, ""); err != nil {
@@ -73,20 +71,4 @@ func TestFetchFleetPolicy_ErrorKeepsLastKnown(t *testing.T) {
 	if d.Effect != permissions.EffectDeny {
 		t.Fatalf("last-known policy must survive fetch failure, got %v (%s)", d.Effect, d.Reason)
 	}
-}
-
-// rulesFromRaw is a small helper used inside this package's tests. Kept
-// local so the permissions package doesn't have to export its test helper.
-func rulesFromRaw(allow, ask, deny []string) permissions.MergedRules {
-	var r permissions.MergedRules
-	for _, a := range allow {
-		r.Allow = append(r.Allow, permissions.ParseRule(a))
-	}
-	for _, a := range ask {
-		r.Ask = append(r.Ask, permissions.ParseRule(a))
-	}
-	for _, d := range deny {
-		r.Deny = append(r.Deny, permissions.ParseRule(d))
-	}
-	return r
 }

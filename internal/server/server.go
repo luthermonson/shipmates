@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/api"
+	"github.com/luthermonson/shipmates/internal/backend"
 	"github.com/luthermonson/shipmates/internal/permissions"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/streamjson"
@@ -41,18 +43,7 @@ var errStaleSession = errors.New("claude has no record of the tracked session")
 // only for permission events so the UI can render allow/deny actions without
 // parsing the free-form Text. Cost/Duration/Model are populated on "result"
 // events (the headless-timeline stats claude reports per turn).
-type Event struct {
-	Time       string  `json:"time"`
-	Persona    string  `json:"persona"`
-	Type       string  `json:"type"`
-	Text       string  `json:"text"`
-	Tool       string  `json:"tool,omitempty"`
-	Input      string  `json:"input,omitempty"` // e.g. the Bash command, the path being written
-	ID         string  `json:"id,omitempty"`
-	CostUSD    float64 `json:"cost_usd,omitempty"`
-	DurationMS int64   `json:"duration_ms,omitempty"`
-	Model      string  `json:"model,omitempty"`
-}
+type Event = api.Event
 
 // liveProc is a persistent crew process the server can talk to mid-work.
 type liveProc struct {
@@ -66,7 +57,7 @@ type pending struct {
 	id      string
 	persona string
 	tool    string
-	input   string // human-friendly summary of tool_input (e.g. the Bash command)
+	input   string      // human-friendly summary of tool_input (e.g. the Bash command)
 	ch      chan string // receives "allow" or "deny"
 }
 
@@ -75,6 +66,7 @@ type Server struct {
 	port     int
 	mu       sync.Mutex
 	events   []Event
+	eventSeq uint64
 	live     map[string]*liveProc
 	ptys     map[string]*ptyProc
 	pendings map[string]*pending
@@ -83,8 +75,8 @@ type Server struct {
 	stopOnce sync.Once
 	stopCh   chan struct{}
 
-	refs         int           // active /register count
-	lastActivity time.Time     // last register/deregister/event (guarded by s.mu)
+	refs         int           // active live/PTY process count
+	lastActivity time.Time     // last process or event activity (guarded by s.mu)
 	idleBound    time.Duration // chosen in Run, based on whether a fleet is configured
 	fleeted      bool          // wired to a central fleet (changes idle behavior)
 
@@ -146,16 +138,32 @@ func New() *Server {
 }
 
 func (s *Server) addEvent(e Event) {
-	e.Time = time.Now().Format(time.RFC3339)
+	now := time.Now()
+	e.Time = now.Format(time.RFC3339Nano)
 	s.mu.Lock()
+	seq := uint64(now.UnixNano())
+	if seq <= s.eventSeq {
+		seq = s.eventSeq + 1
+	}
+	s.eventSeq = seq
+	e.Seq = seq
 	s.events = append(s.events, e)
-	s.lastActivity = time.Now()
+	if len(s.events) > maxEventHistory {
+		copy(s.events, s.events[len(s.events)-maxEventHistory:])
+		s.events = s.events[:maxEventHistory]
+	}
+	s.lastActivity = now
 	if e.Persona != "" {
-		s.lastSeen[e.Persona] = time.Now()
+		s.lastSeen[e.Persona] = now
 	}
 	s.mu.Unlock()
 	slog.Debug("event", "persona", e.Persona, "type", e.Type)
 }
+
+// maxEventHistory bounds the in-memory activity timeline. Fleet and browser
+// consumers advance by Seq, so keeping the whole process lifetime is neither
+// necessary nor safe for long-running ships.
+const maxEventHistory = 2048
 
 // Run binds to a random localhost port, records port/pid, and serves until a
 // /shutdown request closes the stop channel.
@@ -186,12 +194,10 @@ func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /events", s.handleEventsJSON)
-	mux.HandleFunc("POST /events", s.handleEvents)
 	mux.HandleFunc("POST /tell/{persona}", s.handleTell)
 	mux.HandleFunc("POST /attach", s.handleAttach)
 	mux.HandleFunc("POST /hook/{persona}/{event}", s.handleHook)
 	mux.HandleFunc("GET /pending", s.handlePending)
-	mux.HandleFunc("GET /pending.json", s.handlePendingJSON)
 	mux.HandleFunc("GET /status.json", s.handleStatusJSON)
 	mux.HandleFunc("GET /beads.json", s.handleBeadsJSON)
 	mux.HandleFunc("GET /beads/summary", s.handleBeadsSummary)
@@ -210,22 +216,6 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /resolve/{id}", s.handleResolve)
 	mux.HandleFunc("GET /feed", s.handleFeed)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
-	mux.HandleFunc("POST /register", func(w http.ResponseWriter, r *http.Request) {
-		s.mu.Lock()
-		s.refs++
-		s.lastActivity = time.Now()
-		s.mu.Unlock()
-		w.WriteHeader(http.StatusNoContent)
-	})
-	mux.HandleFunc("POST /deregister", func(w http.ResponseWriter, r *http.Request) {
-		s.mu.Lock()
-		if s.refs > 0 {
-			s.refs--
-		}
-		s.lastActivity = time.Now()
-		s.mu.Unlock()
-		w.WriteHeader(http.StatusNoContent)
-	})
 
 	httpSrv := &http.Server{Handler: mux}
 	go func() {
@@ -300,16 +290,6 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	var e Event
-	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-		http.Error(w, "bad event", http.StatusBadRequest)
-		return
-	}
-	s.addEvent(e)
-	w.WriteHeader(http.StatusNoContent)
-}
-
 func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -318,14 +298,24 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleEventsJSON returns the full event slice as JSON. Used by the fleet to
-// poll for new events to mirror into its SQLite store; also handy for any
-// programmatic consumer that wants structured data instead of pre-formatted
-// text lines (which is what handleFeed gives you).
+// handleEventsJSON returns retained events newer than the optional `after`
+// sequence cursor. Omitting the cursor returns the current bounded snapshot.
 func (s *Server) handleEventsJSON(w http.ResponseWriter, r *http.Request) {
+	after := uint64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("after")); raw != "" {
+		var err error
+		after, err = strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid after cursor", http.StatusBadRequest)
+			return
+		}
+	}
 	s.mu.Lock()
-	out := make([]Event, len(s.events))
-	copy(out, s.events)
+	start := 0
+	for start < len(s.events) && s.events[start].Seq <= after {
+		start++
+	}
+	out := append([]Event(nil), s.events[start:]...)
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
@@ -441,8 +431,8 @@ func (s *Server) decidePermission(persona, tool string, input map[string]any, in
 	if personaPermissive(persona) {
 		s.addEvent(Event{
 			Persona: persona, Type: "permission:auto-allow",
-			Text:  tool + ": bypass mode",
-			Tool:  tool, Input: inputSummary,
+			Text: tool + ": bypass mode",
+			Tool: tool, Input: inputSummary,
 		})
 		return "allow", ""
 	}
@@ -470,15 +460,15 @@ func (s *Server) decidePermission(persona, tool string, input map[string]any, in
 		}
 		s.addEvent(Event{
 			Persona: persona, Type: eventType,
-			Text:  tool + ": " + d.Reason,
-			Tool:  tool, Input: inputSummary,
+			Text: tool + ": " + d.Reason,
+			Tool: tool, Input: inputSummary,
 		})
 		return "allow", d.Reason
 	case permissions.EffectDeny:
 		s.addEvent(Event{
 			Persona: persona, Type: "permission:auto-deny",
-			Text:  tool + ": " + d.Reason,
-			Tool:  tool, Input: inputSummary,
+			Text: tool + ": " + d.Reason,
+			Tool: tool, Input: inputSummary,
 		})
 		return "deny", d.Reason
 	case permissions.EffectAsk:
@@ -548,33 +538,12 @@ func (s *Server) awaitDecision(persona, tool, input string) string {
 	return decision
 }
 
-// handlePending lists permission requests currently awaiting a decision.
+// handlePending returns permission requests currently awaiting a decision.
 func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.pendings) == 0 {
-		fmt.Fprintln(w, "(none)")
-		return
-	}
+	out := make([]api.Pending, 0, len(s.pendings))
 	for id, p := range s.pendings {
-		fmt.Fprintf(w, "%s  %s wants %s\n", id, p.persona, p.tool)
-	}
-}
-
-// handlePendingJSON is the structured form of /pending: an array the fleet
-// can ingest without parsing text. Used by the fleet's /api/pending aggregator
-// to populate the UI's permission pane.
-func (s *Server) handlePendingJSON(w http.ResponseWriter, r *http.Request) {
-	type wire struct {
-		ID      string `json:"id"`
-		Persona string `json:"persona"`
-		Tool    string `json:"tool"`
-		Input   string `json:"input,omitempty"`
-	}
-	s.mu.Lock()
-	out := make([]wire, 0, len(s.pendings))
-	for id, p := range s.pendings {
-		out = append(out, wire{ID: id, Persona: p.persona, Tool: p.tool, Input: p.input})
+		out = append(out, api.Pending{ID: id, Persona: p.persona, Tool: p.tool, Input: p.input})
 	}
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -700,10 +669,10 @@ func (s *Server) ensureLive(persona string) (*liveProc, error) {
 		return lp, nil
 	}
 
-	// Command-backed mates (backend: command) have no stream-json channel to
-	// inject a tell into — they only exist under a PTY.
-	if pcfg, _ := project.ResolvePersonaConfig(persona); pcfg.CommandBacked() {
-		return nil, fmt.Errorf("persona %s is PTY-only (backend: command) — open a terminal to talk to it", persona)
+	pcfg, _ := project.ResolvePersonaConfig(persona)
+	descriptor := pcfg.BackendDescriptor()
+	if !descriptor.Supports(backend.LiveTell) || descriptor.Kind != backend.Claude {
+		return nil, fmt.Errorf("persona %s backend %q does not support live tell", persona, descriptor.Kind)
 	}
 
 	lp, err := s.spawnCrewLive(persona, false)
@@ -828,8 +797,7 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 		}
 	}
 
-	// Server-driven ref-count: crew run in `claude -p` mode never fire the
-	// SessionStart hook, so /register is never called. Count the spawn itself.
+	// Server-driven ref-count: count the process spawn directly.
 	// (s.mu is held by the caller, ensureLive.)
 	s.refs++
 	s.lastActivity = time.Now()

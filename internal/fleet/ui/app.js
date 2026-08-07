@@ -7,6 +7,16 @@
 //   - Closing/switching captains tears the EventSource down — no history is
 //     retained on navigate-away (matches the stream-to-browser model).
 
+import {
+  b64ToBytes,
+  escapeHTML as escape,
+  humanSize,
+  nowISO,
+  shortModel,
+  truncateName,
+} from "/utils.js?v=51";
+import { apiFetch } from "/api.js?v=51";
+
 const $ = (id) => document.getElementById(id);
 const captainsList = $("captains-list");
 const status = $("status");
@@ -24,7 +34,7 @@ let mateStatus = new Map(); // client_key -> [{persona, status, tool, input, pen
 
 async function refreshCaptains() {
   try {
-    const r = await fetch("/api/captains");
+    const r = await apiFetch("/api/captains");
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
@@ -357,11 +367,6 @@ function appendEventDOM(e) {
   feedBody.scrollTop = feedBody.scrollHeight;
 }
 
-// shortModel compresses model ids for the badge: claude-opus-4-7 → opus-4-7.
-function shortModel(m) {
-  return String(m).replace(/^claude-/, "").replace(/-\d{8}$/, "");
-}
-
 // linkifyRefs turns gh-<n> / #<n> mentions in (already-escaped) feed text
 // into issue links against the selected ship's repo. The #<n> form only
 // matches after whitespace/punctuation-openers so escaped entities
@@ -383,17 +388,6 @@ function appendEvent(e) {
     renderFeedTabs();
   }
   if (eventMatchesFilter(e)) appendEventDOM(e);
-}
-
-function escape(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function nowISO() {
-  return new Date().toISOString().replace("T", " ").slice(0, 19);
 }
 
 tellForm.onsubmit = async (e) => {
@@ -437,7 +431,7 @@ tellForm.onsubmit = async (e) => {
         const fd = new FormData();
         fd.append("file", a.file, a.file.name);
         if (message) fd.append("caption", message);
-        const r = await fetch(
+        const r = await apiFetch(
           `/api/captain/${encodeURIComponent(selected)}/attach`,
           { method: "POST", body: fd },
         );
@@ -469,7 +463,7 @@ tellForm.onsubmit = async (e) => {
   let tellOK = true;
   if (message && !hasAttachments) {
     const results = await Promise.allSettled(targets.map(async (p) => {
-      const r = await fetch(
+      const r = await apiFetch(
         `/api/captain/${encodeURIComponent(selected)}/tell/${encodeURIComponent(p)}`,
         {
           method: "POST",
@@ -530,7 +524,7 @@ let audioCtx = null;
 
 async function refreshPending() {
   try {
-    const r = await fetch("/api/pending");
+    const r = await apiFetch("/api/pending");
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) return;
     const items = await r.json();
@@ -646,7 +640,7 @@ function renderPendingRow(it, indent) {
 async function resolveAll(list, behavior, head) {
   head.querySelectorAll("button").forEach(b => b.disabled = true);
   await Promise.allSettled(list.map((it) =>
-    fetch(`/api/captain/${encodeURIComponent(it.client_key)}/resolve/${encodeURIComponent(it.id)}`,
+    apiFetch(`/api/captain/${encodeURIComponent(it.client_key)}/resolve/${encodeURIComponent(it.id)}`,
       { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ behavior }) })
   ));
@@ -656,7 +650,7 @@ async function resolveAll(list, behavior, head) {
 async function resolvePending(it, behavior, row) {
   row.querySelectorAll("button").forEach(b => b.disabled = true);
   try {
-    const r = await fetch(
+    const r = await apiFetch(
       `/api/captain/${encodeURIComponent(it.client_key)}/resolve/${encodeURIComponent(it.id)}`,
       { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ behavior }) }
@@ -707,7 +701,7 @@ function ping() {
 
 async function refreshStatus() {
   try {
-    const r = await fetch("/api/status");
+    const r = await apiFetch("/api/status");
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) return;
     const items = await r.json();
@@ -753,13 +747,6 @@ let activeTermId = null;
 function termSessionId(key, persona) { return key + "::" + persona; }
 function activeTerm() { return terms.get(activeTermId) || null; }
 
-function b64ToBytes(s) {
-  const bin = atob(s);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
-
 function renderTermTabs() {
   termTabs.innerHTML = "";
   for (const [id, t] of terms) {
@@ -784,7 +771,7 @@ function applyFit(t) {
   try { t.fit.fit(); } catch { return; }
   // owner-wins: while another viewer types, our fit 409s — fine, we reflow
   // to the writer's geometry instead of fighting over it
-  fetch(`${t.base}/resize?client=${t.client}`, {
+  apiFetch(`${t.base}/resize?client=${t.client}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cols: t.term.cols, rows: t.term.rows }),
@@ -795,7 +782,7 @@ function applyFit(t) {
 // another viewer holds the keyboard — surface the takeover bar instead of
 // silently eating input.
 function termInput(t, data) {
-  fetch(`${t.base}/input?client=${t.client}`, { method: "POST", body: data })
+  apiFetch(`${t.base}/input?client=${t.client}`, { method: "POST", body: data })
     .then((r) => {
       if (r.status === 409) showTermLock(t);
       // lease expiry or a release means we hold the keyboard again
@@ -825,7 +812,7 @@ function showTermLock(t) {
   btn.textContent = "take over";
   btn.onclick = async () => {
     try {
-      const r = await fetch(`${t.base}/takeover?client=${t.client}`, { method: "POST" });
+      const r = await apiFetch(`${t.base}/takeover?client=${t.client}`, { method: "POST" });
       if (r.ok) bar.hidden = true;
     } catch { /* next keystroke re-surfaces the bar */ }
   };
@@ -849,7 +836,7 @@ function closeTerm(id) {
   const t = terms.get(id);
   if (!t) return;
   // best-effort: hand the keyboard back so the next typist claims cleanly
-  fetch(`${t.base}/release?client=${t.client}`, { method: "POST", keepalive: true }).catch(() => {});
+  apiFetch(`${t.base}/release?client=${t.client}`, { method: "POST", keepalive: true }).catch(() => {});
   if (t.es) t.es.close();
   t.term.dispose();
   t.host.remove();
@@ -921,7 +908,7 @@ async function openTerminal(key, persona) {
 
   const base = `/api/captain/${encodeURIComponent(key)}/pty/${encodeURIComponent(persona)}`;
   try {
-    const r = await fetch(`${base}/start`, { method: "POST" });
+    const r = await apiFetch(`${base}/start`, { method: "POST" });
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
   } catch (err) {
@@ -1079,7 +1066,7 @@ async function refreshBeads(force) {
     const url = selected
       ? `/api/captain/${encodeURIComponent(selected)}/beads`
       : "/api/beads";
-    const r = await fetch(url);
+    const r = await apiFetch(url);
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (r.status === 404) {
       beadsPane.innerHTML = '<div class="empty">no beads workspace on this ship</div>';
@@ -1175,7 +1162,7 @@ function renderBeadCreate() {
       if (!title) return;
       form.querySelectorAll("button").forEach((b) => (b.disabled = true));
       try {
-        const r = await fetch(`/api/captain/${encodeURIComponent(selected)}/bead`, {
+        const r = await apiFetch(`/api/captain/${encodeURIComponent(selected)}/bead`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title, description: form.elements.description.value.trim() }),
@@ -1215,7 +1202,7 @@ async function expandBeadDetail(row, id, captainKey) {
   detail.textContent = "loading…";
   row.after(detail);
   try {
-    const r = await fetch(`/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}`);
+    const r = await apiFetch(`/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}`);
     if (r.status === 401) { window.location.href = "/login"; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const arr = await r.json();
@@ -1265,7 +1252,7 @@ function renderBeadClose(actions, id, captainKey) {
     if (reason === null) return; // cancelled
     closeBtn.disabled = true;
     try {
-      const cr = await fetch(
+      const cr = await apiFetch(
         `/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}/close`,
         { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ reason: reason.trim() }) }
@@ -1298,7 +1285,7 @@ function buildBeadPriority(b, id, captainKey) {
   pSel.onchange = async () => {
     pSel.disabled = true;
     try {
-      const r = await fetch(
+      const r = await apiFetch(
         `/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}/update`,
         { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ priority: pSel.value }) }
@@ -1340,7 +1327,7 @@ function renderBeadEdit(container, b, id, captainKey, detail) {
       if (!title) return;
       form.querySelectorAll("button").forEach((x) => (x.disabled = true));
       try {
-        const r = await fetch(
+        const r = await apiFetch(
           `/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}/update`,
           { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title, description: form.elements.description.value.trim() }) }
@@ -1391,7 +1378,7 @@ function renderBeadAssign(actions, b, id, captainKey) {
     const target = JSON.parse(sel.value);
     btn.disabled = true;
     try {
-      const r = await fetch(
+      const r = await apiFetch(
         `/api/captain/${encodeURIComponent(captainKey)}/bead/${encodeURIComponent(id)}/assign`,
         { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ship: target.ship, persona: target.persona, title: b.title || "" }) }
@@ -1427,7 +1414,7 @@ beadsOpenBtn.onclick = openBeads;
 async function refreshBeadsBadge() {
   if (!selected) { beadsOpenBtn.textContent = "⛃ beads"; return; }
   try {
-    const r = await fetch(`/api/captain/${encodeURIComponent(selected)}/beads/summary`);
+    const r = await apiFetch(`/api/captain/${encodeURIComponent(selected)}/beads/summary`);
     if (!r.ok) { beadsOpenBtn.textContent = "⛃ beads"; return; }
     const s = await r.json();
     beadsOpenBtn.textContent = s.open > 0 ? `⛃ beads (${s.open})` : "⛃ beads";
@@ -1603,7 +1590,6 @@ const MAX_ATTACH_BYTES = 10 * 1024 * 1024; // 10 MB — matches backend cap
 let stagedAttachments = []; // [{ id, file, previewURL|null, status: "staged"|"uploading"|"done"|"error", error }]
 let stagedSeq = 0;
 const stagedPane = $("attach-staged");
-const attachBar = $("attach-bar");
 const tellCompose = $("tell-compose");
 if (stagedPane) stagedPane.hidden = true; // no chips at boot
 
@@ -1645,22 +1631,6 @@ function removeStaged(id) {
   if (a.previewURL) { try { URL.revokeObjectURL(a.previewURL); } catch {} }
   stagedAttachments.splice(idx, 1);
   renderStagedAttachments();
-}
-
-function humanSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function truncateName(name, max = 12) {
-  if (name.length <= max) return name;
-  const dot = name.lastIndexOf(".");
-  if (dot > 0 && name.length - dot <= 6) {
-    const ext = name.slice(dot);
-    return name.slice(0, Math.max(1, max - ext.length - 1)) + "…" + ext;
-  }
-  return name.slice(0, max - 1) + "…";
 }
 
 function renderStagedAttachments() {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aymanbagabas/go-pty"
+	"github.com/luthermonson/shipmates/internal/backend"
 	"github.com/luthermonson/shipmates/internal/project"
 )
 
@@ -118,7 +119,12 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 	var cmd *pty.Cmd
 	var sessID, sessName, fp string
 	pcfg, _ := project.ResolvePersonaConfig(persona)
-	if pcfg.CommandBacked() {
+	descriptor := pcfg.BackendDescriptor()
+	if !descriptor.Supports(backend.PTY) {
+		_ = pt.Close()
+		return nil, fmt.Errorf("persona %s backend %q does not support PTY hosting", persona, descriptor.Kind)
+	}
+	if descriptor.Kind == backend.Command {
 		if len(pcfg.Command) == 0 {
 			_ = pt.Close()
 			return nil, fmt.Errorf("persona %s has backend: command but no command", persona)
@@ -130,7 +136,7 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 			return nil, fmt.Errorf("%s not on PATH: %w", pcfg.Command[0], err)
 		}
 		cmd = pt.Command(prog, pcfg.Command[1:]...)
-	} else {
+	} else if descriptor.Kind == backend.Claude {
 		claudePath, err := exec.LookPath("claude")
 		if err != nil {
 			_ = pt.Close()
@@ -153,6 +159,9 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 			args = append(args, "--append-system-prompt", prime)
 		}
 		cmd = pt.Command(claudePath, args...)
+	} else {
+		_ = pt.Close()
+		return nil, fmt.Errorf("persona %s has unsupported PTY backend %q", persona, descriptor.Kind)
 	}
 	if err := cmd.Start(); err != nil {
 		_ = pt.Close()

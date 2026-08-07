@@ -11,18 +11,20 @@ import (
 	"github.com/luthermonson/shipmates/internal/project"
 )
 
-func TestEnsureAttachGitignore(t *testing.T) {
+func TestEnsureRuntimeGitignore(t *testing.T) {
 	t.Run("creates .gitignore when missing", func(t *testing.T) {
 		t.Chdir(t.TempDir())
-		if err := ensureAttachGitignore(); err != nil {
+		if err := ensureRuntimeGitignore(); err != nil {
 			t.Fatal(err)
 		}
 		got, err := os.ReadFile(".gitignore")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(got), attachInboxIgnorePattern) {
-			t.Errorf("pattern not written: %q", got)
+		for _, pattern := range runtimeIgnorePatterns {
+			if !strings.Contains(string(got), pattern) {
+				t.Errorf("pattern %q not written: %q", pattern, got)
+			}
 		}
 	})
 
@@ -32,11 +34,11 @@ func TestEnsureAttachGitignore(t *testing.T) {
 		if err := os.WriteFile(".gitignore", []byte(orig), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := ensureAttachGitignore(); err != nil {
+		if err := ensureRuntimeGitignore(); err != nil {
 			t.Fatal(err)
 		}
 		// Second call must not add a second entry.
-		if err := ensureAttachGitignore(); err != nil {
+		if err := ensureRuntimeGitignore(); err != nil {
 			t.Fatal(err)
 		}
 		got, err := os.ReadFile(".gitignore")
@@ -46,18 +48,20 @@ func TestEnsureAttachGitignore(t *testing.T) {
 		if !strings.Contains(string(got), "node_modules/") || !strings.Contains(string(got), "*.log") {
 			t.Errorf("existing entries dropped: %q", got)
 		}
-		if n := strings.Count(string(got), attachInboxIgnorePattern); n != 1 {
-			t.Errorf("expected exactly one inbox pattern, got %d: %q", n, got)
+		for _, pattern := range runtimeIgnorePatterns {
+			if n := strings.Count(string(got), pattern); n != 1 {
+				t.Errorf("expected exactly one %q pattern, got %d: %q", pattern, n, got)
+			}
 		}
 	})
 
 	t.Run("no-op when pattern already present", func(t *testing.T) {
 		t.Chdir(t.TempDir())
-		orig := "# user comment\n.shipmates/inbox/\nother\n"
+		orig := "# user comment\n.shipmates/inbox/\n.shipmates/sessions/\nother\n"
 		if err := os.WriteFile(".gitignore", []byte(orig), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := ensureAttachGitignore(); err != nil {
+		if err := ensureRuntimeGitignore(); err != nil {
 			t.Fatal(err)
 		}
 		got, err := os.ReadFile(".gitignore")
@@ -126,7 +130,7 @@ func TestComposeAgent(t *testing.T) {
 func TestAddPersona_VendorsPolicyYAML(t *testing.T) {
 	cat := catalog.New(fstest.MapFS{
 		"catalog/geordi/.claude/agents/geordi.md": {Data: []byte("---\nname: geordi\n---\n\n# Geordi\n")},
-		"catalog/geordi/policy.yaml": {Data: []byte("allow:\n  - Bash(git status)\ndeny:\n  - Bash(rm -rf /)\n")},
+		"catalog/geordi/policy.yaml":              {Data: []byte("allow:\n  - Bash(git status)\ndeny:\n  - Bash(rm -rf /)\n")},
 	})
 	t.Chdir(t.TempDir())
 	// Prep the layout addPersona expects.
@@ -145,6 +149,9 @@ func TestAddPersona_VendorsPolicyYAML(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "Bash(rm -rf /)") {
 		t.Errorf("vendored policy missing content: %s", string(b))
+	}
+	if _, err := os.Stat(project.CodexAgentPath("geordi")); err != nil {
+		t.Fatalf("expected Codex agent at %s: %v", project.CodexAgentPath("geordi"), err)
 	}
 }
 

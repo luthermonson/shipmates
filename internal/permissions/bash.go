@@ -41,25 +41,25 @@ var readOnlyBuiltins = map[string]bool{
 // Anything else under git (add, commit, push, checkout, reset, rebase, …)
 // falls through to the settings rules.
 var readOnlyGitSubcommands = map[string]bool{
-	"status":   true,
-	"log":      true,
-	"diff":     true,
-	"show":     true,
-	"blame":    true,
-	"branch":   true,
-	"tag":      true,
-	"describe": true,
-	"config":   true, // read-only when no --set/--add; conservative here — Claude allows it
-	"remote":   true, // ditto — bare `git remote` is a list
-	"rev-parse": true,
-	"ls-files": true,
-	"ls-tree":  true,
-	"cat-file": true,
-	"reflog":   true,
-	"stash":    true, // `git stash list` etc.; write forms exist but common usage is read
-	"shortlog": true,
+	"status":      true,
+	"log":         true,
+	"diff":        true,
+	"show":        true,
+	"blame":       true,
+	"branch":      true,
+	"tag":         true,
+	"describe":    true,
+	"config":      true, // read-only when no --set/--add; conservative here — Claude allows it
+	"remote":      true, // ditto — bare `git remote` is a list
+	"rev-parse":   true,
+	"ls-files":    true,
+	"ls-tree":     true,
+	"cat-file":    true,
+	"reflog":      true,
+	"stash":       true, // `git stash list` etc.; write forms exist but common usage is read
+	"shortlog":    true,
 	"whatchanged": true,
-	"grep":     true,
+	"grep":        true,
 }
 
 // processWrappers are prefix commands that just delegate to their remaining
@@ -71,14 +71,14 @@ var readOnlyGitSubcommands = map[string]bool{
 // wrapper list. They change the resolution semantics enough that treating
 // them as transparent would be unsafe.
 var processWrappers = map[string]bool{
-	"timeout": true,
-	"time":    true,
-	"nice":    true,
-	"nohup":   true,
-	"stdbuf":  true,
-	"xargs":   true, // bare `xargs cmd` — options are dropped by stripWrappers
-	"ionice":  true,
-	"chrt":    true,
+	"timeout":  true,
+	"time":     true,
+	"nice":     true,
+	"nohup":    true,
+	"stdbuf":   true,
+	"xargs":    true, // bare `xargs cmd` — options are dropped by stripWrappers
+	"ionice":   true,
+	"chrt":     true,
 	"unbuffer": true,
 }
 

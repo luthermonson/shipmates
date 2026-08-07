@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 
-	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
 )
 
@@ -87,25 +85,7 @@ func Fanout() *cli.Command {
 // time (--session-id/--name), resume it afterward (--resume), and write the
 // session marker on a successful create. The persona must be installed.
 func oneShotDelegate(ctx context.Context, persona, prompt string) ([]byte, error) {
-	if _, err := os.Stat(project.AgentPath(persona)); err != nil {
-		return nil, fmt.Errorf("persona %q is not installed", persona)
-	}
-
-	cfg, idArgs, id, name, fp := sessionLaunch(persona, false)
-	args := append([]string{"-p"}, idArgs...)
-	args = append(args, cfg.LaunchFlags(true)...)
-	args = append(args, prompt)
-
 	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Stdin = strings.NewReader("") // immediate EOF — skip claude's ~3s stdin wait
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		return buf.Bytes(), err
-	}
-	if err := project.WriteSessionMeta(persona, name, id, fp); err != nil {
-		return buf.Bytes(), err
-	}
-	return buf.Bytes(), nil
+	err := dispatchTo(ctx, persona, prompt, false, &buf, &buf)
+	return buf.Bytes(), err
 }

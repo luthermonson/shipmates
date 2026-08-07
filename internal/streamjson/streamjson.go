@@ -6,7 +6,6 @@
 package streamjson
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -149,14 +148,4 @@ func truncate(s string) string {
 		return s
 	}
 	return s[:truncateAt] + " …[truncated]"
-}
-
-// DecodeLine parses one raw line then decodes it — a convenience for tests
-// and any consumer holding bytes instead of a parsed map.
-func DecodeLine(line []byte) []Item {
-	var obj map[string]any
-	if err := json.Unmarshal(line, &obj); err != nil {
-		return nil
-	}
-	return Decode(obj)
 }

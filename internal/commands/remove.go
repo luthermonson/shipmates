@@ -44,6 +44,14 @@ func Remove() *cli.Command {
 			delete(m.Files, agentPath)
 			slog.Info("removed persona", "persona", name, "path", agentPath)
 
+			codexPath := project.CodexAgentPath(name)
+			if err := os.Remove(codexPath); err == nil {
+				slog.Info("removed Codex agent", "persona", name, "path", codexPath)
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+			delete(m.Files, codexPath)
+
 			if c.Bool("purge") {
 				memDir := project.MemoryDir(name)
 				if err := os.RemoveAll(memDir); err != nil {

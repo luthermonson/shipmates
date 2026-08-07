@@ -4,160 +4,16 @@
 package project
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/luthermonson/shipmates/internal/backend"
+	personadef "github.com/luthermonson/shipmates/internal/persona"
 	"gopkg.in/yaml.v3"
 )
-
-const (
-	Dir              = ".shipmates"
-	MemoryDirName    = "memory"
-	SessionsDirName  = "sessions"
-	PoliciesDirName  = "policies"
-	ManifestName     = "manifest.json"
-	ConfigName       = "shipmates.yaml"
-	InstallIDName    = "install-id"
-	AgentsDir        = ".claude/agents"
-	CommandsDir      = ".claude/commands"
-)
-
-// MemoryDir is a persona's persistent memory directory.
-func MemoryDir(persona string) string {
-	return filepath.Join(Dir, MemoryDirName, persona)
-}
-
-// AgentPath is where a persona's subagent file is vendored for Claude Code.
-func AgentPath(persona string) string {
-	return filepath.Join(AgentsDir, persona+".md")
-}
-
-// CommandPath is where a slash command is vendored for Claude Code.
-func CommandPath(name string) string {
-	return filepath.Join(CommandsDir, name+".md")
-}
-
-// PoliciesDir is where per-persona policy overlays are vendored on install.
-// Kept under .shipmates/ (not .claude/) because they're shipmates-owned rules
-// consumed by the shipmates permission evaluator, not by Claude Code itself.
-func PoliciesDir() string {
-	return filepath.Join(Dir, PoliciesDirName)
-}
-
-// PolicyPath is the vendored location of a persona's policy.yaml overlay.
-// See PoliciesDir for why it lives under .shipmates/.
-func PolicyPath(persona string) string {
-	return filepath.Join(PoliciesDir(), persona+".yaml")
-}
-
-// ManifestPath is the location of the install manifest.
-func ManifestPath() string {
-	return filepath.Join(Dir, ManifestName)
-}
-
-// SessionsDir holds transient coordination state (server port/pid, session markers).
-func SessionsDir() string { return filepath.Join(Dir, SessionsDirName) }
-
-// PortFile / PidFile / LogFile locate the running server's metadata.
-func PortFile() string { return filepath.Join(SessionsDir(), "server.port") }
-func PidFile() string  { return filepath.Join(SessionsDir(), "server.pid") }
-func LogFile() string  { return filepath.Join(SessionsDir(), "server.log") }
-
-// SessionMarker records that a persona's claude session has been created, so
-// `ask` knows whether to create (--session-id) or continue (--resume).
-func SessionMarker(persona string) string {
-	return filepath.Join(SessionsDir(), persona+".session")
-}
-
-// SessionMeta is the per-persona session record stored at SessionMarker. It
-// tracks the session name and the config fingerprint at creation time, so
-// callers can detect config drift and start a fresh session automatically.
-type SessionMeta struct {
-	Name       string `json:"name"`
-	ID         string `json:"id"` // the session UUID — resume by this to avoid --resume name ambiguity
-	ConfigHash string `json:"config"`
-}
-
-// ReadSessionMeta loads a persona's session record. ok is false if no session
-// exists yet. A legacy plain-name marker is read as a name with empty hash
-// (which suppresses auto-fresh — we don't abandon a pre-upgrade session).
-func ReadSessionMeta(persona string) (meta SessionMeta, ok bool) {
-	b, err := os.ReadFile(SessionMarker(persona))
-	if err != nil {
-		return SessionMeta{}, false
-	}
-	if err := json.Unmarshal(b, &meta); err != nil {
-		return SessionMeta{Name: strings.TrimSpace(string(b))}, true
-	}
-	return meta, true
-}
-
-// WriteSessionMeta records a persona's session name, UUID, and config fingerprint.
-func WriteSessionMeta(persona, name, id, configHash string) error {
-	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(SessionMeta{Name: name, ID: id, ConfigHash: configHash}, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(SessionMarker(persona), b, 0o644)
-}
-
-// DeleteSessionMeta removes a persona's session marker. Called by auto-repair
-// when the tracked session UUID has vanished from Claude's local store
-// (rotated jsonl, cache clean, upgrade wipe). A missing marker is not an
-// error — the next SessionLaunch will start fresh regardless.
-func DeleteSessionMeta(persona string) error {
-	err := os.Remove(SessionMarker(persona))
-	if err != nil && os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
-
-// RepoName is the current project's directory name — the default session prefix.
-func RepoName() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "shipmates"
-	}
-	return filepath.Base(wd)
-}
-
-// InstallIDPath is the on-disk location of the per-install stable ID.
-func InstallIDPath() string { return filepath.Join(Dir, InstallIDName) }
-
-// InstallID returns the stable per-install UUID, generating and persisting one
-// on first read. Used to disambiguate multi-clone of the same repo connecting
-// to the same fleet (clientKey = <repo>/<install-id>/<persona>).
-func InstallID() (string, error) {
-	b, err := os.ReadFile(InstallIDPath())
-	if err == nil {
-		id := strings.TrimSpace(string(b))
-		if id != "" {
-			return id, nil
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return "", err
-	}
-	id := NewUUID()
-	if err := os.MkdirAll(Dir, 0o755); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(InstallIDPath(), []byte(id+"\n"), 0o644); err != nil {
-		return "", err
-	}
-	return id, nil
-}
 
 // Config is the subset of shipmates.yaml that the CLI reads.
 type Config struct {
@@ -292,7 +148,8 @@ type PersonaConfig struct {
 	Effort                     string // --effort value (low|medium|high|xhigh|max); "" = default
 
 	// Backend selects the mate driver: "claude" (default, full integration:
-	// sessions, hooks, tells) or "command" (spawn Command under a PTY — for
+	// sessions, hooks, tells), "codex" (persistent headless Codex sessions),
+	// or "command" (spawn Command under a PTY — for
 	// foreign agents like opencode/aider). Command-backed mates are PTY-only:
 	// no session resume, no hooks, no headless tells; their status dots derive
 	// from screen activity instead of hook events.
@@ -300,8 +157,8 @@ type PersonaConfig struct {
 	Command []string // argv for backend "command"
 }
 
-// CommandBacked reports whether the persona runs a foreign agent (PTY-only).
-func (c PersonaConfig) CommandBacked() bool { return c.Backend == "command" }
+// BackendDescriptor returns the resolved harness and its supported surfaces.
+func (c PersonaConfig) BackendDescriptor() backend.Descriptor { return backend.Resolve(c.Backend) }
 
 // Fingerprint is a stable hash of the config settings that are baked into a
 // session at creation and can't change on resume — currently model and effort.
@@ -338,22 +195,6 @@ func (c PersonaConfig) LaunchFlags(permission bool) []string {
 	return f
 }
 
-// personaFrontmatter is the subset of a persona's YAML frontmatter that affects
-// how its session is launched. RemoteControl may be a bool or a string, so it's
-// captured as a yaml.Node and decoded on demand.
-type personaFrontmatter struct {
-	Permissions struct {
-		Mode string `yaml:"mode"`
-	} `yaml:"permissions"`
-	RemoteControl              yaml.Node `yaml:"remoteControl"`
-	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
-	Model                      string    `yaml:"model"`
-	Effort                     string    `yaml:"effort"`
-	Backend                    string    `yaml:"backend"`
-	Command                    []string  `yaml:"command"`
-	ShipmatesPersona           *bool     `yaml:"shipmatesPersona"`
-}
-
 // IsFleetPersonaFile reports whether a persona file is a shipmates fleet member
 // (true unless its frontmatter sets `shipmatesPersona: false`). Lets non-fleet
 // agents in .claude/agents/ (e.g. a project-Q&A subagent) opt out of membership
@@ -363,10 +204,11 @@ func IsFleetPersonaFile(path string) bool {
 	if err != nil {
 		return false
 	}
-	fm, err := parsePersonaFrontmatter(raw)
+	def, err := personadef.Parse(raw)
 	if err != nil {
 		return true
 	}
+	fm := def.Frontmatter
 	return fm.ShipmatesPersona == nil || *fm.ShipmatesPersona
 }
 
@@ -384,10 +226,11 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 		return cfg, err
 	}
 
-	fm, err := parsePersonaFrontmatter(raw)
+	def, err := personadef.Parse(raw)
 	if err != nil {
 		return cfg, fmt.Errorf("parse %s: %w", AgentPath(persona), err)
 	}
+	fm := def.Frontmatter
 
 	cfg.Mode = strings.TrimSpace(fm.Permissions.Mode)
 	cfg.Model = strings.TrimSpace(fm.Model)
@@ -431,27 +274,6 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 	return cfg, nil
 }
 
-// parsePersonaFrontmatter isolates the YAML frontmatter block and unmarshals the
-// launch-relevant fields. (render.go's parseFrontmatter drops nested maps like
-// permissions, so it can't supply these.)
-func parsePersonaFrontmatter(raw []byte) (personaFrontmatter, error) {
-	var fm personaFrontmatter
-	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	text = strings.TrimLeft(text, "\n")
-	if !strings.HasPrefix(text, "---\n") {
-		return fm, nil
-	}
-	rest := text[len("---\n"):]
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		return fm, nil
-	}
-	if err := yaml.Unmarshal([]byte(rest[:end]), &fm); err != nil {
-		return fm, err
-	}
-	return fm, nil
-}
-
 // resolveRemoteControl turns a remoteControl node into a --remote-control value:
 // bool true => sessionName; a non-empty string => that string; false/absent => "".
 func resolveRemoteControl(node yaml.Node, sessionName string) string {
@@ -470,54 +292,4 @@ func resolveRemoteControl(node yaml.Node, sessionName string) string {
 		return strings.TrimSpace(s)
 	}
 	return ""
-}
-
-// NewUUID returns a random v4 UUID string using only the standard library.
-func NewUUID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
-// Manifest records the SHA of each file shipmates has written, so `update` can
-// tell an untouched file (safe to overwrite) from a user-edited one (prompt).
-type Manifest struct {
-	Version string            `json:"version"`
-	Files   map[string]string `json:"files"`
-}
-
-// LoadManifest reads the manifest, returning an empty one if none exists yet.
-func LoadManifest() (*Manifest, error) {
-	b, err := os.ReadFile(ManifestPath())
-	if errors.Is(err, fs.ErrNotExist) {
-		return &Manifest{Files: map[string]string{}}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var m Manifest
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, err
-	}
-	if m.Files == nil {
-		m.Files = map[string]string{}
-	}
-	return &m, nil
-}
-
-// Save writes the manifest back to disk.
-func (m *Manifest) Save() error {
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(ManifestPath(), b, 0o644)
-}
-
-// SHA returns the hex-encoded sha256 of b, used for manifest comparisons.
-func SHA(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }

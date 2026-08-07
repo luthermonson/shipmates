@@ -23,6 +23,20 @@ func rulesFrom(allow, ask, deny []string) MergedRules {
 	return r
 }
 
+func NewEvaluatorWithRules(rules MergedRules) *Evaluator {
+	return &Evaluator{
+		rules:        rules,
+		loaded:       true,
+		fleet:        newFleetSlot(),
+		personaRules: newPersonaCache(),
+		timeboxes:    newTimeboxStore(),
+	}
+}
+
+func (e *Evaluator) Evaluate(tool string, input map[string]any) Decision {
+	return e.EvaluateFor("", tool, input)
+}
+
 func bashInput(cmd string) map[string]any {
 	return map[string]any{"command": cmd}
 }
@@ -46,9 +60,9 @@ func TestEvaluate_BashAllowMatchesGitStar(t *testing.T) {
 func TestEvaluate_BashDenyBeatsAllow(t *testing.T) {
 	// A broad Bash allow with a targeted deny — deny must win.
 	e := NewEvaluatorWithRules(rulesFrom(
-		[]string{"Bash"},          // allow all Bash
+		[]string{"Bash"}, // allow all Bash
 		nil,
-		[]string{"Bash(rm *)"},    // but never rm
+		[]string{"Bash(rm *)"}, // but never rm
 	))
 	d := e.Evaluate("Bash", bashInput("rm foo"))
 	if d.Effect != EffectDeny {

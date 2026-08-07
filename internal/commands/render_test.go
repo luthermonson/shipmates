@@ -2,7 +2,6 @@ package commands
 
 import (
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -69,33 +68,6 @@ func TestCondenseBody(t *testing.T) {
 	}
 }
 
-func TestParseFrontmatter(t *testing.T) {
-	s := strings.Join([]string{
-		"name: captain",
-		`description: "keeps order"`,
-		"byline: 'the team captain'",
-		"# a comment line",
-		"domainGlob:",
-		"  - \"**/*.go\"",
-		"  - cmd/**",
-	}, "\n")
-
-	fm := parseFrontmatter(s)
-	if fm.Name != "captain" {
-		t.Errorf("Name = %q, want captain", fm.Name)
-	}
-	if fm.Description != "keeps order" {
-		t.Errorf("Description = %q, want %q", fm.Description, "keeps order")
-	}
-	if fm.Byline != "the team captain" {
-		t.Errorf("Byline = %q, want %q", fm.Byline, "the team captain")
-	}
-	want := []string{"**/*.go", "cmd/**"}
-	if !reflect.DeepEqual(fm.DomainGlob, want) {
-		t.Errorf("DomainGlob = %v, want %v", fm.DomainGlob, want)
-	}
-}
-
 func TestUpsertMarkedSectionIdempotent(t *testing.T) {
 	t.Chdir(t.TempDir())
 	const path = "AGENTS.md"
@@ -158,5 +130,41 @@ func TestRenderAgentsMD(t *testing.T) {
 	}
 	if !strings.Contains(out, "**/*.go") {
 		t.Errorf("renderAgentsMD output missing domain glob:\n%s", out)
+	}
+}
+
+func TestRenderCodex(t *testing.T) {
+	fm := frontmatter{
+		Name:        "security",
+		Description: "reviews application security",
+		DomainGlob:  []string{"**/*.go", "go.mod"},
+	}
+	out := renderCodex(fm, "# Role\n\nFind real security risks.")
+
+	if !strings.Contains(out, `name = "security"`) {
+		t.Errorf("renderCodex output missing name:\n%s", out)
+	}
+	if !strings.Contains(out, `description = "reviews application security"`) {
+		t.Errorf("renderCodex output missing description:\n%s", out)
+	}
+	if !strings.Contains(out, "developer_instructions =") {
+		t.Errorf("renderCodex output missing developer instructions:\n%s", out)
+	}
+	if !strings.Contains(out, ".shipmates/memory/security/") {
+		t.Errorf("renderCodex output missing memory path:\n%s", out)
+	}
+}
+
+func TestWriteRenderCodex(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := writeRender("codex", "security", "name = \"security\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(".codex/agents/security.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "name = \"security\"\n" {
+		t.Errorf("agent file = %q", b)
 	}
 }

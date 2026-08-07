@@ -5,6 +5,11 @@
 
 # Workspace scratch
 tmp/
+.codex-remote-attachments/
+
+# Shipmates runtime state (manifests, policies, and memory remain trackable)
+.shipmates/inbox/
+.shipmates/sessions/
 
 # OS junk
 .DS_Store

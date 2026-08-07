@@ -87,7 +87,15 @@ On Windows, unzip `shipmates_<version>_windows_amd64.zip` and put `shipmates.exe
 
 With a Go toolchain (1.26+): `go install github.com/luthermonson/shipmates@latest`, or build from source with `go build -o shipmates .`.
 
-Shipmates drives the [`claude` CLI](https://claude.com/claude-code), so make sure Claude Code is installed and authenticated.
+For this branch's WSL/Linux Codex adaptation, install the current checkout for your user with:
+
+```bash
+./scripts/install-codex-adaptation.sh
+```
+
+The installer writes `shipmates` to `~/.local/bin` without sudo and adds that directory to `~/.bashrc` when needed. Pass `--no-shell-config` to leave shell configuration untouched, or set `SHIPMATES_BIN_DIR` to install somewhere else.
+
+Shipmates supports both [Claude Code](https://claude.com/claude-code) and the [Codex CLI](https://developers.openai.com/codex/). With no `backend` override, Shipmates uses Claude when it is installed and otherwise falls back to Codex. Claude powers interactive sessions, live steering, and Fleet Command; Codex is available for persistent headless delegation (`ask` and `fanout`) through its own workspace-sandboxed CLI sessions.
 
 ## Quickstart — single ship
 
@@ -98,6 +106,8 @@ shipmates list
 ```
 
 This vendors persona files into `.claude/agents/<name>.md` (Claude Code reads them natively — no new runtime), seeds each persona's memory at `.shipmates/memory/<name>/`, drops per-persona `policy.yaml` files into `.shipmates/policies/`, and writes `shipmates.yaml`. Personas write to their memory dir as they learn your project.
+
+Each installed persona is also rendered as a project-scoped Codex custom agent at `.codex/agents/<name>.toml`; the two harnesses share the same `.shipmates/memory/<name>/` context.
 
 Use a persona three ways:
 
@@ -114,6 +124,27 @@ shipmates open captain
 ```
 
 Or, inside any Claude Code session, invoke a persona via the Agent tool (e.g. "have security review the diff") or launch directly with `claude --agent security`.
+
+### Use Codex for a persona
+
+Select Codex for an installed persona in `shipmates.yaml`:
+
+```yaml
+crew:
+  security:
+    backend: codex
+```
+
+Then delegate normally:
+
+```bash
+shipmates ask security "review the diff for auth regressions"
+shipmates fanout security,tester "inspect this change and report risks"
+```
+
+Shipmates starts or resumes a separate Codex thread for that persona and keeps its marker in `.shipmates/sessions/<persona>.codex.session`. The first turn uses Codex's `workspace-write` sandbox; Codex's own approval policy and project configuration remain in effect. Claude and Codex session records are separate, so changing a persona's backend never crosses conversation histories.
+
+Codex-backed personas currently support `ask`, `fanout`, `drain`, and `drain-many`. `open`, `tell`, PTY attachment, and Fleet Command remain Claude-backed and reject a Codex persona rather than silently using the wrong harness.
 
 ## Quickstart — fleet coordination
 
@@ -217,7 +248,7 @@ Restart of the ship wipes time-boxes (fresh trust boundary).
 | `add <persona>` / `remove <persona>` | install / uninstall a persona (memory preserved unless `--purge`) |
 | `list` | catalog personas + which are installed |
 | `update [persona]` | refresh installed personas from the embedded catalog (`--accept ours\|theirs` for non-interactive conflict resolution) |
-| `render <p> --target` | export a persona to a thin target (`agents-md` / `cursor` / `windsurf`) |
+| `render <p> --target` | export a persona (`codex` / `agents-md` / `cursor` / `windsurf`) |
 | `open <p>` | launch an interactive session as a persona |
 
 ### Talk to crew
@@ -298,6 +329,8 @@ crew:
     dangerouslySkipPermissions: true
   security:
     dangerouslySkipPermissions: false
+  tester:
+    backend: codex  # Codex supports headless ask/fanout delegation
 
 # Optional: GitHub-issues-and-PRs as the coordination surface
 routing: github
@@ -371,6 +404,7 @@ Shipmates fills exactly one gap that no other tool handles cleanly: **persona + 
 
 - [`docs/architecture.md`](docs/architecture.md) — persona format, memory model, lifecycle, captain-and-crew shape
 - [`docs/fleet-architecture.md`](docs/fleet-architecture.md) — Fleet Command + multi-ship architecture (tunnels, PTY panes, shared beads memory, Admiral/Commodore voice loop)
+- [`docs/testing.md`](docs/testing.md) — autonomous Fleet acceptance and the single-plan voyage contract
 - [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) — why persistent memory changes review quality, with a worked case study
 - [`docs/diagrams.md`](docs/diagrams.md) — sequence diagrams for tell/dispatch/attach flows
 

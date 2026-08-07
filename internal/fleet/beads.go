@@ -212,6 +212,7 @@ func (b *Server) handleAggregateBeads(w http.ResponseWriter, r *http.Request) {
 		Description string   `json:"description,omitempty"`
 		Status      string   `json:"status"`
 		Priority    *int     `json:"priority,omitempty"`
+		Assignee    string   `json:"assignee,omitempty"`
 		ExternalRef string   `json:"external_ref,omitempty"`
 		Ships       []string `json:"ships"`
 	}

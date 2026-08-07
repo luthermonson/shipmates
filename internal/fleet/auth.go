@@ -14,19 +14,19 @@ import (
 // sessions are invalidated on upgrade and users must log in once.
 const cookieName = "shipmates_fleet"
 
-// publicPaths are reachable without auth. /connect runs its own bearer check
-// inside remotedialer's Authorizer. /login serves the login page (GET) and
-// processes the form submit (POST). /health is for liveness probes.
-// publicPaths and publicPrefixes are reachable without auth. The login page
+// publicPaths and publicPrefixes are reachable without auth. /connect runs its
+// own bearer check inside remotedialer's Authorizer. The login page
 // needs its CSS/JS to render, so the unauth'd static assets live under a known
 // allow-list. (index.html itself is NOT in the list — root navigation while
 // signed out redirects to /login.)
 var publicPaths = map[string]bool{
-	"/health":     true,
-	"/login":      true,
-	"/logout":     true,
-	"/style.css":  true,
-	"/app.js":     true,
+	"/health":    true,
+	"/login":     true,
+	"/logout":    true,
+	"/style.css": true,
+	"/app.js":    true,
+	"/api.js":    true,
+	"/utils.js":  true,
 	// like app.js: a .js URL must NEVER answer with login HTML or an edge
 	// cache will store it and serve it to authenticated browsers as script
 	"/conversation.js": true,

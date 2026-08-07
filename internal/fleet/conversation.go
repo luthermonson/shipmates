@@ -207,8 +207,8 @@ func rescueTextToolCalls(content string) []toolCall {
 			continue
 		}
 		out = append(out, toolCall{
-			ID:   fmt.Sprintf("rescued_%d", len(out)),
-			Type: "function",
+			ID:       fmt.Sprintf("rescued_%d", len(out)),
+			Type:     "function",
 			Function: toolCallFunc{Name: name, Arguments: m[2]},
 		})
 	}
@@ -561,7 +561,7 @@ func (b *Server) toolPendingApprovals(ctx context.Context) string {
 	}
 	all := make([]entry, 0)
 	for _, key := range b.dialer.ListClients() {
-		body, status, err := b.proxy(ctx, key, "GET", "/pending.json", nil)
+		body, status, err := b.proxy(ctx, key, "GET", "/pending", nil)
 		if err != nil || status >= 300 {
 			continue
 		}

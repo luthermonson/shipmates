@@ -79,6 +79,21 @@ func runUpdate(cat *catalog.Catalog, only, accept string) error {
 		if err := reconcileFile(m, st, project.AgentPath(name), catBytes, "persona"); err != nil {
 			return err
 		}
+		fm, body := splitPersona(catBytes)
+		codexBytes := []byte(renderCodex(fm, body))
+		codexPath := project.CodexAgentPath(name)
+		if _, err := os.Stat(codexPath); errors.Is(err, os.ErrNotExist) {
+			if err := writeManaged(codexPath, codexBytes); err != nil {
+				return err
+			}
+			m.Files[codexPath] = project.SHA(codexBytes)
+			st.added++
+			slog.Info("installed missing Codex agent", "path", codexPath)
+		} else if err != nil {
+			return fmt.Errorf("stat %s: %w", codexPath, err)
+		} else if err := reconcileFile(m, st, codexPath, codexBytes, "Codex agent"); err != nil {
+			return err
+		}
 	}
 
 	// Slash commands are project-level; refresh them too (not narrowed by `only`).

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/api"
 	"github.com/luthermonson/shipmates/internal/fleet"
 	"github.com/urfave/cli/v3"
 )
@@ -73,7 +74,6 @@ func fleetServe() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "addr", Value: "127.0.0.1:8443", Usage: "listen address"},
 			&cli.StringFlag{Name: "token-file", Usage: "read the shared secret from this file (preferred over env on shared hosts)"},
-			&cli.StringFlag{Name: "store", Usage: "optional SQLite path to mirror events; absent = ephemeral live-only"},
 			&cli.StringFlag{Name: "llm-backend", Sources: cli.EnvVars("LLM_BACKEND"), Value: "openai", Usage: "conversation brain: 'openai' (chat-completions at --llm-url) or 'claude-cli' (spawn claude -p on this host, subscription auth)"},
 			&cli.StringFlag{Name: "llm-key-env", Value: "LLM_API_KEY", Usage: "env var holding the bearer key for hosted OAI endpoints (Anthropic/OpenAI/Groq); unset var = no auth"},
 			&cli.StringFlag{Name: "llm-url", Sources: cli.EnvVars("LLM_URL"), Usage: "OpenAI-compatible base URL incl. /v1 (ollama: http://127.0.0.1:11434/v1); enables /api/conversation"},
@@ -90,23 +90,21 @@ func fleetServe() *cli.Command {
 				return err
 			}
 			b, err := fleet.New(fleet.Options{
-				Addr:        c.String("addr"),
-				Token:       token,
-				Store:       c.String("store"),
-				LLMBackend:  c.String("llm-backend"),
-				LLMURL:      c.String("llm-url"),
-				LLMModel:    c.String("llm-model"),
-				LLMKey:      strings.TrimSpace(os.Getenv(c.String("llm-key-env"))),
-				TTSVoice:    c.String("tts-voice"),
-				TTSURL:      c.String("tts-url"),
-				TTSModel:    c.String("tts-model"),
-				STTURL:      c.String("stt-url"),
-				STTModel:    c.String("stt-model"),
+				Addr:       c.String("addr"),
+				Token:      token,
+				LLMBackend: c.String("llm-backend"),
+				LLMURL:     c.String("llm-url"),
+				LLMModel:   c.String("llm-model"),
+				LLMKey:     strings.TrimSpace(os.Getenv(c.String("llm-key-env"))),
+				TTSVoice:   c.String("tts-voice"),
+				TTSURL:     c.String("tts-url"),
+				TTSModel:   c.String("tts-model"),
+				STTURL:     c.String("stt-url"),
+				STTModel:   c.String("stt-model"),
 			})
 			if err != nil {
 				return err
 			}
-			defer b.Close()
 			return b.Run(ctx, c.String("addr"))
 		},
 	}
@@ -133,19 +131,11 @@ func fleetLs() *cli.Command {
 		Usage: "list captains known to the fleet",
 		Flags: operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
-			body, err := fleetGet(ctx, c,"/api/captains")
+			body, err := fleetGet(ctx, c, "/api/captains")
 			if err != nil {
 				return err
 			}
-			var captains []struct {
-				ClientKey string    `json:"client_key"`
-				Repo      string    `json:"repo"`
-				Persona   string    `json:"persona"`
-				Port      int       `json:"port"`
-				FirstSeen time.Time `json:"first_seen"`
-				LastSeen  time.Time `json:"last_seen"`
-				Connected bool      `json:"connected"`
-			}
+			var captains []api.CaptainStatus
 			if err := json.Unmarshal(body, &captains); err != nil {
 				return fmt.Errorf("decode captains: %w", err)
 			}
@@ -170,18 +160,17 @@ func fleetTail() *cli.Command {
 		Name:      "tail",
 		Usage:     "tail a captain's event feed (one-shot snapshot of the live feed)",
 		ArgsUsage: "<captain-key>",
-		Flags: operatorFlags(),
+		Flags:     operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			key := c.Args().First()
 			if key == "" {
 				return errors.New("usage: shipmates fleet tail <captain-key>")
 			}
-			body, err := fleetGet(ctx, c,"/api/captain/"+key+"/feed")
+			body, err := fleetGet(ctx, c, "/api/captain/"+key+"/feed")
 			if err != nil {
 				return err
 			}
-			_, _ = os.Stdout.Write(body)
-			return nil
+			return printPending(os.Stdout, body)
 		},
 	}
 }
@@ -191,7 +180,7 @@ func fleetTell() *cli.Command {
 		Name:      "tell",
 		Usage:     "inject a message to a persona on a connected captain",
 		ArgsUsage: "<captain-key> <persona> <message>",
-		Flags: operatorFlags(),
+		Flags:     operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			args := c.Args().Slice()
 			if len(args) < 3 {
@@ -200,7 +189,7 @@ func fleetTell() *cli.Command {
 			key, persona := args[0], args[1]
 			msg := strings.Join(args[2:], " ")
 			payload, _ := json.Marshal(map[string]string{"message": msg})
-			_, err := fleetPost(ctx, c,"/api/captain/"+key+"/tell/"+persona, payload)
+			_, err := fleetPost(ctx, c, "/api/captain/"+key+"/tell/"+persona, payload)
 			return err
 		},
 	}
@@ -267,13 +256,13 @@ func fleetPending() *cli.Command {
 		Name:      "pending",
 		Usage:     "list pending permission prompts on a captain",
 		ArgsUsage: "<captain-key>",
-		Flags: operatorFlags(),
+		Flags:     operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			key := c.Args().First()
 			if key == "" {
 				return errors.New("usage: shipmates fleet pending <captain-key>")
 			}
-			body, err := fleetGet(ctx, c,"/api/captain/"+key+"/pending")
+			body, err := fleetGet(ctx, c, "/api/captain/"+key+"/pending")
 			if err != nil {
 				return err
 			}
@@ -288,7 +277,7 @@ func fleetResolve() *cli.Command {
 		Name:      "resolve",
 		Usage:     "allow|deny a pending permission prompt on a captain",
 		ArgsUsage: "<captain-key> <id> allow|deny",
-		Flags: operatorFlags(),
+		Flags:     operatorFlags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			args := c.Args().Slice()
 			if len(args) < 3 {
@@ -299,7 +288,7 @@ func fleetResolve() *cli.Command {
 				return fmt.Errorf("behavior must be allow|deny, got %q", behavior)
 			}
 			payload, _ := json.Marshal(map[string]string{"behavior": behavior})
-			_, err := fleetPost(ctx, c,"/api/captain/"+key+"/resolve/"+id, payload)
+			_, err := fleetPost(ctx, c, "/api/captain/"+key+"/resolve/"+id, payload)
 			return err
 		},
 	}
@@ -315,11 +304,7 @@ func fleetStatus() *cli.Command {
 			if err != nil {
 				return err
 			}
-			var mates []struct {
-				ClientKey string `json:"client_key"`
-				Persona   string `json:"persona"`
-				Status    string `json:"status"`
-			}
+			var mates []api.FleetMateStatus
 			if err := json.Unmarshal(body, &mates); err != nil {
 				return fmt.Errorf("decode status: %w", err)
 			}

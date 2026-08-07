@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Autonomous Fleet voyage
+        env:
+          SHIPMATES_TEST_REPORT: ${{ runner.temp }}/fleet-autonomous.json
+        run: bash scripts/test-fleet-autonomous.sh
+
+      - name: Upload Fleet voyage diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-autonomous-${{ github.run_id }}
+          path: ${{ runner.temp }}/fleet-autonomous.json
+          if-no-files-found: error
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Race detector
+        run: go test -race ./...

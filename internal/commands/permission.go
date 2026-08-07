@@ -2,11 +2,14 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/api"
 	"github.com/luthermonson/shipmates/internal/client"
 	"github.com/urfave/cli/v3"
 )
@@ -24,10 +27,26 @@ func Pending() *cli.Command {
 			if err != nil {
 				return err
 			}
-			_, _ = os.Stdout.Write(out)
-			return nil
+			return printPending(os.Stdout, out)
 		},
 	}
+}
+
+func printPending(w io.Writer, body []byte) error {
+	var pending []api.Pending
+	if err := json.Unmarshal(body, &pending); err != nil {
+		return fmt.Errorf("decode pending requests: %w", err)
+	}
+	if len(pending) == 0 {
+		_, err := fmt.Fprintln(w, "(none)")
+		return err
+	}
+	for _, p := range pending {
+		if _, err := fmt.Fprintf(w, "%s  %s wants %s\n", p.ID, p.Persona, p.Tool); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Allow approves a pending permission request by id.

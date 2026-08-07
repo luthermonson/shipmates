@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/api"
 	"github.com/luthermonson/shipmates/internal/project"
 )
 
@@ -21,14 +22,7 @@ import (
 //	idle    — live process, but nothing heard for over workingWindow
 //	done    — the persona ran in this server's lifetime and its process exited
 //	off     — installed crew member that hasn't run in this server's lifetime
-type MateStatus struct {
-	Persona   string `json:"persona"`
-	Status    string `json:"status"`
-	Since     string `json:"since,omitempty"`      // last activity, RFC3339
-	Tool      string `json:"tool,omitempty"`       // blocked only: the gated tool
-	Input     string `json:"input,omitempty"`      // blocked only: human summary of the call
-	PendingID string `json:"pending_id,omitempty"` // blocked only: resolve handle
-}
+type MateStatus = api.MateStatus
 
 // workingWindow is how recently a persona must have emitted an event to count
 // as working rather than idle. Hook events fire on every tool use, so a mate

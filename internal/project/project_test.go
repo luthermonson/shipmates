@@ -48,7 +48,7 @@ func TestManifestRoundTrip(t *testing.T) {
 		Version: "1",
 		Files: map[string]string{
 			".claude/agents/captain.md": SHA([]byte("body")),
-			"shipmates.yaml":          SHA([]byte("cfg")),
+			"shipmates.yaml":            SHA([]byte("cfg")),
 		},
 	}
 	if err := want.Save(); err != nil {
@@ -337,5 +337,14 @@ func TestNewUUID(t *testing.T) {
 func TestAgentPath(t *testing.T) {
 	if got := AgentPath("captain"); got != filepath.Join(AgentsDir, "captain.md") {
 		t.Fatalf("AgentPath(captain) = %q", got)
+	}
+}
+
+func TestExplicitBackends(t *testing.T) {
+	if got := (PersonaConfig{Backend: "codex"}).BackendDescriptor().Kind; got != "codex" {
+		t.Fatalf("codex backend = %q", got)
+	}
+	if got := (PersonaConfig{Backend: "command"}).BackendDescriptor().Kind; got != "command" {
+		t.Fatalf("command backend = %q", got)
 	}
 }

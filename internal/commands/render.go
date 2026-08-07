@@ -7,21 +7,18 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/luthermonson/shipmates/internal/catalog"
+	"github.com/luthermonson/shipmates/internal/persona"
 	"github.com/urfave/cli/v3"
 )
 
 // frontmatter is the subset of a persona's YAML frontmatter that thin targets
 // care about. Memory dynamics (memoryDir, permissions, remoteControl) are
 // intentionally omitted — thin targets have no memory loop.
-type frontmatter struct {
-	Name        string
-	Description string
-	Byline      string
-	DomainGlob  []string
-}
+type frontmatter = persona.Frontmatter
 
 // Render emits a thin-target version of a persona.
 //
@@ -34,7 +31,7 @@ type frontmatter struct {
 func Render(cat *catalog.Catalog) *cli.Command {
 	return &cli.Command{
 		Name:      "render",
-		Usage:     "render a persona for a thin target (agents-md|cursor|windsurf)",
+		Usage:     "render a persona for a target (agents-md|codex|cursor|windsurf)",
 		ArgsUsage: "<persona>",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "target", Required: true},
@@ -64,12 +61,14 @@ func Render(cat *catalog.Catalog) *cli.Command {
 			switch target {
 			case "agents-md":
 				out = renderAgentsMD(fm, body)
+			case "codex":
+				out = renderCodex(fm, body)
 			case "cursor":
 				out = renderCursor(fm, body)
 			case "windsurf":
 				out = renderWindsurf(fm, body)
 			default:
-				return fmt.Errorf("unknown target %q (want: agents-md|cursor|windsurf)", target)
+				return fmt.Errorf("unknown target %q (want: agents-md|codex|cursor|windsurf)", target)
 			}
 
 			if c.Bool("write") {
@@ -82,6 +81,7 @@ func Render(cat *catalog.Catalog) *cli.Command {
 }
 
 // writeRender persists a rendered thin target to its canonical destination.
+//   - codex:     .codex/agents/<persona>.toml — standalone custom agent, overwritten.
 //   - cursor:    .cursor/rules/<persona>.mdc — standalone per-persona rule, overwritten.
 //   - agents-md: a marked section in ./AGENTS.md.
 //   - windsurf:  a marked section in ./.windsurf/rules.md.
@@ -90,6 +90,16 @@ func Render(cat *catalog.Catalog) *cli.Command {
 // own marked block and leaves everything else untouched.
 func writeRender(target, persona, content string) error {
 	switch target {
+	case "codex":
+		path := filepath.Join(".codex", "agents", persona+".toml")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		slog.Info("wrote Codex custom agent", "persona", persona, "path", path)
+		return nil
 	case "cursor":
 		path := filepath.Join(".cursor", "rules", persona+".mdc")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -105,7 +115,7 @@ func writeRender(target, persona, content string) error {
 	case "windsurf":
 		return upsertMarkedSection(filepath.Join(".windsurf", "rules.md"), persona, content)
 	default:
-		return fmt.Errorf("unknown target %q (want: agents-md|cursor|windsurf)", target)
+		return fmt.Errorf("unknown target %q (want: agents-md|codex|cursor|windsurf)", target)
 	}
 }
 
@@ -151,101 +161,11 @@ func upsertMarkedSection(path, persona, content string) error {
 
 // splitPersona separates a persona file into its parsed frontmatter and body.
 func splitPersona(raw []byte) (frontmatter, string) {
-	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	text = strings.TrimLeft(text, "\n")
-
-	if !strings.HasPrefix(text, "---\n") {
-		return frontmatter{}, strings.TrimSpace(text)
+	def, err := persona.Parse(raw)
+	if err != nil {
+		return frontmatter{}, strings.TrimSpace(string(raw))
 	}
-
-	rest := text[len("---\n"):]
-	end := strings.Index(rest, "\n---")
-	if end == -1 {
-		return frontmatter{}, strings.TrimSpace(text)
-	}
-
-	fmText := rest[:end]
-	body := rest[end+len("\n---"):]
-	if nl := strings.IndexByte(body, '\n'); nl != -1 {
-		body = body[nl+1:]
-	} else {
-		body = ""
-	}
-
-	return parseFrontmatter(fmText), strings.TrimSpace(body)
-}
-
-// parseFrontmatter does a minimal, dependency-free parse of the flat scalar
-// fields and the one block-sequence (domainGlob) that thin targets use.
-func parseFrontmatter(s string) frontmatter {
-	var fm frontmatter
-	lines := strings.Split(s, "\n")
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if line != strings.TrimLeft(line, " \t") {
-			continue
-		}
-		key, val, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		val = strings.TrimSpace(val)
-
-		switch key {
-		case "name":
-			fm.Name = unquoteScalar(val)
-		case "description":
-			fm.Description = unquoteScalar(val)
-		case "byline":
-			fm.Byline = unquoteScalar(val)
-		case "domainGlob":
-			if val != "" {
-				fm.DomainGlob = parseFlowList(val)
-				break
-			}
-			for j := i + 1; j < len(lines); j++ {
-				item := strings.TrimSpace(lines[j])
-				if strings.HasPrefix(item, "- ") {
-					fm.DomainGlob = append(fm.DomainGlob, unquoteScalar(strings.TrimSpace(item[2:])))
-					i = j
-					continue
-				}
-				if item == "" {
-					i = j
-					continue
-				}
-				break
-			}
-		}
-	}
-	return fm
-}
-
-func unquoteScalar(v string) string {
-	if len(v) >= 2 {
-		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
-			return v[1 : len(v)-1]
-		}
-	}
-	return v
-}
-
-func parseFlowList(v string) []string {
-	v = strings.TrimSpace(v)
-	v = strings.TrimPrefix(v, "[")
-	v = strings.TrimSuffix(v, "]")
-	var out []string
-	for _, part := range strings.Split(v, ",") {
-		if p := unquoteScalar(strings.TrimSpace(part)); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
+	return def.Frontmatter, def.Body
 }
 
 // condenseBody trims memory-centric sections out of the persona body so thin
@@ -303,6 +223,34 @@ func renderAgentsMD(fm frontmatter, body string) string {
 	}
 	b.WriteString(condenseBody(body))
 	b.WriteString("\n")
+	return b.String()
+}
+
+// renderCodex emits a project-scoped custom agent. Unlike the generic
+// AGENTS.md target, the persona remains independently addressable by Codex
+// subagent workflows and carries Shipmates' file-backed memory convention.
+func renderCodex(fm frontmatter, body string) string {
+	name := fm.Name
+	if name == "" {
+		name = "shipmate"
+	}
+	description := fm.Description
+	if description == "" {
+		description = "Shipmates persona"
+	}
+
+	instructions := strings.TrimSpace(body)
+	instructions += "\n\n## Persistent Memory\n\n" +
+		"At the start of each task, read the relevant files under `.shipmates/memory/" + name + "/`. " +
+		"Record durable project decisions, verified constraints, and reusable findings there when they would help a later task."
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "name = %s\n", strconv.Quote(name))
+	fmt.Fprintf(&b, "description = %s\n", strconv.Quote(description))
+	if len(fm.DomainGlob) > 0 {
+		fmt.Fprintf(&b, "# Primary domains: %s\n", strings.Join(fm.DomainGlob, ", "))
+	}
+	fmt.Fprintf(&b, "developer_instructions = %s\n", strconv.Quote(instructions))
 	return b.String()
 }
 

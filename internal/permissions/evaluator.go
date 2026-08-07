@@ -19,7 +19,7 @@ const (
 	EffectDeny  Effect = "deny"
 )
 
-// Decision is what Evaluate hands back to the caller: the effect and a
+// Decision is what EvaluateFor hands back to the caller: the effect and a
 // human-readable reason ("allowed: matched Bash(git *)"). The reason surfaces
 // in shipmates' event stream so the operator can see WHY a call was
 // auto-decided.
@@ -29,19 +29,19 @@ type Decision struct {
 }
 
 // Evaluator is the entry point. Callers construct one per project (or per
-// persona-session) and reuse it; the settings load happens once and rules
-// are cached until Invalidate is called.
+// persona-session) and reuse it; settings and persona overlays load once for
+// that evaluator's lifetime.
 //
 // Layers (highest precedence deny wins across all of them):
 //
-//   1. Fleet-wide deny (set via SetFleetPolicy; sourced from Fleet Command).
-//   2. Per-persona catalog overlay (catalog/<persona>/policy.yaml, vendored
-//      to .shipmates/policies/<persona>.yaml on install).
-//   3. Project settings (.claude/settings[.local].json) — Claude Code's own
-//      rules; loaded once on first use.
-//   4. User settings (~/.claude/settings.json).
-//   5. Time-box grants — auto-allow that the operator opted into for N
-//      minutes via `shipmates allow <id> --for 30m`. Consulted before ask.
+//  1. Fleet-wide deny (set via SetFleetPolicy; sourced from Fleet Command).
+//  2. Per-persona catalog overlay (catalog/<persona>/policy.yaml, vendored
+//     to .shipmates/policies/<persona>.yaml on install).
+//  3. Project settings (.claude/settings[.local].json) — Claude Code's own
+//     rules; loaded once on first use.
+//  4. User settings (~/.claude/settings.json).
+//  5. Time-box grants — auto-allow that the operator opted into for N
+//     minutes via `shipmates allow <id> --for 30m`. Consulted before ask.
 //
 // Deny in ANY layer beats everything else. Ask beats allow. Time-boxes fire
 // at the "no rule matched, would ask" stage — they upgrade the ask to allow
@@ -63,8 +63,7 @@ type Evaluator struct {
 	// pointer would work but the slot keeps the lock semantics obvious.
 	fleet *fleetSlot
 
-	// personaRules memoizes the per-persona overlay merged onto the base
-	// rules. Reset by Invalidate alongside the base settings.
+	// personaRules memoizes the per-persona overlay merged onto the base rules.
 	personaRules *personaCache
 
 	// timeboxes holds active `shipmates allow <id> --for <duration>` grants,
@@ -74,39 +73,13 @@ type Evaluator struct {
 }
 
 // NewEvaluator builds an Evaluator bound to projectRoot. Settings are
-// lazily loaded on the first Evaluate call so tests can construct evaluators
-// without a filesystem dance.
+// lazily loaded on the first EvaluateFor call.
 func NewEvaluator(projectRoot string) *Evaluator {
 	return &Evaluator{
 		projectRoot:  projectRoot,
 		fleet:        newFleetSlot(),
 		personaRules: newPersonaCache(),
 		timeboxes:    newTimeboxStore(),
-	}
-}
-
-// NewEvaluatorWithRules is a test seam — supply pre-parsed rules directly.
-func NewEvaluatorWithRules(rules MergedRules) *Evaluator {
-	return &Evaluator{
-		rules:        rules,
-		loaded:       true,
-		fleet:        newFleetSlot(),
-		personaRules: newPersonaCache(),
-		timeboxes:    newTimeboxStore(),
-	}
-}
-
-// Invalidate clears the cached rules so the next Evaluate reloads settings.
-// Not currently wired to a fs watcher — exists so operators (or a future
-// SIGHUP handler) can force a refresh without restarting the ship.
-func (e *Evaluator) Invalidate() {
-	e.mu.Lock()
-	e.loaded = false
-	e.rules = MergedRules{}
-	e.errs = nil
-	e.mu.Unlock()
-	if e.personaRules != nil {
-		e.personaRules.reset()
 	}
 }
 
@@ -132,14 +105,6 @@ func (e *Evaluator) RegisterTimeBox(persona, tool, command string, duration time
 	return e.timeboxes.add(persona, tool, command, duration)
 }
 
-// SweepTimeBoxes drops expired grants across all personas. Optional hygiene
-// call for a background ticker — evaluator lookups already self-expire.
-func (e *Evaluator) SweepTimeBoxes() {
-	if e.timeboxes != nil {
-		e.timeboxes.sweep()
-	}
-}
-
 // ensureLoaded loads the merged settings on first use. Load errors are
 // stashed but not returned — a broken settings file falls back to "no
 // rules", which reverts to the read-only-builtin allowlist plus ask for
@@ -162,7 +127,7 @@ func (e *Evaluator) ensureLoaded() {
 	e.loaded = true
 }
 
-// Evaluate is the top-level decision function. It applies Claude Code's
+// EvaluateFor is the top-level decision function. It applies Claude Code's
 // documented precedence:
 //
 //  1. Deny in ANY layer beats everything.
@@ -178,16 +143,8 @@ func (e *Evaluator) ensureLoaded() {
 // tool is the Claude Code tool name ("Bash", "Read", "Edit", "WebFetch",
 // …). input is the tool_input map from the hook payload.
 //
-// This overload does NOT layer the per-persona catalog policy or check the
-// time-box store; use EvaluateFor(persona, …) for those. Kept for legacy
-// callers that don't know which persona is asking (e.g. broadcast paths).
-func (e *Evaluator) Evaluate(tool string, input map[string]any) Decision {
-	return e.EvaluateFor("", tool, input)
-}
-
-// EvaluateFor is Evaluate scoped to a specific persona. The persona name
-// selects the catalog policy overlay and the time-box keyring. An empty
-// persona is equivalent to Evaluate — no overlay, no time-box.
+// The persona name selects the catalog policy overlay and time-box keyring.
+// An empty persona disables those layers.
 func (e *Evaluator) EvaluateFor(persona, tool string, input map[string]any) Decision {
 	e.ensureLoaded()
 	rules := e.rulesFor(persona)
@@ -357,8 +314,8 @@ func evaluateBash(tool string, input map[string]any, rules MergedRules) Decision
 		subs = []string{cmd}
 	}
 	var (
-		worst    = EffectAllow
-		reasons  []string
+		worst   = EffectAllow
+		reasons []string
 	)
 	for _, sub := range subs {
 		d := evaluateBashSingle(tool, sub, rules)

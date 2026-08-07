@@ -53,8 +53,8 @@ func (t *timeboxStore) add(persona, tool, command string, duration time.Duration
 }
 
 // lookup returns an active time-box that matches this call, if one exists.
-// Expired entries are dropped on the way through — no separate sweeper needed
-// for correctness, though the ship may still ticker one for hygiene.
+// Expired entries are dropped on the way through, so no separate sweeper is
+// needed.
 func (t *timeboxStore) lookup(persona, tool, command string) (TimeBox, bool) {
 	pattern := canonicalPattern(tool, command)
 	key := timeboxKey(tool, pattern)
@@ -76,25 +76,6 @@ func (t *timeboxStore) lookup(persona, tool, command string) (TimeBox, bool) {
 		return TimeBox{}, false
 	}
 	return tb, true
-}
-
-// sweep drops expired entries across all personas. Optional — lookup already
-// self-heals — but useful as a low-priority ticker so idle personas don't
-// accumulate dead entries.
-func (t *timeboxStore) sweep() {
-	now := time.Now()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for persona, m := range t.entries {
-		for k, tb := range m {
-			if now.After(tb.ExpiresAt) {
-				delete(m, k)
-			}
-		}
-		if len(m) == 0 {
-			delete(t.entries, persona)
-		}
-	}
 }
 
 // canonicalPattern reduces a tool call to the key we use for time-box matching.

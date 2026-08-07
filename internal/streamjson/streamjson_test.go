@@ -1,6 +1,7 @@
 package streamjson
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -12,6 +13,14 @@ func one(t *testing.T, line string) Item {
 		t.Fatalf("want 1 item, got %d from %s", len(items), line)
 	}
 	return items[0]
+}
+
+func DecodeLine(line []byte) []Item {
+	var obj map[string]any
+	if err := json.Unmarshal(line, &obj); err != nil {
+		return nil
+	}
+	return Decode(obj)
 }
 
 func TestDecodeAssistantText(t *testing.T) {

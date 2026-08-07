@@ -252,4 +252,3 @@ func autonomousCharter(cat *catalog.Catalog, captain, cadence string, cap int) (
 		"RoutingRead": routingStateRead(),
 	})
 }
-

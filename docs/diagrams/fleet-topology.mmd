@@ -1,37 +1,23 @@
-%% Fleet topology — bridge + ships + beads (target state, feat/bridge direction)
-%% Render: mmdc -i fleet-topology.mmd -o fleet-topology.svg
 flowchart TB
-    subgraph bridge["BRIDGE (shipmates bridge serve)"]
-        ui["web UI<br/>xterm.js panes · status dots<br/>pending approvals · beads graph"]
-        hub["remotedialer hub<br/>(existing)"]
-        remote["beads remote<br/>(dolt sql-server)"]
-        store["SQLite mirror<br/>(event replay)"]
+    subgraph fleet["Fleet Command"]
+        ui["Embedded web UI"]
+        hub["remotedialer hub"]
+        voice["Optional voice boundary"]
         ui --- hub
-        hub --- store
-        ui --- remote
+        ui --- voice
     end
 
-    subgraph shipA["SHIP A (laptop)"]
-        leadA["lead server"]
-        mateA1["mate: architect<br/>PTY (go-pty)"]
-        mateA2["mate: security<br/>PTY (go-pty)"]
-        bdA["bd (embedded)"]
-        leadA --- mateA1
-        leadA --- mateA2
-        leadA --- bdA
+    subgraph shipA["Ship A"]
+        captainA["captain server"]
+        matesA["mate processes"]
+        captainA --- matesA
     end
 
-    subgraph shipB["SHIP B (homelab)"]
-        leadB["lead server"]
-        mateB1["mate: backend<br/>headless stream-json"]
-        bdB["bd (embedded)"]
-        leadB --- mateB1
-        leadB --- bdB
+    subgraph shipB["Ship B"]
+        captainB["captain server"]
+        matesB["mate processes"]
+        captainB --- matesB
     end
 
-    leadA -- "outbound websocket tunnel<br/>PTY frames + hook events" --> hub
-    leadB -- "outbound websocket tunnel" --> hub
-    bdA -- "bd dolt push/pull" --> remote
-    bdB -- "bd dolt push/pull" --> remote
-    hub -. "pull-now nudge" .-> leadA
-    hub -. "pull-now nudge" .-> leadB
+    captainA -->|"outbound websocket"| hub
+    captainB -->|"outbound websocket"| hub

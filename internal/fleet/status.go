@@ -3,25 +3,16 @@ package fleet
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/luthermonson/shipmates/internal/api"
 )
 
 // handleAggregateStatus fans a /status.json poll out to every connected captain
 // and returns the union, each mate tagged with its captain's client key and repo.
-// This is the one-poll feed for the UI's fleet-wide status dots; the per-captain
-// form lives at /api/captain/{key}/status.
+// This is the one-poll feed for the UI's fleet-wide status dots.
 func (b *Server) handleAggregateStatus(w http.ResponseWriter, r *http.Request) {
-	type entry struct {
-		ClientKey string `json:"client_key"`
-		Repo      string `json:"repo"`
-		Persona   string `json:"persona"`
-		Status    string `json:"status"`
-		Since     string `json:"since,omitempty"`
-		Tool      string `json:"tool,omitempty"`
-		Input     string `json:"input,omitempty"`
-		PendingID string `json:"pending_id,omitempty"`
-	}
 	clients := b.dialer.ListClients()
-	results := make(chan []entry, len(clients))
+	results := make(chan []api.FleetMateStatus, len(clients))
 	for _, key := range clients {
 		go func(key string) {
 			body, status, err := b.proxy(r.Context(), key, "GET", "/status.json", nil)
@@ -29,14 +20,7 @@ func (b *Server) handleAggregateStatus(w http.ResponseWriter, r *http.Request) {
 				results <- nil
 				return
 			}
-			var raw []struct {
-				Persona   string `json:"persona"`
-				Status    string `json:"status"`
-				Since     string `json:"since"`
-				Tool      string `json:"tool"`
-				Input     string `json:"input"`
-				PendingID string `json:"pending_id"`
-			}
+			var raw []api.MateStatus
 			if err := json.Unmarshal(body, &raw); err != nil {
 				results <- nil
 				return
@@ -47,23 +31,14 @@ func (b *Server) handleAggregateStatus(w http.ResponseWriter, r *http.Request) {
 				repo = l.Repo
 			}
 			b.mu.Unlock()
-			out := make([]entry, 0, len(raw))
+			out := make([]api.FleetMateStatus, 0, len(raw))
 			for _, m := range raw {
-				out = append(out, entry{
-					ClientKey: key,
-					Repo:      repo,
-					Persona:   m.Persona,
-					Status:    m.Status,
-					Since:     m.Since,
-					Tool:      m.Tool,
-					Input:     m.Input,
-					PendingID: m.PendingID,
-				})
+				out = append(out, api.FleetMateStatus{MateStatus: m, ClientKey: key, Repo: repo})
 			}
 			results <- out
 		}(key)
 	}
-	all := make([]entry, 0)
+	all := make([]api.FleetMateStatus, 0)
 	for range clients {
 		all = append(all, <-results...)
 	}

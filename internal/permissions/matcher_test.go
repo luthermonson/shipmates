@@ -153,9 +153,9 @@ func TestMatchDomain_WildcardSubdomain(t *testing.T) {
 
 func TestParseRule(t *testing.T) {
 	cases := []struct {
-		raw          string
-		wantTool     string
-		wantPattern  string
+		raw         string
+		wantTool    string
+		wantPattern string
 	}{
 		{"Bash(git *)", "Bash", "git *"},
 		{"Bash", "Bash", ""},

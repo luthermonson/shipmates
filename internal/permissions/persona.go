@@ -116,7 +116,7 @@ func mergePersonaPolicy(base MergedRules, pol *PersonaPolicy) MergedRules {
 
 // personaCache is a tiny memoizer for per-persona rule sets. Loading the same
 // policy on every tool call is wasteful; the file rarely changes during a
-// session, and Invalidate() drops the cache alongside settings.
+// session, so entries live for the evaluator's lifetime.
 type personaCache struct {
 	mu    sync.RWMutex
 	rules map[string]MergedRules
@@ -136,11 +136,5 @@ func (c *personaCache) get(persona string) (MergedRules, bool) {
 func (c *personaCache) set(persona string, r MergedRules) {
 	c.mu.Lock()
 	c.rules[persona] = r
-	c.mu.Unlock()
-}
-
-func (c *personaCache) reset() {
-	c.mu.Lock()
-	c.rules = map[string]MergedRules{}
 	c.mu.Unlock()
 }

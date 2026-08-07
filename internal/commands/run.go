@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/luthermonson/shipmates/internal/backend"
 	"github.com/luthermonson/shipmates/internal/client"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
@@ -46,9 +47,22 @@ func dispatch(ctx context.Context, persona, prompt string, fresh bool) error {
 // dispatchTo is dispatch with caller-supplied output writers, so parallel
 // callers (drain-many) can capture each persona's output into its own buffer.
 func dispatchTo(ctx context.Context, persona, prompt string, fresh bool, stdout, stderr io.Writer) error {
-	cfg, idArgs, id, name, fp := sessionLaunch(persona, fresh)
-	if cfg.CommandBacked() {
-		return fmt.Errorf("persona %s is PTY-only (backend: command) — it can't take headless dispatch", persona)
+	if _, err := os.Stat(project.AgentPath(persona)); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("persona %q is not installed — run: shipmates add %s", persona, persona)
+		}
+		return err
+	}
+	cfg, idArgs, id, name, fp := project.SessionLaunch(persona, fresh)
+	descriptor := cfg.BackendDescriptor()
+	if !descriptor.Supports(backend.Headless) {
+		return fmt.Errorf("persona %s backend %q does not support headless dispatch", persona, descriptor.Kind)
+	}
+	if descriptor.Kind == backend.Codex {
+		return dispatchCodex(ctx, persona, prompt, fresh, cfg, stdout, stderr)
+	}
+	if descriptor.Kind != backend.Claude {
+		return fmt.Errorf("persona %s has unsupported backend %q", persona, descriptor.Kind)
 	}
 	args := append([]string{"-p"}, idArgs...)
 	args = append(args, cfg.LaunchFlags(true)...)

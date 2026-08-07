@@ -72,16 +72,16 @@ var allowedAttachExts = map[string]bool{
 // legacy JPEG aliases). Returns "" for anything not in this table so the
 // caller can fall through to filename / byte sniffing.
 var contentTypeToExt = map[string]string{
-	"image/jpeg":    ".jpg",
-	"image/jpg":     ".jpg",
-	"image/pjpeg":   ".jpg",
-	"image/png":     ".png",
-	"image/gif":     ".gif",
-	"image/webp":    ".webp",
-	"image/heic":    ".heic",
-	"image/heif":    ".heic",
+	"image/jpeg":      ".jpg",
+	"image/jpg":       ".jpg",
+	"image/pjpeg":     ".jpg",
+	"image/png":       ".png",
+	"image/gif":       ".gif",
+	"image/webp":      ".webp",
+	"image/heic":      ".heic",
+	"image/heif":      ".heic",
 	"application/pdf": ".pdf",
-	"text/plain":    ".txt",
+	"text/plain":      ".txt",
 }
 
 // handleAttach receives a multipart POST with a single `file` field, writes it
@@ -301,4 +301,3 @@ func (s *Server) attachSweepOnce(now time.Time) {
 		slog.Info("attach sweeper: removed stale file", "file", full, "age", now.Sub(info.ModTime()).Round(time.Minute))
 	}
 }
-

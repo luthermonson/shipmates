@@ -18,15 +18,15 @@ import (
 // captainTransport returns an http.RoundTripper that dials the given
 // captain's local server through its tunnel, regardless of the request URL's
 // host.
-func (b *Server) captainTransport(clientKey string) (http.RoundTripper, error) {
+func (b *Server) captainTransport(clientKey string) (http.RoundTripper, int, error) {
 	b.mu.Lock()
 	captain, ok := b.captains[clientKey]
 	b.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("no such captain: %s", clientKey)
+		return nil, http.StatusNotFound, fmt.Errorf("no such captain: %s", clientKey)
 	}
 	if !b.dialer.HasSession(clientKey) {
-		return nil, fmt.Errorf("captain %s not currently connected", clientKey)
+		return nil, http.StatusGatewayTimeout, fmt.Errorf("captain %s not currently connected", clientKey)
 	}
 	dial := b.dialer.Dialer(clientKey)
 	addr := fmt.Sprintf("127.0.0.1:%d", captain.Port)
@@ -37,7 +37,7 @@ func (b *Server) captainTransport(clientKey string) (http.RoundTripper, error) {
 		// One conn per stream; don't pool tunneled conns across captains.
 		DisableKeepAlives:     true,
 		ResponseHeaderTimeout: 15 * time.Second,
-	}, nil
+	}, http.StatusOK, nil
 }
 
 // proxyPTYPost forwards a small POST (start/input/resize/takeover/release)
@@ -95,9 +95,9 @@ func (b *Server) handlePTYStreamProxy(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	persona := r.PathValue("persona")
 
-	rt, err := b.captainTransport(key)
+	rt, status, err := b.captainTransport(key)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, err.Error(), status)
 		return
 	}
 	fl, ok := w.(http.Flusher)

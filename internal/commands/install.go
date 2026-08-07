@@ -21,8 +21,9 @@ import (
 // prefix (the repo name) at init time. Leave sessionPrefix empty for no prefix.
 func defaultConfig(sessionPrefix string) string {
 	return fmt.Sprintf(`# shipmates.yaml — crew configuration for this project
-# Personas live as Claude Code subagent files in .claude/agents/.
-# Per-persona overrides (permission mode, remoteControl, model/effort) go here.
+# Personas are installed for Claude Code (.claude/agents/) and Codex
+# (.codex/agents/). Per-persona overrides (backend, permission mode,
+# remoteControl, model/effort) go here.
 
 # Prefix for per-persona session names (--name / --resume handles), written as
 # this repo's name at init. Leave it empty (sessionPrefix: "") for no prefix, or
@@ -36,13 +37,13 @@ sessionPrefix: %s
 # crew:
 #   security:
 #     permissions: { mode: ask }
+#     backend: codex                      # auto (default) | claude | codex | command
 #   backend:
 #     dangerouslySkipPermissions: true
 #   tester:
 #     model: claude-haiku-4-5-20251001   # run this persona on a cheaper/faster model
 #   architect:
 #     effort: high                       # low|medium|high|xhigh|max
-
 # Routing substrate. Set to "github" to append GitHub issues/PRs routing
 # conventions (claim-by-label, worktree-per-issue, Closes #n, verdict merge
 # gate, cleanup ceremony) to every crew persona at install/update time. Leave
@@ -77,6 +78,7 @@ func Init(cat *catalog.Catalog) *cli.Command {
 				filepath.Join(project.Dir, project.MemoryDirName),
 				filepath.Join(project.Dir, project.SessionsDirName),
 				project.AgentsDir,
+				project.CodexAgentsDir,
 			} {
 				if err := os.MkdirAll(d, 0o755); err != nil {
 					return err
@@ -97,11 +99,11 @@ func Init(cat *catalog.Catalog) *cli.Command {
 			if err := installCommands(cat, m); err != nil {
 				return err
 			}
-			if err := ensureAttachGitignore(); err != nil {
+			if err := ensureRuntimeGitignore(); err != nil {
 				// Non-fatal: the inbox is regenerable and a missing
 				// gitignore only means the operator has to add it by
 				// hand. Warn and keep going.
-				slog.Warn("could not update .gitignore for attach inbox", "err", err)
+				slog.Warn("could not update .gitignore for runtime state", "err", err)
 			}
 			if err := m.Save(); err != nil {
 				return err
@@ -124,11 +126,11 @@ func Init(cat *catalog.Catalog) *cli.Command {
 	}
 }
 
-// Add vendors a persona into .claude/agents and seeds its memory.
+// Add vendors a persona for Claude Code and Codex, then seeds its memory.
 func Add(cat *catalog.Catalog) *cli.Command {
 	return &cli.Command{
 		Name:      "add",
-		Usage:     "vendor a persona into .claude/agents and seed its memory",
+		Usage:     "vendor a persona for Claude Code and Codex, then seed its memory",
 		ArgsUsage: "<persona>",
 		Action: func(ctx context.Context, c *cli.Command) error {
 			name := c.Args().First()
@@ -152,8 +154,15 @@ func List(cat *catalog.Catalog) *cli.Command {
 			}
 			for _, name := range avail {
 				status := ""
+				var harnesses []string
 				if _, err := os.Stat(project.AgentPath(name)); err == nil {
-					status = "installed"
+					harnesses = append(harnesses, "claude")
+				}
+				if _, err := os.Stat(project.CodexAgentPath(name)); err == nil {
+					harnesses = append(harnesses, "codex")
+				}
+				if len(harnesses) > 0 {
+					status = strings.Join(harnesses, ",")
 				}
 				fmt.Printf("%-14s %s\n", name, status)
 			}
@@ -232,31 +241,35 @@ func renderRoutingBlock(cat *catalog.Catalog) ([]byte, error) {
 	return collapseBlankLines(rendered.Bytes()), nil
 }
 
-// attachInboxIgnorePattern is the path shipmates adds to .gitignore so a
-// binary attach doesn't accidentally get committed. Kept as a package-level
-// constant so both the installer and the eventual `shipmates update` share
-// the exact string.
-const attachInboxIgnorePattern = ".shipmates/inbox/"
+// runtimeIgnorePatterns are generated, transient paths that must never be
+// committed with a project.
+var runtimeIgnorePatterns = []string{".shipmates/inbox/", ".shipmates/sessions/"}
 
-// ensureAttachGitignore makes sure the project's root .gitignore ignores the
-// attach inbox. If .gitignore doesn't exist yet we create one containing just
-// the inbox pattern; if it exists we append the pattern only when it isn't
-// already present, preserving whatever the user has above.
-func ensureAttachGitignore() error {
+// ensureRuntimeGitignore preserves user entries and appends missing runtime
+// patterns exactly once.
+func ensureRuntimeGitignore() error {
+	for _, pattern := range runtimeIgnorePatterns {
+		if err := ensureGitignorePattern(pattern); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureGitignorePattern(pattern string) error {
 	const path = ".gitignore"
 	existing, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Fresh file — write a minimal shipmates-managed header plus the
 		// pattern. Leaving the file otherwise empty is polite: the user's
 		// own ignores will land underneath without conflict.
-		content := "# shipmates: keep inbound binary attachments out of git\n" +
-			attachInboxIgnorePattern + "\n"
+		content := "# shipmates: generated runtime state\n" + pattern + "\n"
 		return os.WriteFile(path, []byte(content), 0o644)
 	}
 	if err != nil {
 		return err
 	}
-	if gitignoreContainsPattern(existing, attachInboxIgnorePattern) {
+	if gitignoreContainsPattern(existing, pattern) {
 		return nil
 	}
 	// Append with a leading newline only when the existing file doesn't
@@ -264,8 +277,8 @@ func ensureAttachGitignore() error {
 	// entry.
 	buf := bytes.TrimRight(existing, "\r\n")
 	buf = append(buf, '\n', '\n')
-	buf = append(buf, "# shipmates: keep inbound binary attachments out of git\n"...)
-	buf = append(buf, attachInboxIgnorePattern...)
+	buf = append(buf, "# shipmates: generated runtime state\n"...)
+	buf = append(buf, pattern...)
 	buf = append(buf, '\n')
 	return os.WriteFile(path, buf, 0o644)
 }
@@ -394,6 +407,20 @@ func addPersona(cat *catalog.Catalog, name string) error {
 	}
 	m.Files[dst] = project.SHA(agent)
 	slog.Info("installed persona", "persona", name, "path", dst)
+
+	// Codex custom agents are independently addressable subagents. They share
+	// the same role, routing, and file-backed memory conventions as Claude.
+	fm, body := splitPersona(agent)
+	codexAgent := []byte(renderCodex(fm, body))
+	codexPath := project.CodexAgentPath(name)
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(codexPath, codexAgent, 0o644); err != nil {
+		return err
+	}
+	m.Files[codexPath] = project.SHA(codexAgent)
+	slog.Info("installed Codex agent", "persona", name, "path", codexPath)
 
 	// Seed memory — but never overwrite existing memory (it's sacred).
 	memDir := project.MemoryDir(name)
