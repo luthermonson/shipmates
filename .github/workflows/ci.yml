@@ -56,11 +56,23 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
+        # This step has hung to the 20-minute job timeout on every windows-x64
+        # run since the fleet migration (checkout succeeds, so GitHub itself is
+        # reachable; setup-go's network operations against blob storage are
+        # what never complete). Bound the step so the leg reports quickly
+        # instead of pinning a runner for the full job timeout.
+        timeout-minutes: 8
         with:
           # Single source of truth: the version in go.mod, not a literal here
           # that silently drifts from it.
           go-version-file: go.mod
-          cache: true
+          # Disabled on windows to isolate which of setup-go's two network
+          # operations hangs there: with the cache restore gone, a hang that
+          # remains is the toolchain download, and the fix moves lab-side
+          # (preinstall Go in the runner tool cache or open egress). The other
+          # legs keep the cache — the fleet's runners are ephemeral, so this
+          # is their only cache.
+          cache: ${{ matrix.os != 'windows' }}
 
       - name: Build
         run: go build ./...
