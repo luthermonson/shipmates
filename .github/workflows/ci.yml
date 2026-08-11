@@ -56,22 +56,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
-        # This step has hung to the 20-minute job timeout on every windows-x64
-        # run since the fleet migration (checkout succeeds, so GitHub itself is
-        # reachable; setup-go's network operations against blob storage are
-        # what never complete). Bound the step so the leg reports quickly
-        # instead of pinning a runner for the full job timeout.
+        # This step has hung past the 20-minute job timeout on every
+        # windows-x64 run since the fleet migration. Run 31525784634 proved
+        # where: the toolchain download completes in seconds, and it is the
+        # ZIP EXTRACTION that crawls — the runner took 89s to extract
+        # setup-go's own tiny action archive, which at ~13k files puts the Go
+        # toolchain zip past 30 minutes. That per-file cost is
+        # real-time-antivirus territory, and no timeout here can fix it: the
+        # windows leg stays red until the lab image preinstalls Go in the
+        # runner tool cache (RUNNER_TOOL_CACHE) or excludes the runner
+        # workdir from scanning. The bound keeps the leg from pinning a
+        # fleet runner while that lands.
         timeout-minutes: 8
         with:
           # Single source of truth: the version in go.mod, not a literal here
           # that silently drifts from it.
           go-version-file: go.mod
-          # Disabled on windows to isolate which of setup-go's two network
-          # operations hangs there: with the cache restore gone, a hang that
-          # remains is the toolchain download, and the fix moves lab-side
-          # (preinstall Go in the runner tool cache or open egress). The other
-          # legs keep the cache — the fleet's runners are ephemeral, so this
-          # is their only cache.
+          # The windows cache restore pays the same per-file extraction cost
+          # as the toolchain zip, so it stays off there. The other legs keep
+          # the cache — the fleet's runners are ephemeral, so this is their
+          # only cache.
           cache: ${{ matrix.os != 'windows' }}
 
       - name: Build
