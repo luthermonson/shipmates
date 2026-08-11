@@ -10,6 +10,18 @@ import (
 	"time"
 )
 
+// lineageDir returns a symlink-resolved temp dir: validateLineagePath
+// requires fully resolved inputs, and macOS's t.TempDir lives under the
+// platform's own /var -> private/var symlink.
+func lineageDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func lineagePlan() Plan {
 	return Plan{Version: 1, Title: "Voyage", Objective: "Execute safely", Scope: []string{"backend"}, Commissioned: true, Tasks: []Task{
 		{ID: "task-one", Persona: "backend", Summary: "First", Prompt: "complete first"},
@@ -50,7 +62,7 @@ func completedLineageState(t *testing.T, plan *Plan, hash, path string) []byte {
 }
 
 func TestMigrateSuccessorInheritsOnlyUnchangedClosure(t *testing.T) {
-	dir := t.TempDir()
+	dir := lineageDir(t)
 	prePlanPath, successorPlanPath := filepath.Join(dir, "predecessor.json"), filepath.Join(dir, "successor.json")
 	preStatePath, successorStatePath := filepath.Join(dir, "predecessor-state.json"), filepath.Join(dir, "successor-state.json")
 	pre := lineagePlan()
@@ -83,7 +95,7 @@ func TestMigrateSuccessorInheritsOnlyUnchangedClosure(t *testing.T) {
 }
 
 func TestMigrateSuccessorConservativeGlobalAndEvidenceInvalidation(t *testing.T) {
-	dir := t.TempDir()
+	dir := lineageDir(t)
 	prePlanPath, successorPlanPath := filepath.Join(dir, "predecessor.json"), filepath.Join(dir, "successor.json")
 	preStatePath, successorStatePath := filepath.Join(dir, "predecessor-state.json"), filepath.Join(dir, "successor-state.json")
 	pre := lineagePlan()
@@ -128,7 +140,7 @@ func TestMigrateSuccessorConservativeGlobalAndEvidenceInvalidation(t *testing.T)
 }
 
 func TestMigrateSuccessorRejectsUncommissionedOrUnsafePredecessor(t *testing.T) {
-	dir := t.TempDir()
+	dir := lineageDir(t)
 	planPath := filepath.Join(dir, "plan.json")
 	plan := lineagePlan()
 	hash, _ := writeLineagePlan(t, planPath, plan)
@@ -162,7 +174,7 @@ func TestMigrateSuccessorInvalidatesEveryTaskAndGlobalContractMutation(t *testin
 	}
 	for name, mutate := range globalMutations {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := lineageDir(t)
 			prePlanPath := filepath.Join(dir, "predecessor.json")
 			pre := lineagePlan()
 			preHash, _ := writeLineagePlan(t, prePlanPath, pre)
@@ -185,7 +197,7 @@ func TestMigrateSuccessorInvalidatesEveryTaskAndGlobalContractMutation(t *testin
 	}
 	// Version changes are rejected by the strict plan schema rather than
 	// treated as an equivalent global contract.
-	dir := t.TempDir()
+	dir := lineageDir(t)
 	pre := lineagePlan()
 	prePlanPath := filepath.Join(dir, "predecessor.json")
 	preHash, _ := writeLineagePlan(t, prePlanPath, pre)
@@ -212,7 +224,7 @@ func TestMigrateSuccessorInvalidatesTaskContractAndClosureConservatively(t *test
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := lineageDir(t)
 			prePlanPath := filepath.Join(dir, "predecessor.json")
 			pre := lineagePlan()
 			preHash, _ := writeLineagePlan(t, prePlanPath, pre)
@@ -240,7 +252,7 @@ func TestMigrateSuccessorInvalidatesTaskContractAndClosureConservatively(t *test
 
 	// Changing the root task invalidates every transitive dependent, even when
 	// each dependent's own local contract is unchanged.
-	dir := t.TempDir()
+	dir := lineageDir(t)
 	prePlanPath := filepath.Join(dir, "predecessor.json")
 	pre := lineagePlan()
 	preHash, _ := writeLineagePlan(t, prePlanPath, pre)
@@ -265,7 +277,7 @@ func TestMigrateSuccessorRequiresCompletedEvidenceAndStrictPredecessorState(t *t
 	statuses := []Status{Pending, Running, Failed, Blocked, NeedsInput}
 	for _, status := range statuses {
 		t.Run(string(status), func(t *testing.T) {
-			dir := t.TempDir()
+			dir := lineageDir(t)
 			prePlanPath := filepath.Join(dir, "predecessor.json")
 			pre := lineagePlan()
 			preHash, _ := writeLineagePlan(t, prePlanPath, pre)
@@ -297,7 +309,7 @@ func TestMigrateSuccessorRequiresCompletedEvidenceAndStrictPredecessorState(t *t
 }
 
 func TestMigrateSuccessorRejectsMalformedStateAndUnsafeAncestor(t *testing.T) {
-	dir := t.TempDir()
+	dir := lineageDir(t)
 	prePlanPath := filepath.Join(dir, "predecessor.json")
 	pre := lineagePlan()
 	preHash, _ := writeLineagePlan(t, prePlanPath, pre)
@@ -331,7 +343,7 @@ func TestMigrateSuccessorRejectsMalformedStateAndUnsafeAncestor(t *testing.T) {
 	}
 
 	unsafeRoot := filepath.Join(dir, "unsafe")
-	outside := t.TempDir()
+	outside := lineageDir(t)
 	if err := os.Symlink(outside, unsafeRoot); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +357,7 @@ func TestMigrateSuccessorRejectsMalformedStateAndUnsafeAncestor(t *testing.T) {
 }
 
 func TestMigrateSuccessorConcurrentPublicationAndAtomicRetry(t *testing.T) {
-	dir := t.TempDir()
+	dir := lineageDir(t)
 	prePlanPath := filepath.Join(dir, "predecessor.json")
 	pre := lineagePlan()
 	preHash, _ := writeLineagePlan(t, prePlanPath, pre)
@@ -389,7 +401,7 @@ func TestMigrateSuccessorConcurrentPublicationAndAtomicRetry(t *testing.T) {
 }
 
 func TestMigrateSuccessorRejectsStaleProvenanceHashMismatchAndAmbiguousPredecessor(t *testing.T) {
-	dir := t.TempDir()
+	dir := lineageDir(t)
 	pre := lineagePlan()
 	prePlanPath := filepath.Join(dir, "predecessor.json")
 	preHash, _ := writeLineagePlan(t, prePlanPath, pre)
@@ -439,7 +451,7 @@ func TestFleetShapedAmendmentPreservesCompletedTaskOne(t *testing.T) {
 		{ID: "real-exact-turn-control", Persona: "backend", Summary: "Prove real TLS observation, steering, and interruption", Prompt: "Use the completed first-task state and prove exact-turn control", DependsOn: []string{"zero-to-observed-real-codex"}, Models: []string{"gpt-5.6-luna", "gpt-5.6-terra"}, Efforts: []string{"medium", "high"}, RetrySafe: true},
 		{ID: "security-lifecycle-boundaries", Persona: "security", Summary: "Verify credential lifecycle and privacy", Prompt: "Audit the control surface", DependsOn: []string{"real-exact-turn-control"}},
 	}}
-	dir := t.TempDir()
+	dir := lineageDir(t)
 	prePlanPath := filepath.Join(dir, "fleet-original.json")
 	preHash, _ := writeLineagePlan(t, prePlanPath, pre)
 	preStatePath := filepath.Join(dir, "fleet-original-state.json")

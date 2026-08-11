@@ -116,17 +116,21 @@ func validateLineagePath(path string) error {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New("lineage path must be absolute and clean")
 	}
-	for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
-		info, err := os.Lstat(parent)
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return errors.New("lineage path contains an unsafe ancestor")
-		}
-		if filepath.Dir(parent) == parent {
-			break
-		}
+	// A lineage path must arrive fully resolved: resolution is the caller's
+	// job, because only the caller knows the trust boundary its gate
+	// enforces — commands EvalSymlinks operator-supplied paths and require
+	// the result to stay under the project root (safeVoyagePlanPath,
+	// safeVoyageStatePath). Requiring the resolved form here proves no
+	// component traverses a symlink without this package policing ancestors
+	// it cannot judge: the old walk to the filesystem root refused macOS's
+	// own /var -> private/var symlink and with it every path under the
+	// system temp directory.
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	if resolved != path {
+		return errors.New("lineage path must be fully resolved (no symlinks)")
 	}
 	info, err := os.Lstat(path)
 	if err != nil {

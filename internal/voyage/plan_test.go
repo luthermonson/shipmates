@@ -198,15 +198,57 @@ func TestSaveStateRejectsSymlinkedParentDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(out, filepath.Join(root, ".shipmates", "voyages")); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlinks unavailable: %v", err)
 	}
+	// Production composes state paths relative to the project root; those
+	// relative components are exactly the ones a checkout can commit as
+	// symlinks, so the hostile case is exercised the same way.
+	t.Chdir(root)
 	p := validPlan()
 	state := NewState(&p, "hash")
-	err := SaveState(filepath.Join(root, ".shipmates", "voyages", "state.json"), state)
+	err := SaveState(filepath.Join(".shipmates", "voyages", "state.json"), state)
 	if err == nil || !strings.Contains(err.Error(), "must not contain symlinks") {
 		t.Fatalf("symlinked parent error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(out, "state.json")); !os.IsNotExist(err) {
 		t.Fatalf("state escaped repository: %v", err)
+	}
+}
+
+// macOS mounts /var as a symlink to private/var and t.TempDir lives under it,
+// so a symlinked ancestor above the project is the platform's business and
+// must not refuse the voyage. Regression for the walk that Lstat'ed every
+// component from the filesystem root and broke every state write on such a
+// path.
+func TestSaveStateToleratesSymlinkedAncestors(t *testing.T) {
+	real := t.TempDir()
+	linked := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, linked); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := validPlan()
+	state := NewState(&p, "hash")
+
+	// Relative: the checkout-controlled fragment resolves against a working
+	// directory whose own ancestors include a symlink.
+	t.Chdir(linked)
+	if err := SaveState(filepath.Join(".shipmates", "voyages", "state.json"), state); err != nil {
+		t.Fatalf("symlinked working-directory ancestor refused: %v", err)
+	}
+
+	// Absolute: existing ancestors are the caller's vouched-for naming;
+	// only created components are policed.
+	if err := SaveState(filepath.Join(linked, "abs", "deeper", "state.json"), state); err != nil {
+		t.Fatalf("absolute path under symlinked base refused: %v", err)
+	}
+}
+
+func TestSaveStateRejectsParentTraversal(t *testing.T) {
+	t.Chdir(t.TempDir())
+	p := validPlan()
+	state := NewState(&p, "hash")
+	err := SaveState(filepath.Join("..", "voyages", "state.json"), state)
+	if err == nil || !strings.Contains(err.Error(), "traverse outside the project") {
+		t.Fatalf("parent traversal error = %v", err)
 	}
 }

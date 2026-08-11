@@ -279,7 +279,7 @@ func SaveState(path string, state *State) error {
 	}
 	b = append(b, '\n')
 	dir := filepath.Dir(path)
-	if err := ensureStateDirectory(dir); err != nil {
+	if err := EnsureOwnedDir(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".voyage-*.tmp")
@@ -370,32 +370,99 @@ func publishSuccessorOnce(path string, state *State, plan *Plan, hash string) (*
 	return state, nil
 }
 
-func ensureStateDirectory(dir string) error {
-	abs, err := filepath.Abs(dir)
+// EnsureOwnedDir creates dir, refusing to let any checkout-controlled
+// component be a symlink. It is the write gate for shipmates-owned data
+// directories — voyage state and recovery journals — whose paths are composed
+// from a fragment a project checkout can shape: a committed .shipmates or
+// voyages symlink must not redirect state or ledger writes outside the
+// repository.
+//
+// The trust boundary is relativity. Production composes these paths relative
+// to the operator-chosen working directory, so every component of a relative
+// dir is the checkout's to shape and must be a real directory. The ancestors
+// of an absolute dir are the caller's own naming, not a checkout fragment —
+// macOS mounts /var itself as a symlink to private/var, and a walk that
+// refused platform symlinks above the project broke every voyage on such a
+// path while defending nothing a checkout can reach — so for an absolute dir
+// only the components this call has to create are held to the no-symlink
+// rule.
+func EnsureOwnedDir(dir string) error {
+	if dir == "" {
+		return errors.New("empty data directory")
+	}
+	if filepath.IsAbs(dir) {
+		return ensureVouchedDir(dir)
+	}
+	if filepath.VolumeName(dir) != "" {
+		// A volume-relative Windows path ("C:foo") resolves against a
+		// per-drive working directory nothing in shipmates controls.
+		return fmt.Errorf("data directory must be project-relative or absolute: %s", dir)
+	}
+	current := ""
+	for _, part := range strings.Split(filepath.Clean(dir), string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			return fmt.Errorf("data directory must not traverse outside the project: %s", dir)
+		}
+		current = filepath.Join(current, part)
+		if err := ensureRealDir(current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureRealDir creates the single component when missing and requires it to
+// be a real directory — never a symlink — whether it pre-existed or was just
+// created. The Lstat after Mkdir means a raced swap is caught rather than
+// trusted.
+func ensureRealDir(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		info, err = os.Lstat(path)
+	}
 	if err != nil {
 		return err
 	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("data directory must not contain symlinks: %s", path)
+	}
+	return nil
+}
+
+// ensureVouchedDir creates the missing suffix of an absolute dir. Components
+// that already exist are the caller's vouched-for base; components created
+// here are held to the same real-directory rule the relative walk applies.
+func ensureVouchedDir(dir string) error {
+	abs := filepath.Clean(dir)
 	volume := filepath.VolumeName(abs)
 	current := volume + string(os.PathSeparator)
-	rest := strings.TrimPrefix(abs, current)
-	for _, part := range strings.Split(rest, string(os.PathSeparator)) {
+	for _, part := range strings.Split(strings.TrimPrefix(abs, current), string(os.PathSeparator)) {
 		if part == "" {
 			continue
 		}
 		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(current, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		if _, err := os.Lstat(current); errors.Is(err, os.ErrNotExist) {
+			if err := ensureRealDir(current); err != nil {
 				return err
 			}
-			info, err = os.Lstat(current)
-		}
-		if err != nil {
+		} else if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("voyage state directory must not contain symlinks: %s", current)
-		}
+	}
+	// However the leaf came to exist, what SaveState writes into must be a
+	// directory.
+	info, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("data directory is not a directory: %s", abs)
 	}
 	return nil
 }

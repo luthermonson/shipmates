@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/voyage"
 )
 
 const (
@@ -836,26 +838,12 @@ func (j *Journal) Blockers() []BlockerRecord {
 }
 
 func ensureJournalDirectory(dir string) error {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return err
-	}
-	current := filepath.VolumeName(abs) + string(os.PathSeparator)
-	for _, part := range strings.Split(strings.TrimPrefix(abs, current), string(os.PathSeparator)) {
-		if part == "" {
-			continue
-		}
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(current, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-				return err
-			}
-			info, err = os.Lstat(current)
-		}
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return errors.New("recovery journal directory is unsafe")
-		}
+	// One write gate for every shipmates-owned data directory: the walk and
+	// its relative/absolute trust boundary live in voyage.EnsureOwnedDir.
+	// This used to be a second copy that Lstat-walked to the filesystem
+	// root, which refused macOS's own /var -> private/var symlink.
+	if err := voyage.EnsureOwnedDir(dir); err != nil {
+		return errors.New("recovery journal directory is unsafe")
 	}
 	return nil
 }
