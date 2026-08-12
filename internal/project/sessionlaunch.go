@@ -20,8 +20,18 @@ import "log/slog"
 // session (so callers know whether to invoke berth.Ensure and store the new
 // cwd, vs a resume that must preserve the creation-cwd from stored meta).
 func SessionLaunch(persona string, fresh bool) (cfg PersonaConfig, args []string, id, name, fp string, creating bool) {
-	name = SessionName(persona)
 	cfg, _ = ResolvePersonaConfig(persona)
+	args, id, name, fp, creating = SessionLaunchWith(persona, cfg, fresh)
+	return cfg, args, id, name, fp, creating
+}
+
+// SessionLaunchWith is SessionLaunch with a caller-supplied config. Sail uses
+// it to dispatch a crew turn at a specific escalation tier: model/effort are
+// baked into a session at creation, so a tier whose fingerprint differs from
+// the stored session automatically mints a fresh session instead of resuming
+// one created under different settings.
+func SessionLaunchWith(persona string, cfg PersonaConfig, fresh bool) (args []string, id, name, fp string, creating bool) {
+	name = SessionName(persona)
 	fp = cfg.Fingerprint()
 
 	meta, have := ReadSessionMeta(persona)
@@ -39,7 +49,7 @@ func SessionLaunch(persona string, fresh bool) (cfg PersonaConfig, args []string
 		args = []string{"--session-id", id, "--name", name, "--agent", persona}
 		creating = true
 	}
-	return cfg, args, id, name, fp, creating
+	return args, id, name, fp, creating
 }
 
 // ResumeCWD returns the stored cwd for a persona's tracked session, or ""
