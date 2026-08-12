@@ -181,6 +181,143 @@ A structured task's crew turn must return exactly one JSON object matching the c
 
 Outcomes drive a deterministic state machine: `completed` closes the task; `retryable_failure` advances one effort-first tier within the closed budget; `infrastructure_retry` retries the same tier within `max_infrastructure_retries`; `authority_blocked`/`input_required` pause for the admiral; `no_go` from the designated verifier is authoritative and — when the verifier cites approved criteria matched by a corrective template — records a frozen corrective successor task plus its verification task in the ledger as reviewable lineage. `shipmates plan` shows a bounded projection of the ledger (tiers, budgets, outcomes, transitions, verifier status); it never renders prompts, paths, or raw records.
 
+## A worked voyage, end to end
+
+A concrete run, small enough to read and large enough to exercise dependencies,
+escalation, and a verifier. The feature: add per-account rate limiting to an API.
+
+**1. Crew and plan.** Install the personas the plan will name, then plan with the
+first mate:
+
+```bash
+shipmates add first-mate
+shipmates add backend
+shipmates add tester
+shipmates add security
+shipmates ask first-mate "Plan a voyage: per-account rate limiting on the public API.
+Sliding window, Redis-backed, 429 with Retry-After. Keep it to one endpoint first."
+```
+
+The first mate writes `.shipmates/voyage.json` — always with `"commissioned": false`:
+
+```json
+{
+  "version": 1,
+  "title": "Per-account rate limiting",
+  "objective": "The public API enforces per-account rate limits.",
+  "scope": ["Sliding-window limiter", "429 + Retry-After on the search endpoint"],
+  "non_goals": ["Per-IP limits", "Other endpoints"],
+  "blast_area": ["API middleware", "Redis"],
+  "risks": ["Limiter outage must fail open, not take the API down"],
+  "acceptance_criteria": ["Burst past the limit returns 429 with Retry-After",
+                          "Redis outage does not 500 the endpoint"],
+  "open_decisions": [],
+  "commissioned": false,
+  "tasks": [
+    { "id": "implement-limiter", "persona": "backend",
+      "summary": "Sliding-window limiter middleware",
+      "prompt": "Implement the sliding-window limiter per the objective. Fail open on Redis errors. Run focused tests.",
+      "models": ["claude-sonnet-4-6", "claude-opus-4-7"], "efforts": ["low", "high"],
+      "retry_safe": true },
+    { "id": "limiter-tests", "persona": "tester",
+      "summary": "Burst and outage tests",
+      "prompt": "Test the limiter: burst past the limit expecting 429 + Retry-After; kill Redis expecting the endpoint to stay up.",
+      "depends_on": ["implement-limiter"] },
+    { "id": "audit-limiter", "persona": "security",
+      "summary": "Audit the limiter surface",
+      "prompt": "Audit the limiter for bypasses: header spoofing, key collisions across accounts, unbounded Redis keys.",
+      "depends_on": ["implement-limiter"] },
+    { "id": "verify-voyage", "persona": "tester",
+      "summary": "Designated verification against the acceptance criteria",
+      "prompt": "You are the designated verifier. Walk every acceptance criterion against the code and tests. Return crew.result.v1; set verifier.status=no_go when a criterion provably fails.",
+      "depends_on": ["limiter-tests", "audit-limiter"],
+      "recovery": {
+        "enabled": true, "max_attempts": 2, "max_infrastructure_retries": 2,
+        "max_tokens": 200000,
+        "models": ["claude-sonnet-4-6"], "efforts": ["low", "high"],
+        "approved_criterion_ids": ["burst-429", "outage-fail-open"],
+        "corrective_templates": [{
+          "id": "fix-verified-gap", "summary": "Fix a criterion the verifier proved broken",
+          "prompt": "The designated verifier proved an acceptance criterion fails. Fix exactly that gap; change nothing else.",
+          "verification_summary": "Re-verify the corrected criterion",
+          "verification_prompt": "Re-run verification for the corrected criterion only.",
+          "criterion_ids": ["burst-429", "outage-fail-open"], "retry_safe": true
+        }]
+      } }
+  ]
+}
+```
+
+Because `implement-limiter` escalates models, `shipmates.yaml` must carry the ladder:
+`modelLadder: [claude-sonnet-4-6, claude-opus-4-7]`.
+
+**2. Validate, commission, dry-run.**
+
+```bash
+shipmates plan            # validation + truthful status; names the exact defect if invalid
+shipmates commission      # the admiral's act, at the admiral's terminal — never a persona's
+shipmates sail --dry-run  # execution order and concurrency, nothing dispatched
+```
+
+The dry run shows the shape: `implement-limiter` first; `limiter-tests` and
+`audit-limiter` in parallel once it completes; `verify-voyage` last.
+
+**3. Sail.**
+
+```bash
+shipmates sail --max-concurrent 2
+```
+
+What happens, stage by stage:
+
+- `implement-limiter` dispatches at its first tier (sonnet, low effort) as a fresh
+  session. Suppose the low-effort attempt produces a limiter that fails its own
+  focused tests — the task fails, and sail advances **one** tier: same model, high
+  effort, new session. It does not repeat the failed slot and it does not skip ahead.
+  The second attempt passes.
+- `limiter-tests` and `audit-limiter` run concurrently, each a fresh bounded session
+  with only its own prompt — neither sees the other's transcript, or the
+  implementation task's.
+- Suppose `audit-limiter` genuinely needs a decision — "limits per API key or per
+  account id?" — it returns `SHIPMATES_NEEDS_INPUT:` with that one question. Sail
+  records `needs_input` and moves on; nothing loops, nothing guesses. You answer by
+  updating the plan or telling the persona, then `shipmates sail --retry-failed`.
+- `verify-voyage` opted into structured recovery, so its turn must return a single
+  `crew.result.v1` object bound to the plan hash and attempt id, and every step —
+  reservation, dispatch, result, validation, transition, action — lands in the
+  hash-chained ledger at `.shipmates/voyages/<plan-hash>-verify-voyage.attempts.jsonl`.
+  Suppose it proves the outage criterion fails (Redis down 500s the endpoint) and
+  returns `no_go` citing `outage-fail-open`: that criterion matches the approved
+  corrective template, so sail records a frozen corrective successor task plus its
+  re-verification task in the ledger as reviewable lineage — a proposed fix, not an
+  improvised re-prompt.
+
+**4. Inspect and close the loop.**
+
+```bash
+shipmates plan   # per-task state, the verifier's verdict, and a bounded ledger projection
+```
+
+`plan` shows tiers spent, budgets, outcomes, and the corrective lineage; it never
+dumps raw prompts or records. Review the corrective successor, fold it into an
+amended plan (see Amendments above — the successor inherits only unchanged closures),
+commission, and sail again. The voyage is done when every task is `completed` and the
+acceptance verdict is `pass` — recorded with evidence and bound to the plan hash, so
+a later hand-edit cannot quietly claim acceptance it never earned.
+
+### Why this is cheap
+
+The orchestrator is Go, not a model. Dependency resolution, dispatch, retry
+accounting, tier selection, state persistence, and the ledger cost zero tokens; the
+model is paid only for the four task turns and whatever retries the closed ladders
+permit. Every attempt is a fresh session carrying one bounded prompt, so there is no
+accumulating transcript to re-read as the voyage grows — the coordination state lives
+in `.shipmates/voyages/`, not in anyone's context window. And the failure modes that
+burn tokens in model-orchestrated crews — a coordinator re-prompting the same failing
+approach, or looping a stuck task — are structurally unavailable: attempt counts,
+tier ladders, and per-task token budgets (`max_tokens`, reserved and recorded in the
+ledger) live in code that cannot be talked out of them.
+
 ## Deferred: the reference branch's advisory stage
 
 The reference implementation carried a Codex-specific advisory stage ("auto-captain"/Sol): a tool-less advisory turn that classified blockers against an append-only journal and could propose machine-attested derivative plans inside an approved change envelope. That machinery is **deferred, not ported**: it was an advisory frill on an obsolete transport, and main's launch path cannot provide the isolated turn it assumed. Its transport-agnostic contracts (the recovery journal, blocker fingerprints, and the derivative/change-envelope policy engine) live fully tested in `internal/recovery` for whenever a future runtime can honor the isolation contract; no command consumes them today.
