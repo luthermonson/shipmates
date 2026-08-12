@@ -232,11 +232,26 @@ Restart of the ship wipes time-boxes (fresh trust boundary).
 | `ask <p> <prompt>` | one-shot delegation; resumes the persona's session (`--fresh` starts new) |
 | `tell <p> <msg>` | message a live crew process while it works |
 | `feed` | print the coordination server's activity feed |
+| `bridge` | tabbed terminal UI over every live mate on this machine — NAVIGATE/TYPE modes, live PTY per tab, approvals with one key |
 | `fanout <a,b,c> <prompt>` | run the same prompt across personas in parallel |
 | `drain <p>` | dispatch a persona to drain its work queue, then exit (`--cap N`) |
 | `drain-many <p...>` | drain several personas in parallel (`--all` / `--max-concurrent N`) |
 | `autonomous --print-charter` | print a captain scheduler charter to feed into cron / CronCreate / Actions |
 | `show <p> <file> [--caption <text>]` | attach a file (photo, screenshot, PDF, text) to a live crew process — mate reads it via Claude Code's multi-modal Read tool |
+
+### Voyage — plan → commission → sail
+
+A voyage is a multi-task plan executed by the Go orchestrator: dependencies, retries,
+tier escalation, and state live in code, and the model is spent only on the tasks
+themselves. See [`docs/sailing.md`](docs/sailing.md) for the full lifecycle and a worked
+example.
+
+| Command | What it does |
+|---|---|
+| `plan` | validate the voyage draft and show its status — per-task state, acceptance verdict, structured-recovery ledgers (`--fresh` clears the draft) |
+| `commission` | commission the draft for execution — an admiral act, refused from inside agent turns |
+| `sail` | execute the commissioned voyage until every task is done or blocked (`--dry-run`, `--retry-failed`, `--max-concurrent N`, `--task-timeout 30m`, `--runtime claude\|codex\|openai`) |
+| `beads init` / `beads <bd args...>` | bootstrap and manage the optional Beads task graph; without it, plan/sail track state in markdown |
 
 ### Permission gate
 
