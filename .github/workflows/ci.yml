@@ -56,11 +56,27 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
+        # This step has hung past the 20-minute job timeout on every
+        # windows-x64 run since the fleet migration. Run 31525784634 proved
+        # where: the toolchain download completes in seconds, and it is the
+        # ZIP EXTRACTION that crawls — the runner took 89s to extract
+        # setup-go's own tiny action archive, which at ~13k files puts the Go
+        # toolchain zip past 30 minutes. That per-file cost is
+        # real-time-antivirus territory, and no timeout here can fix it: the
+        # windows leg stays red until the lab image preinstalls Go in the
+        # runner tool cache (RUNNER_TOOL_CACHE) or excludes the runner
+        # workdir from scanning. The bound keeps the leg from pinning a
+        # fleet runner while that lands.
+        timeout-minutes: 8
         with:
           # Single source of truth: the version in go.mod, not a literal here
           # that silently drifts from it.
           go-version-file: go.mod
-          cache: true
+          # The windows cache restore pays the same per-file extraction cost
+          # as the toolchain zip, so it stays off there. The other legs keep
+          # the cache — the fleet's runners are ephemeral, so this is their
+          # only cache.
+          cache: ${{ matrix.os != 'windows' }}
 
       - name: Build
         run: go build ./...

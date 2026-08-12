@@ -185,7 +185,7 @@ type Config struct {
 	// CaptainPersona names the coordinating persona on this ship — the front
 	// door the fleet opens and the identity in the tunnel clientKey.
 	// Defaults to "captain"; crews with themed coordinators set their own
-	// (e.g. picard, coach).
+	// (e.g. a name drawn from the project's own theme).
 	CaptainPersona string                  `yaml:"captainPersona"`
 	SharedMemory   bool                    `yaml:"sharedMemory"`
 	Routing        string                  `yaml:"routing"`
@@ -208,7 +208,7 @@ type Config struct {
 // Name overrides the captain's identity on the fleet. Defaults to the repo
 // directory name, so the clientKey is `<repo>:<persona>`. Set this if two
 // clones of the same repo connect to the same fleet and collide (e.g.
-// "card-cannon-dev" vs "card-cannon-scratch").
+// "project-dev" vs "project-scratch").
 type FleetConfig struct {
 	URL      string `yaml:"url"`
 	TokenEnv string `yaml:"tokenEnv"`

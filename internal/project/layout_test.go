@@ -39,13 +39,13 @@ func TestPathHelpers(t *testing.T) {
 }
 
 func TestRepoName(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "card-cannon")
+	dir := filepath.Join(t.TempDir(), "project-one")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	if got := RepoName(); got != "card-cannon" {
-		t.Fatalf("RepoName = %q, want card-cannon", got)
+	if got := RepoName(); got != "project-one" {
+		t.Fatalf("RepoName = %q, want project-one", got)
 	}
 }
 

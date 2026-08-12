@@ -255,9 +255,9 @@ a graceful `/shutdown` (crew reaped) before the hard kill.
 env:                                   # host-level, applied to every captain
   SHIPMATES_FLEET_TOKEN: ${HOMELAB_FLEET_TOKEN}   # env-indirection: name the
 projects:                              # source, never store the secret
-  - dir: C:/Users/luthe/card-cannon
+  - dir: C:/Users/you/project-one
     env:                               # per-project overrides
-      SHIPMATES_FLEET_TOKEN: ${CARD_CANNON_TOKEN}
+      SHIPMATES_FLEET_TOKEN: ${PROJECT_ONE_TOKEN}
 ```
 
 `shipmates ship install` wires it to run at logon — **Windows: Scheduled Task

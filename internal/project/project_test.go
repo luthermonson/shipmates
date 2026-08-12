@@ -367,7 +367,7 @@ func TestDeleteSessionMeta(t *testing.T) {
 	}
 
 	// Write a marker, delete it, confirm it's gone.
-	if err := WriteSessionMeta("picard", "card-cannon-picard", "uuid-stale", "hash", ""); err != nil {
+	if err := WriteSessionMeta("picard", "project-one-picard", "uuid-stale", "hash", ""); err != nil {
 		t.Fatalf("WriteSessionMeta: %v", err)
 	}
 	if _, ok := ReadSessionMeta("picard"); !ok {

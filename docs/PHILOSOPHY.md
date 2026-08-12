@@ -8,42 +8,40 @@ Shipmates flips that. Each persona has a per-project memory directory. They read
 
 That changes what an AI reviewer can do. A headless reviewer can only catch things visible in the diff. A reviewer with memory can catch things visible only against **the diff's history** — silent regressions, drift back toward rejected approaches, edits to load-bearing constants whose load-bearing-ness isn't documented at the call site.
 
-## A worked case: Card Cannon's holographic freeze
+## A worked case: a load-bearing constant
 
-[Card Cannon](https://github.com/luthermonson/card-cannon) is a cross-platform trading-card scanner. Point a camera at a physical card; a Rust detection engine (YOLO + perceptual hashes) identifies it; the app lists it on eBay and TCGPlayer with cross-marketplace inventory sync. Flutter UI, Rust detection core, SQLite local DB, Go backend.
+One project on this fleet runs an expensive classification pipeline over a live input stream. Buried in it is a "stability freeze": once the classifier is confident, the whole pipeline short-circuits — no re-detection, no cascade, no re-normalization. The cached result is re-emitted until the input drifts past a threshold.
 
-Buried in the detection pipeline there's a "scene-stability freeze" — when the scanner is confident about a card, the entire detection loop short-circuits. No more YOLO, no more cascade, no more rectification. The cached result is re-emitted until motion crosses a threshold.
+From that project's `AGENTS.md`:
 
-From the project's `AGENTS.md`:
-
-> When `frozen`, the entire detection loop short-circuits: no YOLO, no cascade, no rectify. We re-emit the cached `DetectionResult`... This is what stops holographic cards from cycling between near-identical reprints — their pixels DO change subtly frame-to-frame as the foil catches different angles of room light, but if we don't run the cascade on those pixels, the cascade can't flip its mind.
+> When `frozen`, the pipeline short-circuits: no detect, no cascade, no normalize. We re-emit the cached `Result`... This is what stops near-identical classes from cycling — their inputs DO change subtly sample to sample as ambient conditions shift, but if we don't run the cascade on those samples, the cascade can't flip its mind.
 
 And the gotcha right below it:
 
-> **If you change the cascade weights or the freeze thresholds, regression-test on a Mega Evolutions binder specifically** — that's the canonical stress test.
+> **If you change the cascade weights or the freeze thresholds, regression-test against the hard-case fixture set specifically** — that's the canonical stress test.
 
-Now imagine a PR that nudges `FREEZE_AFTER` from `90` to `60`, or relaxes `MOTION_THRESHOLD`. The author thinks they're tuning responsiveness — the scanner feels sticky, they want it snappier.
+Now imagine a PR that nudges `FREEZE_AFTER` from `90` to `60`, or relaxes `DRIFT_THRESHOLD`. The author thinks they're tuning responsiveness — the pipeline feels sticky, they want it snappier.
 
 ### What a headless reviewer sees
 
-A diff. Two integer constants moving. Unit tests pass. There's no name in the code that says "load-bearing for holographic cards." There's no comment at the call site explaining why these numbers are conservative. The reviewer suggests adding a benchmark, maybe asks for a config flag instead of a constant, signs off. It looks like a reasonable tuning change.
+A diff. Two integer constants moving. Unit tests pass. There's no name in the code that says "load-bearing for near-identical classes." There's no comment at the call site explaining why these numbers are conservative. The reviewer suggests adding a benchmark, maybe asks for a config flag instead of a constant, signs off. It looks like a reasonable tuning change.
 
 ### What a Shipmates persona with memory catches
 
 The architect persona reads `.shipmates/memory/architect/` at session start. In it, among other things:
 
-- `decisions/scene-freeze.md` — "Freeze constants were widened after the Mega Evolutions binder demo (Aug 2026) caused label swapping between near-identical reprint sets. The cascade can't distinguish them on holo foils because the pixel deltas are caused by lighting, not card identity. The conservative freeze is the fix."
-- `gotchas.md` — a pointer back to the AGENTS.md note about regression-testing on a specific binder.
+- `decisions/stability-freeze.md` — "Freeze constants were widened after the hard-case fixture regression caused label swapping between near-identical classes. The cascade can't separate them because the sample deltas come from ambient noise, not from any real change in the subject. The conservative freeze is the fix."
+- `gotchas.md` — a pointer back to the AGENTS.md note about regression-testing against the hard-case fixtures.
 
 The reviewer's response writes itself:
 
-> This change tightens `FREEZE_AFTER`. We deliberately widened it after the Mega Evolutions binder demo because shorter freeze windows let the cascade flip between near-identical holographic reprints — the pixel changes come from foil lighting, not card identity. The unit tests won't catch the regression because the failure mode is binder-specific. Before merging this, please run the scanner against a holographic-heavy binder and confirm no label swapping. If snappiness is the goal, the right place to tune is probably motion detection sensitivity, not the freeze window — but worth checking with whoever filed the original responsiveness complaint first.
+> This change tightens `FREEZE_AFTER`. We deliberately widened it after the hard-case regression, because shorter freeze windows let the cascade flip between near-identical classes — the sample deltas come from ambient noise, not from a real change in the subject. The unit tests won't catch the regression because the failure mode only shows on the hard-case fixtures. Before merging this, please run the pipeline against that set and confirm no label swapping. If snappiness is the goal, the right place to tune is probably drift-detection sensitivity, not the freeze window — but worth checking with whoever filed the original responsiveness complaint first.
 
 That review isn't *smarter* than the headless one. It's reviewing **on a different axis**: architectural consistency over time. It catches what a fresh reader, however expert, cannot — because the relevant signal isn't in the diff. It's in the project's history with the diff.
 
 ## A humbler example
 
-The holographic-freeze case is dramatic. The pattern shows up in smaller ways too, all day.
+The stability-freeze case is dramatic. The pattern shows up in smaller ways too, all day.
 
 The architect persona needs to look up an issue thread in a public dependency repo. It runs `gh issue view 42 -R foo/bar`. That call uses the team's `GITHUB_TOKEN` and consumes one request from the shared 5000/hour bucket. On a busy day with several personas fanning out across cross-repo browsing, that bucket runs down faster than you'd think.
 

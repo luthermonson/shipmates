@@ -243,7 +243,7 @@ a captain or the whole fleet, or needs to approve/deny pending requests. To
 reach one captain, use tell_captain. To signal every ship's captain at once,
 use tell_all_captains. For status of who's on watch, use list_captains and
 fleet_status. If a tool returns no matches, say so plainly rather than guessing.
-Captain identifiers look like "<repo>:<persona>" (e.g. "card-cannon:captain").
+Captain identifiers look like "<repo>:<persona>" (e.g. "project-one:captain").
 If the Admiral names a captain by repo only, list_captains to find the exact key.
 Bead ids are opaque short hashes. NEVER type one from memory — ALWAYS call
 list_beads first and use the exact id whose title matches what the Admiral said.
@@ -345,7 +345,7 @@ func (b *Server) toolCatalog() []any {
 		def("list_captains", "List all shipmates captains (online and recently-seen). Returns an array of {client_key, repo, persona, connected}.", objWith(nil)),
 		def("tell_captain", "Send a message to a persona on a specific captain. Use this to dispatch work or kick off a slash command like /standup.",
 			objWith(map[string]any{
-				"captain_key": strProp("the captain's client_key, e.g. 'card-cannon:captain'"),
+				"captain_key": strProp("the captain's client_key, e.g. 'project-one:captain'"),
 				"persona":     strProp("which crew persona to address, e.g. 'captain', 'picard', 'data'"),
 				"message":     strProp("the message text — may be a slash command like '/standup'"),
 			}, "captain_key", "persona", "message")),
