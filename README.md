@@ -261,6 +261,22 @@ example.
 | `allow <id> [--for 30m]` | approve a pending request, optionally time-boxed (any `time.ParseDuration` string) |
 | `deny <id>` | reject a pending request |
 
+### The Brig — Ship's Articles
+
+Fifteen security articles compiled into kernel rules and bound to every persona — deny/ask
+gates a prompt cannot talk its way past (force-pushes, `.env` and credential writes,
+`curl\|sh`, settings self-escalation). Configurable per project; disable entirely or waive
+individual articles in `shipmates.yaml`. The fleet-wide deny list is not the Brig's to
+waive — it holds even with the Brig off.
+
+| Command | What it does |
+|---|---|
+| `brig status` | the operator's brig posture and the freeze state |
+| `brig list` / `brig explain <handle>` | the fifteen Articles; full rule text with rationale and enforcement layer |
+| `brig log` | print enforcement entries from `.shipmates/brig.log` |
+| `freeze [--reason <text>] [--admiral <who>]` | engage the freeze: refuse all Write operations until released (binds bypass-mode personas too) |
+| `release` | release the freeze; Writes resume |
+
 ### Routing (GitHub-issues-and-PRs conventions)
 
 | Command | What it does |
