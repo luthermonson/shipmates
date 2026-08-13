@@ -50,9 +50,12 @@ func TestInstallMemoryHook_SurvivesJunkSessionStartEntries(t *testing.T) {
 	if n := countMemoryHooks(groups); n != 1 {
 		t.Errorf("memory hooks = %d, want 1 alongside junk", n)
 	}
-	// 3 junk entries preserved + our group.
-	if len(groups) != 4 {
-		t.Errorf("SessionStart len = %d, want 4 (junk preserved): %v", len(groups), groups)
+	if n := countBrigHooks(groups); n != 1 {
+		t.Errorf("brig hooks = %d, want 1 alongside junk", n)
+	}
+	// 3 junk entries preserved + our two groups (load-memory + brig-reminder).
+	if len(groups) != 5 {
+		t.Errorf("SessionStart len = %d, want 5 (junk preserved): %v", len(groups), groups)
 	}
 }
 

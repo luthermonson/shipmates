@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/urfave/cli/v3"
 )
@@ -44,8 +45,53 @@ func Hook() *cli.Command {
 					return runLoadMemory(os.Stdin, os.Stdout, os.Stderr)
 				},
 			},
+			{
+				Name:  "brig-reminder",
+				Usage: "SessionStart hook: remind the session it is bound by the Ship's Articles (and announce an engaged freeze)",
+				Action: func(ctx context.Context, c *cli.Command) error {
+					return runBrigReminder(os.Stdout, os.Stderr)
+				},
+			},
 		},
 	}
+}
+
+// runBrigReminder is the brig-reminder hook body. It is installed
+// unconditionally alongside load-memory and gates itself here on the
+// operator's brig config: a disabled brig emits nothing, so toggling
+// `brig.enabled` in ~/.shipmates/config.yaml takes effect on the next
+// session with no re-install. Fails soft like load-memory — a broken hook
+// must never prevent a session from starting.
+func runBrigReminder(stdout, stderr io.Writer) error {
+	settings := brig.Load("")
+	block := brig.PromptBlock(settings)
+	if block == "" {
+		return nil
+	}
+	ctx := block
+	if !settings.Disabled("respect-the-freeze") {
+		if frozen, marker := brig.CheckFreeze("."); frozen {
+			ctx += "\n\nTHE FREEZE IS ENGAGED"
+			if marker != nil && marker.Reason != "" {
+				ctx += " (reason: " + marker.Reason
+				if marker.Admiral != "" {
+					ctx += ", admiral: " + marker.Admiral
+				}
+				ctx += ")"
+			}
+			ctx += ". Refuse all Write and Edit operations until `shipmates release` clears it."
+		}
+	}
+	out := hookOutput{
+		HookSpecificOutput: hookSpecificOutput{
+			HookEventName:     "SessionStart",
+			AdditionalContext: ctx,
+		},
+	}
+	if err := json.NewEncoder(stdout).Encode(out); err != nil {
+		fmt.Fprintf(stderr, "shipmates hook brig-reminder: write output: %v\n", err)
+	}
+	return nil
 }
 
 // sessionStartPayload is the subset of Claude Code's SessionStart hook stdin

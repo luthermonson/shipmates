@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/runtime"
 )
@@ -72,6 +73,11 @@ func (r *Runtime) InstallPersona(ctx context.Context, projectDir string, p runti
 	if body == "" {
 		body = defaultPersonaBody(p)
 	}
+	// The Ship's Articles reminder rides the persona body: systemPrompt
+	// reads the installed file back on every StartSession, so splicing here
+	// is what puts the Articles in front of the model. Idempotent, per the
+	// operator's brig posture (user config only).
+	body = strings.TrimSpace(brig.SplicePrompt(body, brig.PromptBlock(brig.Load(""))))
 
 	var b strings.Builder
 	b.WriteString("---\n")

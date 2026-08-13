@@ -16,6 +16,12 @@ import (
 // would read the developer's actual checkout and pass or fail by accident.
 func newTestServer(t *testing.T) (*Server, http.Handler) {
 	t.Helper()
+	// Pin the home directory so New() never reads the developer's real
+	// ~/.shipmates/config.yaml: the brig posture under test is always the
+	// default (enabled) regardless of the machine the tests run on.
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home) // Windows os.UserHomeDir
+	t.Setenv("HOME", home)        // Unix os.UserHomeDir
 	t.Chdir(t.TempDir())
 	s := New()
 	return s, s.routes()

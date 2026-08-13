@@ -60,6 +60,9 @@ func main() {
 			commands.Server(),
 			commands.Ship(),
 			commands.Hook(),
+			commands.Brig(),
+			commands.Freeze(),
+			commands.Release(),
 		},
 	}
 
