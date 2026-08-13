@@ -112,7 +112,7 @@ func TestKernelNormalizesWindowsSeparators(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("backslash is a path separator only on windows")
 	}
-	e := evalWithBrig(Settings{})
+	e := evalWithBrig(DefaultSettings())
 	d := e.EvaluateFor("backend", "Write", fileInput(`C:\proj\.claude\settings.json`))
 	if d.Effect != permissions.EffectDeny {
 		t.Fatalf("backslash settings write => %s (%s), want deny", d.Effect, d.Reason)
