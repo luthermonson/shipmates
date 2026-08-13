@@ -1,6 +1,7 @@
 package brig
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -68,7 +69,12 @@ func TestKernelArticlesDenyWhatTheyName(t *testing.T) {
 		{"recursive Remove-Item asks", "PowerShell", bashInput("Remove-Item build -Recurse -Force"), permissions.EffectAsk, "Article 13"},
 		// Article 14 — No Self-Escalation.
 		{"policy overlay write denied", "Write", fileInput(".shipmates/policies/backend.yaml"), permissions.EffectDeny, "Article 14"},
-		{"claude settings write denied", "Write", fileInput("C:\\proj\\.claude\\settings.json"), permissions.EffectDeny, "Article 14"},
+		// Forward slashes deliberately: on unix a backslash is an ordinary
+		// filename character, so a `C:\proj\...` string is one odd basename,
+		// not a path to settings.json — and the kernel is right not to match
+		// it. The backslash form is Windows semantics and is pinned by
+		// TestKernelNormalizesWindowsSeparators below, where it is true.
+		{"claude settings write denied", "Write", fileInput("C:/proj/.claude/settings.json"), permissions.EffectDeny, "Article 14"},
 		{"shipmates config edit denied", "Edit", fileInput(".shipmates/config.yaml"), permissions.EffectDeny, "Article 14"},
 		// Article 15 — Stay Aboard.
 		{"/etc write denied", "Write", fileInput("/etc/hosts"), permissions.EffectDeny, "Article 15"},
@@ -91,6 +97,28 @@ func TestKernelArticlesDenyWhatTheyName(t *testing.T) {
 				t.Errorf("un-gated call attributed to the brig: %s", d.Reason)
 			}
 		})
+	}
+}
+
+// TestKernelNormalizesWindowsSeparators pins that a backslash-separated path
+// cannot slip past an article on the OS where backslashes ARE separators.
+// Windows-only on purpose: on unix a backslash is an ordinary filename
+// character, filepath.ToSlash is a no-op, and `C:\proj\...` is one odd
+// basename the articles rightly ignore — this test would be pinning a lie
+// there. (The cross-platform fixture in TestKernelArticlesDenyWhatTheyName
+// once used backslashes and failed every unix CI leg for exactly that
+// reason.)
+func TestKernelNormalizesWindowsSeparators(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("backslash is a path separator only on windows")
+	}
+	e := evalWithBrig(Settings{})
+	d := e.EvaluateFor("backend", "Write", fileInput(`C:\proj\.claude\settings.json`))
+	if d.Effect != permissions.EffectDeny {
+		t.Fatalf("backslash settings write => %s (%s), want deny", d.Effect, d.Reason)
+	}
+	if !strings.Contains(d.Reason, "Article 14") {
+		t.Errorf("reason %q does not name Article 14", d.Reason)
 	}
 }
 
