@@ -230,6 +230,7 @@ func TestRuntimeFlag_OfferedByEveryCommandThatHonorsIt(t *testing.T) {
 	wantFlag := []string{
 		"init", "add", "update", "remove", "routing apply",
 		"open", "ask", "fanout", "drain", "drain-many", "server serve",
+		"sail",
 	}
 	// Commands that do not consult the runtime at all: they talk to the
 	// coordination server, read local state, or render for other tools.
@@ -245,7 +246,7 @@ func TestRuntimeFlag_OfferedByEveryCommandThatHonorsIt(t *testing.T) {
 		Init(cat), Add(cat), List(cat), Remove(), Update(cat), Render(cat),
 		Routing(cat), Open(), Ask(), Tell(), Show(), Feed(), Pending(),
 		Allow(), Deny(), Fanout(), Drain(cat), DrainMany(cat),
-		Autonomous(cat), Fleet(), Server(), Ship(), Hook(),
+		Autonomous(cat), Fleet(), Server(), Ship(), Hook(), Sail(),
 	}
 
 	for _, path := range wantFlag {
