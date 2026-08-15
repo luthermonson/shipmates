@@ -40,10 +40,28 @@ func writePort(t *testing.T, contents string) {
 	}
 }
 
-// serveAt starts an httptest server and points the project's port file at it,
-// returning the server so the test can inspect what it received.
+// testToken is the credential writeToken publishes — the stand-in for what a
+// real captain mints from crypto/rand at startup.
+const testToken = "0123456789abcdef0123456789abcdef"
+
+// writeToken records an API token the way the captain server does at boot.
+// Without it every helper here fails closed: the server authenticates.
+func writeToken(t *testing.T, tok string) {
+	t.Helper()
+	if err := os.MkdirAll(project.SessionsDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(project.TokenFile(), []byte(tok+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// serveAt starts an httptest server and points the project's port file and
+// token file at it, returning the server so the test can inspect what it
+// received.
 func serveAt(t *testing.T, h http.Handler) *httptest.Server {
 	t.Helper()
+	writeToken(t, testToken)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	_, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
@@ -487,5 +505,93 @@ func TestPostAttachBodyIsWellFormedMultipart(t *testing.T) {
 		if parts[i] != want[i] {
 			t.Fatalf("parts = %v, want %v (order matters: file first)", parts, want)
 		}
+	}
+}
+
+// TestEveryRequestCarriesTheToken pins the credential onto all three request
+// builders. The coordination server refuses anything but its health probe
+// without one, so a helper that forgets it is a silently broken CLI command.
+func TestEveryRequestCarriesTheToken(t *testing.T) {
+	chdirProject(t)
+	got := map[string]string{}
+	serveAt(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got[r.URL.Path] = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"attachId":"a"}`)
+	}))
+
+	src := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(src, []byte("\x89PNG"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Get("/status.json"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, err := Post("/tell/backend", map[string]string{"message": "ahoy"}); err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	if _, err := PostAttach(src, ""); err != nil {
+		t.Fatalf("PostAttach: %v", err)
+	}
+
+	want := "Bearer " + testToken
+	for _, path := range []string{"/status.json", "/tell/backend", "/attach"} {
+		if got[path] != want {
+			t.Errorf("%s sent Authorization %q, want %q", path, got[path], want)
+		}
+	}
+}
+
+// TestRequestsFailWithoutATokenFile: no credential on disk means no captain is
+// running (or one from before this existed). Failing here beats sending an
+// unauthenticated request and reporting the 401 as a mysterious server error.
+func TestRequestsFailWithoutATokenFile(t *testing.T) {
+	chdirProject(t)
+	serveAt(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	if err := os.Remove(project.TokenFile()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Get("/status.json"); err == nil || !strings.Contains(err.Error(), "token") {
+		t.Fatalf("Get with no token file = %v, want a token error", err)
+	}
+	if _, err := Post("/tell/backend", nil); err == nil || !strings.Contains(err.Error(), "token") {
+		t.Fatalf("Post with no token file = %v, want a token error", err)
+	}
+}
+
+// TestTokenTrimsAndRejectsEmpty: the file is written with a trailing newline,
+// and an empty one is corruption rather than a valid credential.
+func TestTokenTrimsAndRejectsEmpty(t *testing.T) {
+	chdirProject(t)
+	writeToken(t, "  "+testToken+"  ")
+	got, err := Token()
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if got != testToken {
+		t.Fatalf("Token = %q, want %q", got, testToken)
+	}
+	writeToken(t, "   ")
+	if _, err := Token(); err == nil {
+		t.Fatal("want an error for an empty token file")
+	}
+}
+
+// TestHealthyNeedsNoToken: the liveness probe is the one open endpoint, and
+// EnsureRunning polls it before the captain has published anything.
+func TestHealthyNeedsNoToken(t *testing.T) {
+	chdirProject(t)
+	serveAt(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("health probe sent a credential: %q", r.Header.Get("Authorization"))
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	if err := os.Remove(project.TokenFile()); err != nil {
+		t.Fatal(err)
+	}
+	if !Healthy() {
+		t.Fatal("Healthy() = false with no token file; the probe must not need one")
 	}
 }

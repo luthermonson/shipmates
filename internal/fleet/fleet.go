@@ -91,6 +91,12 @@ type Captain struct {
 	Port        int       `json:"port"` // captain's local server port (for tunnel dial)
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
+
+	// APIToken is the captain's per-run bearer credential for its own local
+	// HTTP API, handed to us on the tunnel connect. Every proxied request has
+	// to carry it. json:"-" keeps it out of /api/captains and anything else
+	// that renders a Captain — it is a credential, not identity.
+	APIToken string `json:"-"`
 }
 
 // Options configures the fleet.
@@ -262,6 +268,7 @@ func (b *Server) authorize(req *http.Request) (clientKey string, authed bool, er
 	existing.InstallID = req.Header.Get("X-Shipmates-Install-ID")
 	existing.Persona = req.Header.Get("X-Shipmates-Persona")
 	existing.Port = port
+	existing.APIToken = sanitizeAPIToken(req.Header.Get("X-Shipmates-API-Token"))
 	existing.LastSeen = now
 	b.mu.Unlock()
 	if b.store != nil {
@@ -491,7 +498,8 @@ func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
-	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: captain\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", method, path, len(body))
+	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: captain\r\n%sContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		method, path, authHeaderLine(captain.APIToken), len(body))
 	if _, err := io.WriteString(conn, req); err != nil {
 		return nil, http.StatusBadGateway, err
 	}

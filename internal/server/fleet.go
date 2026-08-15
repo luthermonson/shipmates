@@ -61,6 +61,12 @@ func (s *Server) startFleet(ctx context.Context, conf *project.Config) {
 	headers.Set("X-Shipmates-Install-ID", installID)
 	headers.Set("X-Shipmates-Persona", captainPersona())
 	headers.Set("X-Shipmates-Port", fmt.Sprintf("%d", s.port))
+	// The fleet dials back through this tunnel into our local API, which now
+	// requires a bearer token. It cannot read our token file (it is usually
+	// on another host), so the credential travels with the identity on the
+	// outbound connect — over the same channel, to the same fleet the captain
+	// already trusts with full control of its mates.
+	headers.Set("X-Shipmates-API-Token", s.token)
 	if t := conf.Fleet.Token(); t != "" {
 		headers.Set("Authorization", "Bearer "+t)
 	}

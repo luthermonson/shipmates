@@ -197,8 +197,8 @@ func (b *Server) proxyRaw(ctx context.Context, clientKey, method, path, contentT
 	// disk-write step can eat more than the 30s the JSON proxy uses.
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 
-	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: captain\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-		method, path, contentType, len(body))
+	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: captain\r\n%sContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		method, path, authHeaderLine(captain.APIToken), contentType, len(body))
 	if _, err := io.WriteString(conn, req); err != nil {
 		return nil, http.StatusBadGateway, err
 	}

@@ -217,14 +217,32 @@ func serverHealthy(dir string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// serverToken reads the captain's per-run API bearer token, written beside
+// the port file at startup. Empty means no captain is running, or one from
+// before tokens existed — either way the shutdown attempt will fail closed
+// with a 401 rather than silently doing nothing.
+func serverToken(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, ".shipmates", "sessions", "server.token"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // shutdownServer asks the project's captain server to exit gracefully.
 func shutdownServer(dir string) bool {
 	port := serverPort(dir)
 	if port == 0 {
 		return false
 	}
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/shutdown", port), nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+serverToken(dir))
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/shutdown", port), "application/json", nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}

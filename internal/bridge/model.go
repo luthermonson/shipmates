@@ -106,6 +106,11 @@ type Options struct {
 	// Base is the coordination server's URL (loopback). Required.
 	Base string
 
+	// Token is the ship's per-run API bearer credential (client.Token).
+	// Required: the coordination server refuses every endpoint but its
+	// health probe without it.
+	Token string
+
 	// Focus is the persona to select at startup. Empty selects the first tab
 	// that has a pending approval, else the first tab.
 	Focus string
@@ -258,7 +263,7 @@ func New(opts Options) *Model {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Model{
-		api:       NewAPI(opts.Base),
+		api:       NewAPI(opts.Base, opts.Token),
 		opts:      opts,
 		ctx:       ctx,
 		cancel:    cancel,

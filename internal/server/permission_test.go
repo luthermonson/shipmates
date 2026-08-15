@@ -87,15 +87,16 @@ func TestSummarizeToolInput(t *testing.T) {
 // approval surface" (headless) and "claude prompts in the terminal" (PTY);
 // getting it backwards either double-prompts or silently ungates a mate.
 func TestHookSettingsGate(t *testing.T) {
-	s := &Server{port: 54321}
+	s := &Server{port: 54321, token: "cafef00d"}
 
 	for _, gate := range []bool{true, false} {
 		var out struct {
 			Hooks map[string][]struct {
 				Hooks []struct {
-					Type    string `json:"type"`
-					URL     string `json:"url"`
-					Timeout int    `json:"timeout"`
+					Type    string            `json:"type"`
+					URL     string            `json:"url"`
+					Headers map[string]string `json:"headers"`
+					Timeout int               `json:"timeout"`
 				} `json:"hooks"`
 			} `json:"hooks"`
 		}
@@ -111,8 +112,15 @@ func TestHookSettingsGate(t *testing.T) {
 		if h.Type != "http" {
 			t.Errorf("gate=%v: hook type = %q, want http", gate, h.Type)
 		}
-		if want := "http://127.0.0.1:54321/hook/back end/PostToolUse"; h.URL != want {
+		if want := "http://127.0.0.1:54321/hook/back end/PostToolUse?token=cafef00d"; h.URL != want {
 			t.Errorf("gate=%v: url = %q, want %q", gate, h.URL, want)
+		}
+		// The hook endpoints authenticate like every other route. The header
+		// is the documented mechanism; the ?token= above is the fallback for
+		// Claude Code builds that ignore it. Losing both would leave the
+		// permission gate erroring on every tool call.
+		if want := "Bearer cafef00d"; h.Headers["Authorization"] != want {
+			t.Errorf("gate=%v: hook Authorization = %q, want %q", gate, h.Headers["Authorization"], want)
 		}
 
 		pre, hasPre := out.Hooks["PreToolUse"]
@@ -123,7 +131,7 @@ func TestHookSettingsGate(t *testing.T) {
 			if pre[0].Hooks[0].Timeout != 120 {
 				t.Errorf("gated PreToolUse needs a generous timeout, got %d", pre[0].Hooks[0].Timeout)
 			}
-			if !strings.HasSuffix(pre[0].Hooks[0].URL, "/PreToolUse") {
+			if !strings.Contains(pre[0].Hooks[0].URL, "/PreToolUse?") {
 				t.Errorf("PreToolUse url = %q", pre[0].Hooks[0].URL)
 			}
 		}

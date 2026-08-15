@@ -181,6 +181,7 @@ func (a *API) streamPTY(ctx context.Context, persona string, msgs chan<- any) {
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
+	a.authorize(req)
 
 	resp, err := a.stream.Do(req)
 	if err != nil {

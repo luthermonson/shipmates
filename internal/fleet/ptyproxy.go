@@ -140,6 +140,9 @@ func (b *Server) handlePTYStreamProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if tok := b.captainAPIToken(key); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
 		http.Error(w, "dial captain stream: "+err.Error(), http.StatusBadGateway)
