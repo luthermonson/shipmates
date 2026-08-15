@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/personaname"
 )
 
 // The /api/conversation endpoint is the fleet's "captain's mate" — a local-LLM
@@ -445,8 +447,14 @@ func (b *Server) toolTellCaptain(ctx context.Context, args map[string]any) strin
 	if key == "" || persona == "" || msg == "" {
 		return toolError("tell_captain requires captain_key, persona, message")
 	}
+	// The persona here is whatever the local model emitted in its tool-call
+	// JSON, and the model's context is fed by ship feeds and GitHub-derived
+	// text — i.e. hostile input. Gate it before it becomes a path segment.
+	if err := personaname.Validate(persona); err != nil {
+		return toolError(err.Error())
+	}
 	payload, _ := json.Marshal(map[string]string{"message": msg})
-	_, status, err := b.proxy(ctx, key, "POST", "/tell/"+persona, payload)
+	_, status, err := b.proxy(ctx, key, "POST", "/tell/"+url.PathEscape(persona), payload)
 	if err != nil {
 		return toolError("dispatch failed: " + err.Error())
 	}
@@ -596,8 +604,12 @@ func (b *Server) toolResolve(ctx context.Context, args map[string]any) string {
 	if key == "" || id == "" || (behavior != "allow" && behavior != "deny") {
 		return toolError("resolve requires captain_key, id, behavior (allow|deny)")
 	}
+	// Model-supplied id — same hostile-input argument as tell_captain.
+	if !beadIDOK(id) {
+		return toolError("bad pending request id")
+	}
 	payload, _ := json.Marshal(map[string]string{"behavior": behavior})
-	_, status, err := b.proxy(ctx, key, "POST", "/resolve/"+id, payload)
+	_, status, err := b.proxy(ctx, key, "POST", "/resolve/"+url.PathEscape(id), payload)
 	if err != nil || status >= 300 {
 		return toolError("resolve failed")
 	}
@@ -622,6 +634,13 @@ func (b *Server) toolTellAllCaptains(ctx context.Context, args map[string]any) s
 		persona := "captain"
 		if captain != nil && captain.Persona != "" {
 			persona = captain.Persona
+		}
+		// The persona came off the ship's own X-Shipmates-Persona header at
+		// connect time; a ship that registers a junk one gets skipped rather
+		// than proxied.
+		if !personaname.Valid(persona) {
+			results[key] = "failed: bad persona"
+			continue
 		}
 		if _, status, err := b.proxy(ctx, key, "POST", "/tell/"+url.PathEscape(persona), payload); err != nil || status >= 300 {
 			results[key] = "failed"
@@ -718,6 +737,11 @@ func (b *Server) toolDispatchBead(ctx context.Context, args map[string]any) stri
 	}
 	if !beadIDOK(id) {
 		return toolError("bad bead id")
+	}
+	// persona rides into the dispatch tell's path segment (deliverDispatch)
+	// and into the assignee string written onto the graph.
+	if err := personaname.Validate(persona); err != nil {
+		return toolError(err.Error())
 	}
 	if !b.dialer.HasSession(key) {
 		return toolError("ship " + key + " is not connected")

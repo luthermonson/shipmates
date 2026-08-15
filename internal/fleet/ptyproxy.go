@@ -6,7 +6,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/personaname"
 )
 
 // PTY proxying. The buffered b.proxy() helper is fine for start/input/resize
@@ -47,8 +50,12 @@ func (b *Server) proxyPTYPost(captainPathFmt string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
 		persona := r.PathValue("persona")
+		if !personaname.Valid(persona) {
+			http.Error(w, "bad persona", http.StatusBadRequest)
+			return
+		}
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-		path := fmt.Sprintf(captainPathFmt, persona)
+		path := fmt.Sprintf(captainPathFmt, url.PathEscape(persona))
 		if r.URL.RawQuery != "" {
 			path += "?" + r.URL.RawQuery
 		}
@@ -67,23 +74,40 @@ func (b *Server) proxyPost(captainPath string) http.HandlerFunc {
 	}
 }
 
-// proxyPost2 is proxyPost with one extra path parameter interpolated.
-func (b *Server) proxyPost2(captainPathFmt, param string) http.HandlerFunc {
+// segmentOK reports whether a path segment taken off the inbound request is
+// safe to interpolate into the captain-side path. Every proxy helper that
+// interpolates takes one, so adding a route without deciding what its
+// identifier may contain is a compile error rather than an injection.
+type segmentOK func(string) bool
+
+// proxyPost2 is proxyPost with one extra path parameter interpolated. ok
+// gates the parameter: r.PathValue returns a percent-decoded segment, so
+// without it a route parameter can carry CR/LF, a space, or "/" straight into
+// the proxied request line.
+func (b *Server) proxyPost2(captainPathFmt, param string, ok segmentOK) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
 		val := r.PathValue(param)
+		if !ok(val) {
+			http.Error(w, "bad "+param, http.StatusBadRequest)
+			return
+		}
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-		out, status, err := b.proxy(r.Context(), key, "POST", fmt.Sprintf(captainPathFmt, val), body)
+		out, status, err := b.proxy(r.Context(), key, "POST", fmt.Sprintf(captainPathFmt, url.PathEscape(val)), body)
 		writeProxied(w, status, out, err)
 	}
 }
 
 // proxyGet2 is proxyGet with one extra path parameter interpolated.
-func (b *Server) proxyGet2(captainPathFmt, param string) http.HandlerFunc {
+func (b *Server) proxyGet2(captainPathFmt, param string, ok segmentOK) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
 		val := r.PathValue(param)
-		out, status, err := b.proxy(r.Context(), key, "GET", fmt.Sprintf(captainPathFmt, val), nil)
+		if !ok(val) {
+			http.Error(w, "bad "+param, http.StatusBadRequest)
+			return
+		}
+		out, status, err := b.proxy(r.Context(), key, "GET", fmt.Sprintf(captainPathFmt, url.PathEscape(val)), nil)
 		writeProxied(w, status, out, err)
 	}
 }
@@ -94,6 +118,10 @@ func (b *Server) proxyGet2(captainPathFmt, param string) http.HandlerFunc {
 func (b *Server) handlePTYStreamProxy(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	persona := r.PathValue("persona")
+	if !personaname.Valid(persona) {
+		http.Error(w, "bad persona", http.StatusBadRequest)
+		return
+	}
 
 	rt, err := b.captainTransport(key)
 	if err != nil {
@@ -107,7 +135,7 @@ func (b *Server) handlePTYStreamProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req, err := http.NewRequestWithContext(r.Context(), "GET",
-		fmt.Sprintf("http://captain/pty/%s/stream", persona), nil)
+		fmt.Sprintf("http://captain/pty/%s/stream", url.PathEscape(persona)), nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
