@@ -1,5 +1,13 @@
 # Memory on session start — making "auto-loaded" deterministic
 
+> **Status (August 2026): shipped.** The option this doc recommends — a single managed
+> `SessionStart` **command hook** — is implemented: `shipmates init` wires the hook into
+> `.claude/settings.json`, and it shells out to `shipmates hook load-memory`, which reads the
+> active persona's `.shipmates/memory/<persona>/` and injects it as session context
+> (`internal/commands/install.go`, `internal/commands/hookcmd.go`). The live-server / PTY
+> stream-json path loads memory separately via `--append-system-prompt`, as recommended.
+> The body below is the original proposal and empirical analysis, kept as the record.
+>
 > Working doc / proposal. Companion to `architecture.md` (persona/memory fundamentals) and
 > `persona-berths.md` (worktree isolation, a separate concern). **Updated after two empirical tests on the
 > current Claude Code resolved every hook-behavior question this doc turned on.** The first drafts assumed
@@ -263,10 +271,10 @@ input). Nothing blocking the recommendation remains open.
    resolvable in the hook script. (Design, not CC behavior.)
 4. **Scope the in-repo note, and fix the diagrams.** The note is **correct** — annotate it as
    http/stream-json-specific so no future reader over-generalizes it to command hooks on plain `-p`
-   (`server.go:600-601`, `:619-620`, `beads.go:26-28`, `architecture.md:553`). Separately, the diagrams are
-   **wrong**: `docs/diagrams/lifecycle.mmd:13` and `docs/diagrams.md:80` show `SessionStart hook → POST
+   (`server.go:600-601`, `:619-620`, `beads.go:26-28`, `architecture.md:553`). Separately, the diagrams were
+   **wrong**: `docs/diagrams.md` (and the since-removed `.mmd` duplicates) showed `SessionStart hook → POST
    /register` for crew, but crew run under http/stream-json where `SessionStart` does *not* fire — the
-   ref-count is server-driven (`server.go:619-620`), so the diagrams should be corrected.
+   ref-count is server-driven (`server.go:619-620`). The diagram has been corrected.
 
 [^cc]: Claude Code docs on hooks and headless mode: <https://code.claude.com/docs/en/hooks>,
     <https://code.claude.com/docs/en/cli-reference>, <https://code.claude.com/docs/en/headless>. Settings
