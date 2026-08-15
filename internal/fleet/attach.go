@@ -10,8 +10,11 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/personaname"
 )
 
 // AttachResponse is the JSON body Fleet Command returns to the UI on success.
@@ -144,6 +147,13 @@ func (b *Server) fireAttachAutoTell(ctx context.Context, clientKey, persona, pat
 	if strings.TrimSpace(persona) == "" {
 		persona = "captain"
 	}
+	// persona comes off the ship's X-Shipmates-Persona connect header, which
+	// is remote input: unvalidated it would frame the proxied request line.
+	// The upload already landed, so a junk persona costs the auto-tell only.
+	if !personaname.Valid(persona) {
+		slog.Warn("attach auto-tell skipped: invalid persona", "captain", clientKey, "persona", persona)
+		return
+	}
 	msg := fmt.Sprintf("[attachment] Admiral sent an image at `%s`", path)
 	if caption != "" {
 		msg += " — " + caption
@@ -153,7 +163,7 @@ func (b *Server) fireAttachAutoTell(ctx context.Context, clientKey, persona, pat
 	if tell == nil {
 		tell = b.proxy
 	}
-	body, status, err := tell(ctx, clientKey, "POST", "/tell/"+persona, payload)
+	body, status, err := tell(ctx, clientKey, "POST", "/tell/"+url.PathEscape(persona), payload)
 	if err != nil || status >= 300 {
 		slog.Warn("attach auto-tell failed", "captain", clientKey, "persona", persona, "status", status, "err", err, "body", string(body))
 	}
@@ -164,6 +174,9 @@ func (b *Server) fireAttachAutoTell(ctx context.Context, clientKey, persona, pat
 // multipart relay. Kept in this file so attach owns its transport quirk
 // instead of complicating the general proxy path other endpoints rely on.
 func (b *Server) proxyRaw(ctx context.Context, clientKey, method, path, contentType string, body []byte) ([]byte, int, error) {
+	if err := checkProxyPath(path); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
 	b.mu.Lock()
 	captain, ok := b.captains[clientKey]
 	b.mu.Unlock()

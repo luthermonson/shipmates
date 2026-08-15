@@ -22,10 +22,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/personaname"
 	"github.com/rancher/remotedialer"
 	_ "modernc.org/sqlite"
 )
@@ -174,11 +176,11 @@ func (b *Server) Run(ctx context.Context, addr string) error {
 	mux.HandleFunc("POST /api/captain/{key}/pty/{persona}/resize", b.proxyPTYPost("/pty/%s/resize"))
 	mux.HandleFunc("POST /api/captain/{key}/pty/{persona}/takeover", b.proxyPTYPost("/pty/%s/takeover"))
 	mux.HandleFunc("POST /api/captain/{key}/pty/{persona}/release", b.proxyPTYPost("/pty/%s/release"))
-	mux.HandleFunc("GET /api/captain/{key}/pty/{persona}/snapshot", b.proxyGet2("/pty/%s/snapshot", "persona"))
-	mux.HandleFunc("GET /api/captain/{key}/bead/{id}", b.proxyGet2("/bead/%s", "id"))
+	mux.HandleFunc("GET /api/captain/{key}/pty/{persona}/snapshot", b.proxyGet2("/pty/%s/snapshot", "persona", personaname.Valid))
+	mux.HandleFunc("GET /api/captain/{key}/bead/{id}", b.proxyGet2("/bead/%s", "id", beadIDOK))
 	mux.HandleFunc("POST /api/captain/{key}/bead", b.proxyPost("/bead"))
-	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/close", b.proxyPost2("/bead/%s/close", "id"))
-	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/update", b.proxyPost2("/bead/%s/update", "id"))
+	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/close", b.proxyPost2("/bead/%s/close", "id", beadIDOK))
+	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/update", b.proxyPost2("/bead/%s/update", "id", beadIDOK))
 	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/assign", b.handleBeadAssign)
 	mux.HandleFunc("GET /api/beads", b.handleAggregateBeads)
 	mux.HandleFunc("POST /api/beads/nudge", b.handleBeadsNudge)
@@ -310,16 +312,28 @@ func (b *Server) proxyGet(captainPath string) http.HandlerFunc {
 func (b *Server) handleTell(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	persona := r.PathValue("persona")
+	// ServeMux hands back a percent-DECODED segment, so "%0d%0aGET /shutdown"
+	// arrives here as real CRLF. Reject before it can reach the request line.
+	if !personaname.Valid(persona) {
+		http.Error(w, "bad persona", http.StatusBadRequest)
+		return
+	}
 	bodyBytes, _ := io.ReadAll(r.Body)
-	body, status, err := b.proxy(r.Context(), key, "POST", "/tell/"+persona, bodyBytes)
+	body, status, err := b.proxy(r.Context(), key, "POST", "/tell/"+url.PathEscape(persona), bodyBytes)
 	writeProxied(w, status, body, err)
 }
 
 func (b *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	id := r.PathValue("id")
+	// Pending-request ids are an 8-char UUID prefix; beadIDOK's alphabet
+	// covers them and rejects anything that could reframe the request.
+	if !beadIDOK(id) {
+		http.Error(w, "bad request id", http.StatusBadRequest)
+		return
+	}
 	bodyBytes, _ := io.ReadAll(r.Body)
-	body, status, err := b.proxy(r.Context(), key, "POST", "/resolve/"+id, bodyBytes)
+	body, status, err := b.proxy(r.Context(), key, "POST", "/resolve/"+url.PathEscape(id), bodyBytes)
 	writeProxied(w, status, body, err)
 }
 
@@ -456,6 +470,9 @@ func (b *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 // http.NewRequestWithContext + http.ReadResponse on a hand-rolled connection
 // because the standard http.Transport doesn't accept an arbitrary net.Conn.
 func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body []byte) ([]byte, int, error) {
+	if err := checkProxyPath(path); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
 	b.mu.Lock()
 	captain, ok := b.captains[clientKey]
 	b.mu.Unlock()
@@ -493,6 +510,29 @@ func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body
 type proxyResp struct {
 	Status int
 	Body   []byte
+}
+
+// checkProxyPath is the last line of defence before a request-target is
+// pasted into a hand-rolled HTTP/1.1 request line. Callers are expected to
+// validate their identifiers and url.PathEscape every interpolated segment,
+// but this proxy is a public seam inside the package and a future caller will
+// forget: a single space splits the request target, and a CR or LF ends the
+// request line outright, letting one proxied call become several — enough to
+// promote a caller from the curated /api/* subset to any endpoint the
+// (unauthenticated) captain-local server exposes.
+//
+// We reject rather than strip: silently rewriting a hostile path hides the
+// attempt, and no legitimate caller in this package ever builds one.
+func checkProxyPath(path string) error {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("proxy: path %q must start with /", path)
+	}
+	for i := 0; i < len(path); i++ {
+		if c := path[i]; c <= ' ' || c == 0x7f {
+			return fmt.Errorf("proxy: refusing path with control character %q at offset %d", c, i)
+		}
+	}
+	return nil
 }
 
 // readHTTPResponse reads one HTTP/1.1 response off a net.Conn via the stdlib

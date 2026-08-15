@@ -315,9 +315,9 @@ func TestProxyHelpers_PathAndQueryConstruction(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/captain/{key}/beads", b.proxyGet("/beads.json"))
-	mux.HandleFunc("GET /api/captain/{key}/bead/{id}", b.proxyGet2("/bead/%s", "id"))
+	mux.HandleFunc("GET /api/captain/{key}/bead/{id}", b.proxyGet2("/bead/%s", "id", beadIDOK))
 	mux.HandleFunc("POST /api/captain/{key}/bead", b.proxyPost("/bead"))
-	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/close", b.proxyPost2("/bead/%s/close", "id"))
+	mux.HandleFunc("POST /api/captain/{key}/bead/{id}/close", b.proxyPost2("/bead/%s/close", "id", beadIDOK))
 	mux.HandleFunc("POST /api/captain/{key}/pty/{persona}/input", b.proxyPTYPost("/pty/%s/input"))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()

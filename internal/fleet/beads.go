@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/personaname"
 )
 
 // handleBeadsNudge is a captain's "we just pushed" callback: fan a pull-now
@@ -68,6 +70,12 @@ func (b *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	persona := strings.TrimSpace(body.Persona)
+	// persona becomes a path segment in the dispatch tell (deliverDispatch)
+	// and an assignee on the shared graph; gate it at the boundary.
+	if !personaname.Valid(persona) {
+		http.Error(w, "bad persona", http.StatusBadRequest)
+		return
+	}
 	shipName, _, _ := strings.Cut(strings.TrimSpace(body.Ship), ":")
 	assignee := persona + "@" + shipName
 
