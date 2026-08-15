@@ -49,3 +49,17 @@ func (b *Server) captainAPIToken(clientKey string) string {
 	}
 	return ""
 }
+
+// captainDialInfo snapshots the port and credential of a connected captain
+// under the lock. Callers must not reach through the *Captain afterwards:
+// authorize rewrites those fields in place when a ship reconnects, so a read
+// through the pointer after unlocking is a data race.
+func (b *Server) captainDialInfo(clientKey string) (port int, token string, ok bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c, ok := b.captains[clientKey]
+	if !ok {
+		return 0, "", false
+	}
+	return c.Port, c.APIToken, true
+}

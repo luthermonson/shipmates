@@ -480,9 +480,11 @@ func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body
 	if err := checkProxyPath(path); err != nil {
 		return nil, http.StatusBadRequest, err
 	}
-	b.mu.Lock()
-	captain, ok := b.captains[clientKey]
-	b.mu.Unlock()
+	// Copy the fields we need WHILE holding the lock. b.captains holds
+	// pointers, and authorize rewrites Port and APIToken in place on every
+	// reconnect, so reading through the pointer after the unlock races that
+	// write — on a string field that means a torn value, not just a stale one.
+	port, token, ok := b.captainDialInfo(clientKey)
 	if !ok {
 		return nil, http.StatusNotFound, fmt.Errorf("no such captain: %s", clientKey)
 	}
@@ -490,7 +492,7 @@ func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body
 		return nil, http.StatusGatewayTimeout, fmt.Errorf("captain %s not currently connected", clientKey)
 	}
 	dial := b.dialer.Dialer(clientKey)
-	addr := fmt.Sprintf("127.0.0.1:%d", captain.Port)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	conn, err := dial(ctx, "tcp", addr)
 	if err != nil {
 		return nil, http.StatusBadGateway, fmt.Errorf("dial captain: %w", err)
@@ -499,7 +501,7 @@ func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: captain\r\n%sContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-		method, path, authHeaderLine(captain.APIToken), len(body))
+		method, path, authHeaderLine(token), len(body))
 	if _, err := io.WriteString(conn, req); err != nil {
 		return nil, http.StatusBadGateway, err
 	}
