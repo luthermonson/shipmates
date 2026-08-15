@@ -396,12 +396,19 @@ Different personas warrant different levels of trust. A `tester` running on a de
 | `mode` | sets `--permission-mode <default\|acceptEdits\|bypassPermissions\|plan>` |
 | `dangerouslySkipPermissions` | sets `--dangerously-skip-permissions` (trust-the-agent escape hatch) |
 
+`dangerouslySkipPermissions` and `mode: bypassPermissions` are **operator-only**
+— they come from `~/.shipmates/personas.yaml`, never from the checkout, because
+a cloned repository must not be able to waive the human gate. See
+[docs/security.md](security.md#persona-execution-config-is-operator-owned).
+
 That's it. Allow/deny patterns stay in `.claude/settings.json` because that's where Claude Code already reads them and where the team's other tooling already writes them.
 
 **Layered policy resolution.** Last writer wins:
 
 1. **Persona default** (catalog frontmatter)
 2. **Project override** (`shipmates.yaml`)
+3. **Operator override** (`~/.shipmates/personas.yaml`) — the only layer
+   outside the checkout, and so the only one that may bypass the gate
 
 ```yaml
 # persona frontmatter (catalog default)
@@ -410,10 +417,13 @@ permissions:
 
 # shipmates.yaml (project override) — mode nests under permissions:
 crew:
-  backend:
-    dangerouslySkipPermissions: true
   security:
     permissions: { mode: ask }
+
+# ~/.shipmates/personas.yaml (operator override)
+personas:
+  backend:
+    dangerouslySkipPermissions: true
 ```
 
 **Catalog default modes** — `acceptEdits` for anything that edits code, `ask` for non-executors and strategic personas:

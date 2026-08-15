@@ -155,6 +155,12 @@ Keys a project file sets and is not trusted to supply are reported rather than
 silently dropped: `LoadProject` records them, `env.Selector.Resolve` warns
 once, and the list travels on the resolution so a command can surface it.
 
+The same split now covers persona launch config — a persona file
+(`.claude/agents/<persona>.md`) and `shipmates.yaml`'s `crew:` block are both
+part of the checkout, so neither may name an executable or waive the permission
+gate. See [Persona execution config is
+operator-owned](security.md#persona-execution-config-is-operator-owned).
+
 ## Containment
 
 Containment posture is the operator's decision, applied to the processes a

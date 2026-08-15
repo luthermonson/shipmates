@@ -119,6 +119,16 @@ func (s *Server) ensurePTY(persona string) (*ptyProc, error) {
 	var cmd *pty.Cmd
 	var sessID, sessName, fp, cwd string
 	pcfg, _ := project.ResolvePersonaConfig(persona)
+	// A checkout may not name the executable we spawn (see the persona trust
+	// boundary in internal/project/personatrust.go). If this persona's file or
+	// shipmates.yaml asked for backend:/command: anyway, those keys never
+	// reached pcfg — refuse the spawn outright rather than quietly starting the
+	// default runtime instead, which would look like the foreign agent worked.
+	if pcfg.RefusedCommandBacking() {
+		_ = pt.Close()
+		return nil, fmt.Errorf("persona %s asks to run its own command from repo-supplied config, which shipmates does not honor (%s); move backend/command to ~/.shipmates/personas.yaml",
+			persona, pcfg.RefusedSummary())
+	}
 	if pcfg.CommandBacked() {
 		if len(pcfg.Command) == 0 {
 			_ = pt.Close()

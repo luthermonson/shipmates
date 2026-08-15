@@ -268,12 +268,19 @@ reverses it. Linux: run `ship serve` from a systemd *user* unit.
 
 ### The backend driver seam: `backend: claude|command`
 
-Persona frontmatter (or a `crew:` override) may declare a foreign agent:
+The operator's `~/.shipmates/personas.yaml` may declare a foreign agent:
 
 ```yaml
-backend: command
-command: [opencode]
+personas:
+  opencode:
+    backend: command
+    command: [opencode]
 ```
+
+Not persona frontmatter and not a `crew:` override: both arrive with `git
+clone`, and a checkout that could name the argv shipmates spawns would be
+arbitrary code execution. A persona file that tries it is refused, loudly —
+see [docs/security.md](security.md#persona-execution-config-is-operator-owned).
 
 Command-backed mates are **PTY-only**: `ensurePTY` spawns the argv under a
 PTY instead of claude — no session resume, no hooks, no beads prime. Their

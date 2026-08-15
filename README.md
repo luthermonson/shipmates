@@ -341,9 +341,13 @@ captainPersona: captain
 # Optional: per-persona overrides
 crew:
   captain:
-    dangerouslySkipPermissions: true
+    permissions: { mode: acceptEdits }
   security:
-    dangerouslySkipPermissions: false
+    permissions: { mode: ask }
+    model: claude-haiku-4-5-20251001
+# `crew:` is repo-supplied, so it cannot name an executable (backend/command),
+# choose a cwd, or waive the permission gate. Those live in
+# ~/.shipmates/personas.yaml — see docs/security.md.
 
 # Optional: GitHub-issues-and-PRs as the coordination surface
 routing: github

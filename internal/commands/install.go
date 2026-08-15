@@ -36,11 +36,14 @@ sessionPrefix: %s
 # permission mode, remoteControl, model/effort, etc. Keeping it fully commented
 # means there's no active empty crew key — so appending your own crew block
 # won't create a duplicate top-level key (which yaml.v3 rejects).
+#
+# This file arrives with the checkout, so it CANNOT name an executable
+# (backend/command), choose a cwd, or waive the permission gate
+# (dangerouslySkipPermissions, mode: bypassPermissions). Those are the
+# operator's, in ~/.shipmates/personas.yaml — see docs/security.md.
 # crew:
 #   security:
 #     permissions: { mode: ask }
-#   backend:
-#     dangerouslySkipPermissions: true
 #   tester:
 #     model: claude-haiku-4-5-20251001   # run this persona on a cheaper/faster model
 #   architect:

@@ -69,3 +69,62 @@ Defense in depth, honestly labeled: the routing rules make personas *behave*
 correctly under hostile input; the Brig makes the worst outcomes *impossible
 to execute* even when behavior fails; the fleet deny list is the Admiral's
 unconditional floor.
+
+## Persona execution config is operator-owned
+
+A persona file (`.claude/agents/<persona>.md`) and `shipmates.yaml` both arrive
+with `git clone`. On a repository nobody has reviewed yet they are hostile
+input, exactly like an issue body — so they may not decide **what** shipmates
+executes or **whether** a human approves it.
+
+Five settings are therefore **operator-only** and are ignored anywhere inside a
+checkout:
+
+| Setting | Why |
+|---|---|
+| `backend` | selects the driver — `command` means "run this argv, not claude" |
+| `command` | the argv itself: naming an executable is code execution |
+| `cwd` | chooses the directory a spawned process runs in |
+| `permissions.mode: bypassPermissions` | waives the human gate entirely |
+| `dangerouslySkipPermissions` | same, by the other spelling |
+
+They live in **`~/.shipmates/personas.yaml`**, keyed by persona name, outside
+every checkout:
+
+```yaml
+personas:
+  aider:
+    backend: command
+    command: [aider, --model, gpt-5]
+    cwd: /home/you/src/thing
+  backend:
+    dangerouslySkipPermissions: true      # your machine, your call
+```
+
+That file is applied last, so it also outranks the checkout on the settings
+both may set (`model`, `effort`, `berth`, `remoteControl`).
+
+Everything else a persona file says stays repo-supplied, because none of it
+names a process: `model`, `effort`, `berth` (which selects a
+shipmates-computed worktree path, it does not name one), `remoteControl`,
+`shipmatesPersona`, and `permissions.mode` bounded to `ask`, `acceptEdits`,
+`plan` or `default` — an allowlist, so `bypassPermissions` and any mode
+invented later are refused without anyone remembering to add them to a list.
+
+The enforcement is a type, not a filter, matching
+[`internal/runtime/config`](runtime-interface.md#the-trust-boundary):
+`personaFrontmatter` and `CrewOverride` have no fields for those settings, so
+there is nothing for a hostile file to decode into. A denylist would reopen the
+hole the first time someone added an execution-shaped key and forgot to update
+it.
+
+**A repository that tries anyway is reported, not silently ignored.** Each
+refused key is logged once with the file, the key and the value it wanted, and
+a PTY start for a persona whose checkout asked for `backend:`/`command:` fails
+outright — quietly launching claude instead would look like the foreign agent
+had started.
+
+**If you already had `backend`/`command`/`cwd`/`dangerouslySkipPermissions` in
+a persona file or in `shipmates.yaml`'s `crew:` block, move it to
+`~/.shipmates/personas.yaml`.** It stopped taking effect; the server log names
+each key it dropped.
