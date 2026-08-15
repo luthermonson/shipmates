@@ -202,7 +202,7 @@ commands and silently ignored by the rest" is how this went wrong before.
 
 | commands | why they consult the runtime |
 | --- | --- |
-| `open`, `ask`, `fanout`, `drain`, `drain-many`, `server serve` | they launch a session |
+| `open`, `ask`, `fanout`, `drain`, `drain-many`, `server serve`, `sail` | they launch a session |
 | `init`, `add`, `update`, `remove`, `routing apply` | they install or reconcile the runtime's persona artifacts |
 
 Commands that talk to the coordination server, read local state, or render for

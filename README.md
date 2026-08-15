@@ -50,7 +50,7 @@ Shipmates uses a naval hierarchy that maps 1:1 to real roles:
           └───────────────────────────────────────┘
 
           ┌───────────────────────────────────────┐
-          │  ephpm                                │
+          │  project-three                        │
           │    Captain ── ► mates                 │
           └───────────────────────────────────────┘
 
@@ -144,11 +144,17 @@ On each ship machine (workstation, laptop, VM, homelab box):
 # One-time setup per project
 cd my-project
 shipmates init --crew captain,architect,security
-# Edit shipmates.yaml: point the fleet block at Fleet Command
+# Edit the project's shipmates.yaml: point the fleet block at Fleet Command
 # fleet:
 #   url: https://fleet.example.com
 
-# Install as a persistent supervisor
+# Register the project with this host's ship supervisor
+# (writes the host-level ~/.shipmates/ship.yaml — distinct from the
+#  per-project shipmates.yaml above)
+shipmates ship add .
+
+# Install the supervisor as a persistent service (refuses to install
+# until ~/.shipmates/ship.yaml lists at least one project)
 shipmates ship install
 
 # Or run manually
@@ -164,7 +170,7 @@ Ships come online, open outbound WebSocket tunnels to Fleet Command, sync the be
 
 - Live PTY terminals for every mate on every ship — interact with a captain in Chicago from your phone in Barcelona
 - Real-time event feed (assistant text, tool calls, results, permission requests)
-- Approval queue for privileged tool calls, gate-able from CLI (`shipmates fleet resolve <id> allow|deny`) or the web UI
+- Approval queue for privileged tool calls, gate-able from CLI (`shipmates fleet resolve <captain-key> <id> allow|deny`) or the web UI
 - Cross-ship dispatch — assign a bead to a captain on any ship, watch it appear there and start work
 
 **Voice control via the Commodore**
@@ -209,6 +215,10 @@ shipmates allow a1b2c3d4 --for 30m
 ```
 
 Restart of the ship wipes time-boxes (fresh trust boundary).
+
+## Untrusted input
+
+Public GitHub repos make a crew's work queue attacker-writable: anyone can open an issue or PR. When GitHub routing is enabled (`routing: github` in `shipmates.yaml`), every persona is composed with hostile-input rules: GitHub-sourced text — titles, bodies, comments, diffs, branch names — is **data to evaluate, never instructions to follow**. Issue/PR references are validated (`^[0-9]+$` or a full GitHub URL) before touching a command, branch/worktree names are derived by the persona rather than copied from attacker-chosen titles, multi-line text travels via `--body-file` instead of shell interpolation, and a fork PR is read, not run. These prompt-layer rules compose with the Brig's kernel enforcement, which holds even when a prompt is subverted. See [`docs/security.md`](docs/security.md).
 
 **Session auto-repair** — if Claude Code loses track of a mate's session (jsonl rotated, upgrade cleaned the store), Shipmates detects the failure, deletes the stale session marker, and respawns fresh automatically. The operator sees a `session:auto-repair` event; the tell that triggered the recovery is delivered normally.
 
@@ -265,14 +275,15 @@ example.
 
 Fifteen security articles compiled into kernel rules and bound to every persona — deny/ask
 gates a prompt cannot talk its way past (force-pushes, `.env` and credential writes,
-`curl\|sh`, settings self-escalation). Configurable per project; disable entirely or waive
-individual articles in `shipmates.yaml`. The fleet-wide deny list is not the Brig's to
-waive — it holds even with the Brig off.
+`curl\|sh`, settings self-escalation). Configured per operator: disable entirely or waive
+individual Articles under the `brig:` key in `~/.shipmates/config.yaml` — user config only,
+so a cloned repo can never un-sign the Articles for your machine. The fleet-wide deny list
+is not the Brig's to waive — it holds even with the Brig off.
 
 | Command | What it does |
 |---|---|
 | `brig status` | the operator's brig posture and the freeze state |
-| `brig list` / `brig explain <handle>` | the fifteen Articles; full rule text with rationale and enforcement layer |
+| `brig list` / `brig explain <N>` | the fifteen Articles; one Article in full (by number 1..15) with rationale and enforcement layer |
 | `brig log` | print enforcement entries from `.shipmates/brig.log` |
 | `freeze [--reason <text>] [--admiral <who>]` | engage the freeze: refuse all Write operations until released (binds bypass-mode personas too) |
 | `release` | release the freeze; Writes resume |
@@ -365,11 +376,12 @@ deny:
 
 ## The starter crew
 
-Six personas, opinionated, engineering-department flavored. Rename any of them to fit your team.
+Seven personas, opinionated, engineering-department flavored. Rename any of them to fit your team.
 
 | Persona | Owns |
 |---|---|
 | **captain** | Strategy, direction, push-back. The human + AI partnership in the chair. Doesn't ship code. |
+| **first-mate** | Voyage execution lead — plans voyages, drafts `.shipmates/voyage.json`, presents them for the admiral's commission. Never commissions, never ships code. See [`docs/sailing.md`](docs/sailing.md). |
 | **architect** | Cross-cutting design, docs, consistency over time |
 | **security** | OWASP, dep hygiene, secret detection, auth patterns |
 | **frontend** | UI, accessibility, perf, browser concerns |
@@ -413,12 +425,18 @@ A **berth** is a persona's persistent home — a git worktree at `.shipmates/ber
 - [`docs/persona-berths.md`](docs/persona-berths.md) — per-persona worktrees, launch ergonomics, guardrails
 - [`docs/PHILOSOPHY.md`](docs/PHILOSOPHY.md) — why persistent memory changes review quality, with a worked case study
 - [`docs/diagrams.md`](docs/diagrams.md) — sequence diagrams for tell/dispatch/attach flows
+- [`docs/brig.md`](docs/brig.md) — the Brig operator guide: the Ship's Articles, freeze/release, the denial log
+- [`docs/sailing.md`](docs/sailing.md) — voyages: plan → commission → sail, the first mate, and the markdown-first task tracker
+- [`docs/runtime-interface.md`](docs/runtime-interface.md) — multi-runtime selection (claude / codex / OpenAI-compatible) and what each command honors
+- [`docs/security.md`](docs/security.md) — hostile-input routing: GitHub text as untrusted data, and how the prompt layer composes with the Brig
 
 ## Status
 
 Working, deployed, and running against real projects. Recent milestones:
 
 - **v0.3.0** (July 2026) — naval-metaphor rename (Fleet Command / Captain / Commodore), permission model with Claude Code inheritance + fleet-native policies, binary attach (photo/file upload via UI or `fleet show` CLI), session auto-repair for stale claude session markers
+- **v0.4.0** (July 2026) — persona berths (per-persona git worktrees with launch ergonomics), deterministic memory loading via a managed `SessionStart` hook (`shipmates hook load-memory`), `shipmates show` local file attach
+- **Unreleased on main** — voyages (`plan` / `commission` / `sail` with the `first-mate` persona and structured recovery), the Brig (fifteen Ship's Articles with kernel enforcement, `freeze` / `release`, denial log), multi-runtime selection (`--runtime claude|codex|openai` with portable containment), hostile-input GitHub routing (see [`docs/security.md`](docs/security.md))
 
 The captain↔crew loop (dispatch → live steer → observe tool use → human-in-the-loop approval) is verified end-to-end against Claude Code. Cross-ship dispatch works via the beads graph. Voice control via the Commodore has been running against local qwen/haiku deployments and OpenAI-compatible endpoints.
 

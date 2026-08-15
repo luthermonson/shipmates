@@ -1,6 +1,12 @@
 # Shipmates — Architecture
 
 > First draft. Working doc. Edit aggressively.
+>
+> **Scope note (August 2026):** this doc covers the original single-ship core (personas,
+> memory, captain-server protocol) and predates Fleet Command, voyages, the Brig, persona
+> berths, and multi-runtime support. For those, see [`fleet-architecture.md`](fleet-architecture.md),
+> [`sailing.md`](sailing.md), [`brig.md`](brig.md), [`persona-berths.md`](persona-berths.md),
+> and [`runtime-interface.md`](runtime-interface.md).
 
 ## What Shipmates is
 
@@ -49,7 +55,7 @@ The vocabulary the project will use consistently. Each term means one thing.
 | **Fleet Command** | The optional central coordinator node (`shipmates fleet serve`) — web UI, ship tunnels, voice interface (the **Commodore**), and cross-ship graph views. One per fleet; see [`fleet-architecture.md`](fleet-architecture.md). |
 | **Admiral** | The human operator commanding the whole fleet. Sets strategic intent; the Commodore reports up to the Admiral. |
 | **Commodore** | The AI voice persona embedded at Fleet Command that the Admiral speaks with. Whisper.cpp STT → LLM → Kokoro TTS pipeline; the Commodore is the identity, not a separate component. |
-| **Articles** | The rendered persona file installed in a project — the persona's "contract." Lives at `.claude/agents/<name>.md` so Claude Code's existing subagent machinery sees it natively. |
+| **Persona artifact** | The rendered persona file installed in a project — the persona's "contract." Lives at `.claude/agents/<name>.md` so Claude Code's existing subagent machinery sees it natively. (Not to be confused with the Brig's Ship's **Articles** — see [`brig.md`](brig.md).) |
 
 ## Architecture
 
@@ -215,19 +221,22 @@ The whole catalog — persona files, memory seeds, slash commands, the settings.
 
 ```
 catalog/
-  personas/
-    captain/
-      agent.md          → vendored to .claude/agents/captain.md
-      memory-seeds/     → copied to .shipmates/memory/captain/ on first install
-    architect/
-    security/
-    ...
+  captain/
+    .claude/agents/captain.md   → vendored to .claude/agents/captain.md
+    memory-seeds/               → copied to .shipmates/memory/captain/ on first install
+    policy.yaml                 → vendored to .shipmates/policies/captain.yaml
+  architect/
+  security/
+  first-mate/
+  ...
+  charters/             (drain / autonomous charter templates)
   commands/
     standup.md          → vendored to .claude/commands/standup.md
-    review.md
-  skills/               (optional: .claude/skills/<name>/ for distribution)
-  settings/
-    hooks.json.tmpl     → merged into the project's settings.json
+    sync-routing.md
+  routing/
+    github.md           (routing-conventions template, composed into personas)
+  skills/               (.claude/skills/<name>/ for distribution)
+  ARTICLES.md           → vendored to .shipmates/ARTICLES.md (the Ship's Articles)
 ```
 
 In the Go source:
@@ -270,11 +279,11 @@ Conflict: .claude/agents/security.md
 
 Diff renderer is an in-process unified diff (e.g. `sergi/go-diff`), ANSI-colored when stdout is a TTY, plain otherwise. No external `git` dependency.
 
-**Non-TTY behavior.** In CI / piped runs, default to **keep yours** for every conflict and exit with a summary. Never silently stomp user changes in non-interactive mode. `--accept ours|theirs` (or `--force`) resolves all conflicts non-interactively when the caller knows what they want.
+**Non-TTY behavior.** In CI / piped runs, default to **keep yours** for every conflict and exit with a summary. Never silently stomp user changes in non-interactive mode. `--accept ours|theirs` resolves all conflicts non-interactively when the caller knows what they want.
 
 **Memory is sacred.** `shipmates update` never touches `.shipmates/memory/<persona>/`. Memory seeds are copied **only on first `shipmates add <persona>`** and never overwritten thereafter — the persona's accumulated knowledge is the user's, not ours. Updates to seed templates only affect *new* installs.
 
-**Orphans.** If a persona or command is removed from the catalog in a future binary version, the user's installed copy stays. `shipmates list` flags it as `(orphaned)`. They can `shipmates remove` it themselves; we never delete user files unprompted.
+**Orphans.** If a persona or command is removed from the catalog in a future binary version, the user's installed copy stays on disk. They can `shipmates remove` it themselves; we never delete user files unprompted. (`shipmates list` today prints catalog personas and whether each is installed — it does not flag orphans.)
 
 **Versioning.** `shipmates --version` prints the binary/catalog version (same value). `.shipmates/manifest.json` records the version at last successful `update`, so the CLI can detect "you're on 1.4 but your project was last updated against 1.2" and offer to bring it current.
 
@@ -312,7 +321,7 @@ Server stays up across back-to-back delegations (warm path). It shuts down when 
 
 | Endpoint | Caller | Purpose |
 |---|---|---|
-| `POST /register` | crew `SessionStart` hook | register run, ref-count++ |
+| `POST /register` | server-driven on crew spawn (`SessionStart` hooks don't fire for `-p` crew — see finding 9 below) | register run, ref-count++ |
 | `POST /deregister` | crew `SessionEnd` hook | ref-count-- |
 | `POST /events` | crew `PreToolUse`, `PostToolUse`, `Stop`, `MessageDisplay` hooks | activity firehose |
 | `POST /permission/<persona>/<id>` | crew `PermissionRequest` hook | **blocking** allow/deny |
@@ -340,7 +349,7 @@ shipmates tell security "double-check PR 10 for auth regressions"
 This requires the crew member to be running as a **live stream-json process** (`claude -p --input-format stream-json --output-format stream-json`), held open by the server, rather than a one-shot. Two execution models coexist:
 
 - **One-shot** (`shipmates ask <persona> "..."`): transient `--resume` subprocess, one turn, exits. Cheap, fire-and-forget.
-- **Live** (`shipmates open-crew <persona>` then `shipmates tell <persona> "..."`): server spawns and holds a persistent stream-json process you can steer conversationally while it works. The server owns its stdin/stdout.
+- **Live** (`shipmates open <persona>` then `shipmates tell <persona> "..."`): server spawns and holds a persistent stream-json process you can steer conversationally while it works. The server owns its stdin/stdout.
 
 Mid-work messages are received and processed in the same session (verified June 2026); a `tell` is queued/steered rather than hard-cancelling the in-flight turn.
 
@@ -393,21 +402,18 @@ That's it. Allow/deny patterns stay in `.claude/settings.json` because that's wh
 
 1. **Persona default** (catalog frontmatter)
 2. **Project override** (`shipmates.yaml`)
-3. **Local override** (`.shipmates/local-policies.yaml`, gitignored — per-developer trust)
 
 ```yaml
 # persona frontmatter (catalog default)
 permissions:
   mode: acceptEdits
 
-# shipmates.yaml (project override)
+# shipmates.yaml (project override) — mode nests under permissions:
 crew:
-  backend:  { dangerouslySkipPermissions: true }
-  security: { mode: ask }
-
-# .shipmates/local-policies.yaml (gitignored, per developer)
-crew:
-  security: { dangerouslySkipPermissions: true }   # I trust it on my own box
+  backend:
+    dangerouslySkipPermissions: true
+  security:
+    permissions: { mode: ask }
 ```
 
 **Catalog default modes** — `acceptEdits` for anything that edits code, `ask` for non-executors and strategic personas:
@@ -427,7 +433,7 @@ Defaulting all executors to `ask` would create approval fatigue (captain auto-cl
 
 ```
 shipmates ask security "review the diff"
-  └─ resolve mode: persona default → shipmates.yaml → local-policies.yaml
+  └─ resolve mode: persona default → shipmates.yaml crew override
   └─ exec claude
         --agent security
         --session-id <uuid>
@@ -495,7 +501,7 @@ What we ship to find out if anyone cares. Time budget: 1-2 weeks.
 1. **`shipmates` Go CLI binary** (cross-platform: windows/darwin/linux). Catalog is embedded via `//go:embed catalog`, so the binary is the single distribution artifact.
    - `shipmates init` — scaffold `shipmates.yaml` + `.shipmates/memory/` + manifest into the current project
    - `shipmates add <persona>` — vendor the persona file into `.claude/agents/` + seed its memory dir
-   - `shipmates list` — show installed personas/commands + last-modified time of memory + orphan status
+   - `shipmates list` — show catalog personas and which are installed
    - `shipmates update [<persona>]` — refresh installed files from the embedded catalog, with diff-on-conflict prompt; preserves memory
    - `shipmates remove <persona>` — remove persona file from `.claude/agents/`; keep memory unless `--purge`
    - `shipmates render <persona> --target <agents-md|cursor|windsurf>` — render a thin-target version
@@ -513,7 +519,7 @@ What we ship to find out if anyone cares. Time budget: 1-2 weeks.
    - `backend` — APIs / database / lifecycle
    - `tester` — QA / regression / coverage
 
-3. **Documentation** — `README.md`, `docs/architecture.md` (this file), `docs/PHILOSOPHY.md` going deep on why persistent memory changes review quality, with Card Cannon as a worked example of accumulated-context behavior.
+3. **Documentation** — `README.md`, `docs/architecture.md` (this file), `docs/PHILOSOPHY.md` going deep on why persistent memory changes review quality, with a worked case study of accumulated-context behavior.
 
 4. **Two installation modes at launch:**
    - **Solo subagent mode:** `shipmates add security` → file lands in `.claude/agents/`, memory seeded, use via the Agent tool inside any Claude Code session
@@ -592,7 +598,7 @@ Flags shipmates explicitly does **not** rely on: `--append-system-prompt` (the p
 - **Fleet Command:** the optional central coordinator node (`shipmates fleet serve`) — one per fleet. Runs the web UI, ship tunnels, and voice interface. See [`fleet-architecture.md`](fleet-architecture.md).
 - **Admiral:** the human operator commanding the whole fleet; sets strategic intent.
 - **Commodore:** the AI voice persona the Admiral talks to at Fleet Command (whisper.cpp STT → LLM → Kokoro TTS).
-- **Articles:** the rendered persona file installed in a project — the persona's "contract."
+- **Persona artifact:** the rendered persona file installed in a project — the persona's "contract." (The Brig's Ship's *Articles* are a different thing: the fifteen security rules in [`brig.md`](brig.md).)
 - **Memory seeds:** starter markdown files the catalog ships alongside each persona; copied into the project's memory dir on install so the persona starts with structure, not a blank slate.
 
 ---

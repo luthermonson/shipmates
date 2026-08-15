@@ -39,7 +39,7 @@ flowchart TB
     Human <-->|chat| CaptainAI
     CaptainAI -->|"1 . spawns on first delegation"| Server
     CaptainAI -->|"2 . shipmates ask / fanout"| CrewBox
-    CrewBox -->|"hooks: PreToolUse, Stop,<br/>SessionStart/End, PermissionRequest"| Server
+    CrewBox -->|"hooks: PreToolUse, Stop,<br/>SessionEnd, PermissionRequest"| Server
     Server -->|"GET /feed (live activity)"| CaptainAI
     Server -. "PermissionRequest →<br/>approve from phone/Slack" .-> Human
 
@@ -77,7 +77,7 @@ sequenceDiagram
     Captain->>Srv: GET /health (wait-for-ready)
     Captain->>Crew: exec claude -p --agent security<br/>--session-id <uuid> --settings <hooks><br/>"double-check PR 10"
 
-    Crew->>Srv: SessionStart hook → POST /register (ref++)
+    Note over Srv: crew spawn registered (ref++)<br/>server-driven — SessionStart hooks<br/>do not fire for -p crew
     Crew->>Mem: load persona + accumulated memory
     loop agentic work
         Crew->>Srv: PreToolUse / PostToolUse → POST /events
@@ -173,7 +173,7 @@ flowchart TB
     Conflict --> TTY{"stdout is TTY?"}
     TTY -->|no| NonTTY{"--accept flag?"}
     NonTTY -->|none or ours| Keep["keep yours<br/>default in CI"]
-    NonTTY -->|theirs or --force| Take["take shipped<br/>bump baseline SHA"]
+    NonTTY -->|theirs| Take["take shipped<br/>bump baseline SHA"]
 
     TTY -->|yes| Prompt{"k keep, t take, s sidecar, d re-diff<br/>a keep-all, T take-all (auto-apply rest)"}
     Prompt -->|k or a| Keep
@@ -182,7 +182,7 @@ flowchart TB
     Prompt -->|d| Conflict
 
     Iter -. orphan check .-> Orphan{"manifest entry no<br/>longer in catalog?"}
-    Orphan -->|yes| Flag["leave on disk<br/>flag (orphaned) in shipmates list<br/>NEVER auto-delete"]
+    Orphan -->|yes| Flag["leave on disk<br/>NEVER auto-delete<br/>(remove with shipmates remove)"]
 
     Iter -. NEVER touched .-> Mem[("memory/&lt;persona&gt;/<br/>SACRED, user's wisdom")]
 

@@ -1,5 +1,12 @@
 # Persona berths — per-persona working-tree isolation
 
+> **Superseded by implementation (August 2026).** The scoped version decided below **shipped
+> in v0.4.0**: berths are real code in `internal/berth`, opt-in per persona via `berth: auto|off|require`
+> frontmatter (or a `crew:` override in `shipmates.yaml`), with manifest-mutating commands
+> (`init`/`add`/`remove`/`update`) refusing to run from inside a berth. See the "Persona berths"
+> section of the README for current behavior. The analysis below is kept as the design record;
+> statements about what shipmates "ships today" describe the pre-implementation state.
+>
 > **Analysis + decision.** The analysis below (written first) weighed berths as a standalone
 > **filesystem-isolation** feature and recommended *deferring* them. A subsequent Admiral↔captain design
 > session **decided to build a scoped version** — not for isolation (the weak leg; see §"The honest value
@@ -17,12 +24,10 @@
 A **berth** is a per-persona git worktree — `.shipmates/berths/<persona>` — that a persona's Claude Code
 session runs *inside* (`cmd.Dir = berthPath`), instead of sharing the repo root with every other session.
 
-**Today, berths are a manual convention, not a feature.** Only the captain's berth exists, and it is
-set up by hand. **shipmates ships zero berth code** — a grep for `berth`/`worktree` across
-`internal/**/*.go` turns up only prose (a routing-flow description at `charters.go:51`, a config comment at
-`install.go:47`) and unrelated git-pointer parsing for repo-URL detection (`repourl.go:22,39`). No spawn
-site sets `cmd.Dir` to a persona directory; no code creates, reuses, or prunes a worktree. Building berths
-would make shipmates own its **first git-worktree lifecycle**.
+**At the time of this analysis, berths were a manual convention, not a feature** — only the captain's
+berth existed, set up by hand, and shipmates shipped no berth code. That is no longer true: since v0.4.0
+the berth lifecycle lives in `internal/berth` (creation, reuse, and the launch-time `cmd.Dir` wiring),
+making this shipmates' first owned git-worktree lifecycle — under the constraints enumerated below.
 
 ## The honest value proposition
 
