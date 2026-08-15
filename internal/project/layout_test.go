@@ -299,6 +299,7 @@ func TestResolveRemoteControlShapes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			isolateHome(t)
 			t.Chdir(t.TempDir())
 			writeAgent(t, "captain", tt.frontmatter)
 			cfg, err := ResolvePersonaConfig("captain")
@@ -329,9 +330,14 @@ func TestResolvePersonaConfigMalformedFrontmatter(t *testing.T) {
 	}
 }
 
+// A persona file inside the checkout may NOT make itself command-backed — see
+// TestRepoPersonaCannotNameACommand in personatrust_test.go for the security
+// case. Command backing resolves only from ~/.shipmates/personas.yaml.
 func TestResolvePersonaConfigCommandBackend(t *testing.T) {
+	isolateHome(t)
 	t.Chdir(t.TempDir())
-	writeAgent(t, "aider", "backend: command\ncommand:\n  - aider\n  - --model\n  - gpt\n")
+	writeUserPersonas(t, "personas:\n  aider:\n    backend: command\n    command: [aider, --model, gpt]\n")
+	writeAgent(t, "aider", "model: opus\n")
 	cfg, err := ResolvePersonaConfig("aider")
 	if err != nil {
 		t.Fatal(err)
@@ -350,24 +356,10 @@ func TestResolvePersonaConfigCommandBackend(t *testing.T) {
 	}
 }
 
-func TestResolvePersonaConfigCrewCommandOverride(t *testing.T) {
-	t.Chdir(t.TempDir())
-	writeAgent(t, "aider", "backend: command\ncommand:\n  - aider\n")
-	if err := os.WriteFile(ConfigName, []byte("crew:\n  aider:\n    command:\n      - opencode\n      - run\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := ResolvePersonaConfig("aider")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.Command) != 2 || cfg.Command[0] != "opencode" {
-		t.Fatalf("Command = %v, want the crew override", cfg.Command)
-	}
-}
-
 func TestResolvePersonaConfigEmptyOverridesDoNotClobber(t *testing.T) {
+	isolateHome(t)
 	t.Chdir(t.TempDir())
-	writeAgent(t, "captain", "model: opus\neffort: high\nberth: auto\ncwd: some/dir\nbackend: claude\npermissions:\n  mode: plan\n")
+	writeAgent(t, "captain", "model: opus\neffort: high\nberth: auto\npermissions:\n  mode: plan\n")
 	// A crew entry that mentions the persona but sets nothing must leave the
 	// frontmatter intact — empty strings are "unset", not "clear it".
 	if err := os.WriteFile(ConfigName, []byte("crew:\n  captain: {}\n"), 0o644); err != nil {
@@ -377,7 +369,7 @@ func TestResolvePersonaConfigEmptyOverridesDoNotClobber(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model != "opus" || cfg.Effort != "high" || cfg.Berth != "auto" || cfg.CWD != "some/dir" || cfg.Mode != "plan" || cfg.Backend != "claude" {
+	if cfg.Model != "opus" || cfg.Effort != "high" || cfg.Berth != "auto" || cfg.Mode != "plan" {
 		t.Fatalf("empty crew override clobbered frontmatter: %+v", cfg)
 	}
 }

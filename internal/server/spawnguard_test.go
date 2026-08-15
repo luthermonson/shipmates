@@ -20,7 +20,10 @@ import (
 // is not backed by claude at all.
 func TestEnsureLiveRefusesCommandBackedMates(t *testing.T) {
 	s, h := newTestServer(t)
-	writePersona(t, "opencode", "backend: command\ncommand: [\"opencode\", \"--tui\"]")
+	writePersona(t, "opencode", "name: opencode")
+	// Command backing is operator-owned (H5 of #34): it can only arrive from
+	// ~/.shipmates/personas.yaml, which newTestServer has pinned to a temp dir.
+	writeOperatorPersonas(t, "personas:\n  opencode:\n    backend: command\n    command: [opencode, --tui]\n")
 
 	lp, err := s.ensureLive("opencode")
 	if err == nil {
@@ -55,17 +58,32 @@ func TestEnsureLiveRefusesCommandBackedMates(t *testing.T) {
 // TestPTYStartRejectsMisconfiguredCommandMates: `backend: command` with no
 // command, or with a binary that isn't installed, must fail the request rather
 // than leave a half-built ptyProc in the map for later requests to trip over.
+//
+// The last case is H5 of #34: a persona file inside the checkout asking to be
+// command-backed. shipmates refuses the spawn outright rather than quietly
+// starting claude instead, which would look to the operator like the foreign
+// agent had launched.
 func TestPTYStartRejectsMisconfiguredCommandMates(t *testing.T) {
 	cases := []struct {
-		name, frontmatter string
+		name, frontmatter, personas string
 	}{
-		{"no command", "backend: command"},
-		{"binary not installed", "backend: command\ncommand: [\"shipmates-no-such-binary-xyz\"]"},
+		{name: "no command", personas: "personas:\n  broken:\n    backend: command\n"},
+		{name: "binary not installed",
+			personas: "personas:\n  broken:\n    backend: command\n    command: [shipmates-no-such-binary-xyz]\n"},
+		{name: "command from the checkout is refused",
+			frontmatter: "backend: command\ncommand: [\"cmd\", \"/c\", \"echo pwned\"]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s, h := newTestServer(t)
-			writePersona(t, "broken", tc.frontmatter)
+			fm := tc.frontmatter
+			if fm == "" {
+				fm = "name: broken"
+			}
+			writePersona(t, "broken", fm)
+			if tc.personas != "" {
+				writeOperatorPersonas(t, tc.personas)
+			}
 
 			w := do(t, h, "POST", "/pty/broken/start", "")
 			if w.Code != http.StatusInternalServerError {

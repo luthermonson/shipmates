@@ -113,6 +113,7 @@ func TestSessionName(t *testing.T) {
 }
 
 func TestResolvePersonaConfigMissing(t *testing.T) {
+	isolateHome(t)
 	t.Chdir(t.TempDir())
 	cfg, err := ResolvePersonaConfig("ghost")
 	if err != nil {
@@ -137,9 +138,10 @@ func writeAgent(t *testing.T, persona, frontmatter string) {
 }
 
 func TestResolvePersonaConfigFrontmatterOnly(t *testing.T) {
+	isolateHome(t)
 	t.Chdir(t.TempDir())
 	writeAgent(t, "captain",
-		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\neffort: high\n")
+		"permissions:\n  mode: acceptEdits\nremoteControl: true\nmodel: claude-opus-4-7\neffort: high\n")
 
 	cfg, err := ResolvePersonaConfig("captain")
 	if err != nil {
@@ -151,28 +153,28 @@ func TestResolvePersonaConfigFrontmatterOnly(t *testing.T) {
 	if cfg.RemoteControl != "captain" {
 		t.Errorf("RemoteControl = %q, want captain", cfg.RemoteControl)
 	}
-	if !cfg.DangerouslySkipPermissions {
-		t.Error("DangerouslySkipPermissions = false, want true")
-	}
 	if cfg.Model != "claude-opus-4-7" {
 		t.Errorf("Model = %q, want claude-opus-4-7", cfg.Model)
 	}
 	if cfg.Effort != "high" {
 		t.Errorf("Effort = %q, want high", cfg.Effort)
 	}
+	if len(cfg.Refused) != 0 {
+		t.Errorf("Refused = %v, want none for presentation-only frontmatter", cfg.Refused)
+	}
 }
 
 func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
+	isolateHome(t)
 	t.Chdir(t.TempDir())
 	writeAgent(t, "captain",
-		"permissions:\n  mode: acceptEdits\nremoteControl: true\ndangerouslySkipPermissions: true\nmodel: claude-opus-4-7\neffort: high\n")
+		"permissions:\n  mode: acceptEdits\nremoteControl: true\nmodel: claude-opus-4-7\neffort: high\n")
 
 	cfgYAML := "crew:\n" +
 		"  captain:\n" +
 		"    permissions:\n" +
 		"      mode: plan\n" +
 		"    remoteControl: custom-handle\n" +
-		"    dangerouslySkipPermissions: false\n" +
 		"    model: claude-haiku-4-5-20251001\n" +
 		"    effort: max\n"
 	if err := os.WriteFile(ConfigName, []byte(cfgYAML), 0o644); err != nil {
@@ -189,9 +191,6 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 	if got.RemoteControl != "custom-handle" {
 		t.Errorf("RemoteControl = %q, want custom-handle (override should win)", got.RemoteControl)
 	}
-	if got.DangerouslySkipPermissions {
-		t.Error("DangerouslySkipPermissions = true, want false (override should win)")
-	}
 	if got.Model != "claude-haiku-4-5-20251001" {
 		t.Errorf("Model = %q, want claude-haiku-4-5-20251001 (override should win)", got.Model)
 	}
@@ -201,9 +200,13 @@ func TestResolvePersonaConfigCrewOverrideWins(t *testing.T) {
 }
 
 func TestResolvePersonaConfigBerthFrontmatter(t *testing.T) {
+	isolateHome(t)
 	t.Chdir(t.TempDir())
-	writeAgent(t, "captain",
-		"berth: auto\ncwd: custom/dir\n")
+	// berth stays repo-supplied: it selects a shipmates-computed worktree path
+	// under .shipmates/berths/<persona>, it does not name one. cwd does name
+	// one, so it is operator-only.
+	writeAgent(t, "captain", "berth: auto\n")
+	writeUserPersonas(t, "personas:\n  captain:\n    cwd: custom/dir\n")
 
 	cfg, err := ResolvePersonaConfig("captain")
 	if err != nil {
@@ -218,12 +221,14 @@ func TestResolvePersonaConfigBerthFrontmatter(t *testing.T) {
 }
 
 func TestResolvePersonaConfigBerthCrewOverride(t *testing.T) {
+	isolateHome(t)
 	t.Chdir(t.TempDir())
 	writeAgent(t, "backend", "berth: off\n")
-	cfgYAML := "crew:\n  backend:\n    berth: require\n    cwd: /tmp/custom\n"
+	cfgYAML := "crew:\n  backend:\n    berth: require\n"
 	if err := os.WriteFile(ConfigName, []byte(cfgYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeUserPersonas(t, "personas:\n  backend:\n    cwd: /tmp/custom\n")
 
 	got, err := ResolvePersonaConfig("backend")
 	if err != nil {
@@ -233,7 +238,7 @@ func TestResolvePersonaConfigBerthCrewOverride(t *testing.T) {
 		t.Errorf("Berth = %q, want require (override should win)", got.Berth)
 	}
 	if got.CWD != "/tmp/custom" {
-		t.Errorf("CWD = %q, want /tmp/custom (override should win)", got.CWD)
+		t.Errorf("CWD = %q, want /tmp/custom (operator file should win)", got.CWD)
 	}
 }
 

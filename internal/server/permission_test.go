@@ -11,6 +11,7 @@ import (
 
 	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/permissions"
+	"github.com/luthermonson/shipmates/internal/project"
 )
 
 // waitPending blocks until the server has exactly one pending permission
@@ -503,23 +504,65 @@ func writePersona(t *testing.T, name, frontmatter string) {
 	}
 }
 
+// writeOperatorPersonas drops the operator's ~/.shipmates/personas.yaml. Only
+// meaningful after the home dir has been pinned (newTestServer does it, and so
+// does the pinHome call below), because that file is the only place execution
+// and permission-waiving config may come from.
+func writeOperatorPersonas(t *testing.T, body string) {
+	t.Helper()
+	path, ok := project.UserPersonasPath("")
+	if !ok {
+		t.Fatal("UserPersonasPath: no home")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pinHome points os.UserHomeDir at a scratch dir, for tests that don't build a
+// server (newTestServer does the same thing).
+func pinHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home) // Windows
+	t.Setenv("HOME", home)        // Unix
+}
+
+// H5 of #34: the permission waiver is the operator's to grant. A persona file
+// or shipmates.yaml arrives with `git clone`, so neither may make a mate
+// permissive — only ~/.shipmates/personas.yaml can.
 func TestPersonaPermissive(t *testing.T) {
 	cases := []struct {
 		name        string
 		frontmatter string
+		personas    string // ~/.shipmates/personas.yaml
 		want        bool
 	}{
-		{"plain persona", "name: x", false},
-		{"explicit default mode", "permissions:\n  mode: default", false},
-		{"acceptEdits is still gated", "permissions:\n  mode: acceptEdits", false},
-		{"bypassPermissions", "permissions:\n  mode: bypassPermissions", true},
-		{"dangerouslySkipPermissions", "dangerouslySkipPermissions: true", true},
-		{"dangerouslySkipPermissions false", "dangerouslySkipPermissions: false", false},
+		{name: "plain persona", frontmatter: "name: x", want: false},
+		{name: "explicit default mode", frontmatter: "permissions:\n  mode: default", want: false},
+		{name: "acceptEdits is still gated", frontmatter: "permissions:\n  mode: acceptEdits", want: false},
+		{name: "bypassPermissions from the checkout is refused",
+			frontmatter: "permissions:\n  mode: bypassPermissions", want: false},
+		{name: "dangerouslySkipPermissions from the checkout is refused",
+			frontmatter: "dangerouslySkipPermissions: true", want: false},
+		{name: "bypassPermissions from the operator", frontmatter: "name: x",
+			personas: "personas:\n  mate:\n    permissions: { mode: bypassPermissions }\n", want: true},
+		{name: "dangerouslySkipPermissions from the operator", frontmatter: "name: x",
+			personas: "personas:\n  mate:\n    dangerouslySkipPermissions: true\n", want: true},
+		{name: "dangerouslySkipPermissions false from the operator", frontmatter: "name: x",
+			personas: "personas:\n  mate:\n    dangerouslySkipPermissions: false\n", want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			pinHome(t)
 			t.Chdir(t.TempDir())
 			writePersona(t, "mate", tc.frontmatter)
+			if tc.personas != "" {
+				writeOperatorPersonas(t, tc.personas)
+			}
 			if got := personaPermissive("mate"); got != tc.want {
 				t.Fatalf("personaPermissive = %v, want %v", got, tc.want)
 			}
@@ -544,7 +587,10 @@ func TestPersonaPermissiveUnknownPersonaFailsClosed(t *testing.T) {
 // escapes everything" state.
 func TestBypassModeSkipsTheEvaluator(t *testing.T) {
 	s, _ := newTestServer(t)
-	writePersona(t, "cowboy", "dangerouslySkipPermissions: true")
+	// Bypass is the operator's grant now (H5 of #34), so it comes from the
+	// pinned home dir's personas.yaml rather than from the persona file.
+	writePersona(t, "cowboy", "name: cowboy")
+	writeOperatorPersonas(t, "personas:\n  cowboy:\n    dangerouslySkipPermissions: true\n")
 	s.perms = permissions.NewEvaluatorWithRules(rulesFromRaw(nil, nil, []string{"Bash(rm *)"}))
 	s.perms.SetFleetPolicy(&permissions.FleetPolicy{Deny: []string{"Bash(kubectl *)"}})
 
@@ -580,7 +626,8 @@ func TestBypassModeSkipsTheEvaluator(t *testing.T) {
 func TestBypassModeFleetDenyHoldsWithBrigDisabled(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.brigConf = brig.Settings{Enabled: false} // operator turned the brig off
-	writePersona(t, "cowboy", "dangerouslySkipPermissions: true")
+	writePersona(t, "cowboy", "name: cowboy")
+	writeOperatorPersonas(t, "personas:\n  cowboy:\n    dangerouslySkipPermissions: true\n")
 	s.perms = permissions.NewEvaluatorWithRules(rulesFromRaw(nil, nil, nil))
 	s.perms.SetFleetPolicy(&permissions.FleetPolicy{Deny: []string{"Bash(kubectl *)"}})
 

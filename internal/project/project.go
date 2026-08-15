@@ -248,20 +248,38 @@ func (o RoutingOptions) Resolved() (bylines, labels bool) {
 
 // CrewOverride is a crew-level override of a persona's frontmatter config, keyed
 // by persona name under shipmates.yaml's `crew:` map. A field only overrides
-// when it's set: a non-empty Mode, a present RemoteControl node, or a non-nil
-// DangerouslySkipPermissions wins over the persona's own frontmatter.
+// when it's set: a non-empty Mode or a present RemoteControl node wins over the
+// persona's own frontmatter.
+//
+// shipmates.yaml arrives with the checkout, so this is repo-supplied content
+// and carries only the presentation-shaped fields. It deliberately has NO
+// backend/command/cwd/dangerouslySkipPermissions field — see the trust-boundary
+// note in personatrust.go. Those live in ~/.shipmates/personas.yaml.
 type CrewOverride struct {
 	Permissions struct {
 		Mode string `yaml:"mode"`
 	} `yaml:"permissions"`
-	RemoteControl              yaml.Node `yaml:"remoteControl"`
-	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
-	Model                      string    `yaml:"model"`
-	Effort                     string    `yaml:"effort"`
-	Backend                    string    `yaml:"backend"`
-	Command                    []string  `yaml:"command"`
-	Berth                      string    `yaml:"berth"`
-	CWD                        string    `yaml:"cwd"`
+	RemoteControl yaml.Node `yaml:"remoteControl"`
+	Model         string    `yaml:"model"`
+	Effort        string    `yaml:"effort"`
+	Berth         string    `yaml:"berth"`
+
+	// Raw is the mapping node this override decoded from, kept so
+	// ResolvePersonaConfig can name the operator-only keys a checkout tried to
+	// set instead of dropping them silently. Not a config field.
+	Raw yaml.Node `yaml:"-"`
+}
+
+// UnmarshalYAML decodes the override and retains the source node for Raw.
+func (o *CrewOverride) UnmarshalYAML(node *yaml.Node) error {
+	type plain CrewOverride
+	var p plain
+	if err := node.Decode(&p); err != nil {
+		return err
+	}
+	*o = CrewOverride(p)
+	o.Raw = *node
+	return nil
 }
 
 // LoadConfig reads shipmates.yaml, returning a zero Config if it's absent.
@@ -323,11 +341,44 @@ type PersonaConfig struct {
 	// Resolved from frontmatter or crew override; see internal/berth.
 	Berth string
 
-	// CWD is an explicit cwd override for the persona (frontmatter/crew field).
-	// Empty means "no override" — the caller falls back to the berth path (if
-	// berth is on) or the repo root. Never enters Fingerprint(): changing cwd
-	// must NOT auto-fresh the session it means to preserve.
+	// CWD is an explicit cwd override for the persona. Operator-only
+	// (~/.shipmates/personas.yaml): it decides where a spawned process runs,
+	// so a checkout may not set it. Empty means "no override" — the caller
+	// falls back to the berth path (if berth is on) or the repo root. Never
+	// enters Fingerprint(): changing cwd must NOT auto-fresh the session it
+	// means to preserve.
 	CWD string
+
+	// Refused lists repo-supplied settings shipmates declined to honor,
+	// because the persona file or shipmates.yaml tried to set something only
+	// the operator's ~/.shipmates/personas.yaml may set. Callers surface it
+	// (ptyproc refuses to spawn rather than quietly launching something else);
+	// ResolvePersonaConfig has already logged each one. Never influences
+	// Fingerprint.
+	Refused []RepoRefusal
+}
+
+// RefusedCommandBacking reports whether the checkout tried to make this persona
+// spawn its own executable (backend:/command:). Callers must not silently fall
+// back to the default runtime in that case — the operator asked for a foreign
+// agent and needs to be told why they did not get one.
+func (c PersonaConfig) RefusedCommandBacking() bool {
+	for _, r := range c.Refused {
+		switch r.Key[strings.LastIndex(r.Key, ".")+1:] {
+		case "backend", "command":
+			return true
+		}
+	}
+	return false
+}
+
+// RefusedSummary renders the refusals as one human-readable line.
+func (c PersonaConfig) RefusedSummary() string {
+	parts := make([]string, 0, len(c.Refused))
+	for _, r := range c.Refused {
+		parts = append(parts, r.String())
+	}
+	return strings.Join(parts, "; ")
 }
 
 // CommandBacked reports whether the persona runs a foreign agent (PTY-only).
@@ -371,19 +422,26 @@ func (c PersonaConfig) LaunchFlags(permission bool) []string {
 // personaFrontmatter is the subset of a persona's YAML frontmatter that affects
 // how its session is launched. RemoteControl may be a bool or a string, so it's
 // captured as a yaml.Node and decoded on demand.
+//
+// The persona file arrives with the checkout, so this type is the repo-supplied
+// half of the persona trust boundary (see personatrust.go). It has NO field for
+// backend, command, cwd or dangerouslySkipPermissions, and that absence — not a
+// filter downstream — is what stops a cloned repository naming an executable or
+// waiving the permission gate. Do not add one. Permissions.Mode is bounded by
+// RepoPermissionModes at resolve time.
 type personaFrontmatter struct {
 	Permissions struct {
 		Mode string `yaml:"mode"`
 	} `yaml:"permissions"`
-	RemoteControl              yaml.Node `yaml:"remoteControl"`
-	DangerouslySkipPermissions *bool     `yaml:"dangerouslySkipPermissions"`
-	Model                      string    `yaml:"model"`
-	Effort                     string    `yaml:"effort"`
-	Backend                    string    `yaml:"backend"`
-	Command                    []string  `yaml:"command"`
-	Berth                      string    `yaml:"berth"`
-	CWD                        string    `yaml:"cwd"`
-	ShipmatesPersona           *bool     `yaml:"shipmatesPersona"`
+	RemoteControl    yaml.Node `yaml:"remoteControl"`
+	Model            string    `yaml:"model"`
+	Effort           string    `yaml:"effort"`
+	Berth            string    `yaml:"berth"`
+	ShipmatesPersona *bool     `yaml:"shipmatesPersona"`
+
+	// Raw is the frontmatter mapping node, kept so ResolvePersonaConfig can
+	// name the operator-only keys the file tried to set. Not a config field.
+	Raw yaml.Node `yaml:"-"`
 }
 
 // IsFleetPersonaFile reports whether a persona file is a shipmates fleet member
@@ -403,11 +461,23 @@ func IsFleetPersonaFile(path string) bool {
 }
 
 // ResolvePersonaConfig reads the installed persona's frontmatter, overlays any
-// crew-level override from shipmates.yaml, and resolves the result. A missing
-// persona file yields a zero PersonaConfig and nil error.
+// crew-level override from shipmates.yaml, and finally overlays the operator's
+// ~/.shipmates/personas.yaml entry. A missing persona file yields a zero
+// PersonaConfig and nil error.
+//
+// The layering IS the trust boundary. The first two layers arrive with the
+// checkout and can only reach presentation-shaped fields, because their structs
+// have no others. Anything that names an executable, chooses a working
+// directory or waives the permission gate comes from the operator's file alone,
+// which is applied last and therefore always wins. Keys the checkout tried to
+// set anyway are logged and returned in PersonaConfig.Refused rather than
+// silently dropped. See personatrust.go.
 func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 	var cfg PersonaConfig
 
+	// A persona with no file on disk resolves to nothing, unchanged: the
+	// operator's file configures personas the crew actually has, and an
+	// unresolvable persona must keep failing closed at the permission gate.
 	raw, err := os.ReadFile(AgentPath(persona))
 	if errors.Is(err, fs.ErrNotExist) {
 		return cfg, nil
@@ -416,30 +486,27 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 		return cfg, err
 	}
 
+	agentPath := AgentPath(persona)
 	fm, err := parsePersonaFrontmatter(raw)
 	if err != nil {
-		return cfg, fmt.Errorf("parse %s: %w", AgentPath(persona), err)
+		return cfg, fmt.Errorf("parse %s: %w", agentPath, err)
 	}
-
-	cfg.Mode = strings.TrimSpace(fm.Permissions.Mode)
+	cfg.Refused = append(cfg.Refused, scanRefusedKeys(&fm.Raw, agentPath, "")...)
+	cfg.Mode, cfg.Refused = repoMode(fm.Permissions.Mode, "", agentPath, "permissions.mode", cfg.Refused)
 	cfg.Model = strings.TrimSpace(fm.Model)
 	cfg.Effort = strings.TrimSpace(fm.Effort)
-	cfg.Backend = strings.TrimSpace(fm.Backend)
-	cfg.Command = fm.Command
 	cfg.Berth = strings.TrimSpace(fm.Berth)
-	cfg.CWD = strings.TrimSpace(fm.CWD)
 	rcNode := fm.RemoteControl
-	if fm.DangerouslySkipPermissions != nil {
-		cfg.DangerouslySkipPermissions = *fm.DangerouslySkipPermissions
-	}
 
 	conf, err := LoadConfig()
 	if err != nil {
 		return cfg, err
 	}
 	if ov, ok := conf.Crew[persona]; ok {
+		cfg.Refused = append(cfg.Refused, scanRefusedKeys(&ov.Raw, ConfigName, "crew."+persona+".")...)
 		if m := strings.TrimSpace(ov.Permissions.Mode); m != "" {
-			cfg.Mode = m
+			cfg.Mode, cfg.Refused = repoMode(m, cfg.Mode, ConfigName,
+				"crew."+persona+".permissions.mode", cfg.Refused)
 		}
 		if m := strings.TrimSpace(ov.Model); m != "" {
 			cfg.Model = m
@@ -447,28 +514,41 @@ func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 		if e := strings.TrimSpace(ov.Effort); e != "" {
 			cfg.Effort = e
 		}
-		if b := strings.TrimSpace(ov.Backend); b != "" {
-			cfg.Backend = b
-		}
-		if len(ov.Command) > 0 {
-			cfg.Command = ov.Command
-		}
 		if b := strings.TrimSpace(ov.Berth); b != "" {
 			cfg.Berth = b
-		}
-		if c := strings.TrimSpace(ov.CWD); c != "" {
-			cfg.CWD = c
 		}
 		if ov.RemoteControl.Kind != 0 {
 			rcNode = ov.RemoteControl
 		}
-		if ov.DangerouslySkipPermissions != nil {
-			cfg.DangerouslySkipPermissions = *ov.DangerouslySkipPermissions
-		}
 	}
 
+	// The operator's own file, last and therefore highest precedence. It is
+	// the only layer that may name an executable, set a cwd, or waive the
+	// permission gate.
+	users, err := LoadUserPersonas("")
+	if err != nil {
+		return cfg, err
+	}
+	if entry, ok := users.Personas[persona]; ok {
+		applyUserPersona(&cfg, &rcNode, entry)
+	}
+
+	warnRefusals(persona, cfg.Refused)
 	cfg.RemoteControl = resolveRemoteControl(rcNode, SessionName(persona))
 	return cfg, nil
+}
+
+// repoMode bounds a repo-supplied permissions.mode by RepoPermissionModes. A
+// mode outside the allowlist — bypassPermissions, or any mode invented after
+// this code was written — is dropped and recorded, never applied. keep is the
+// value to fall back to, so a refused crew override leaves the frontmatter's
+// (already-bounded) mode standing rather than clearing it.
+func repoMode(raw, keep, path, key string, refused []RepoRefusal) (string, []RepoRefusal) {
+	mode := strings.TrimSpace(raw)
+	if repoModeAllowed(mode) {
+		return mode, refused
+	}
+	return keep, append(refused, RepoRefusal{Path: path, Key: key, Value: mode})
 }
 
 // parsePersonaFrontmatter isolates the YAML frontmatter block and unmarshals the
@@ -486,7 +566,14 @@ func parsePersonaFrontmatter(raw []byte) (personaFrontmatter, error) {
 	if end < 0 {
 		return fm, nil
 	}
-	if err := yaml.Unmarshal([]byte(rest[:end]), &fm); err != nil {
+	block := []byte(rest[:end])
+	if err := yaml.Unmarshal(block, &fm); err != nil {
+		return fm, err
+	}
+	// Keep the raw mapping so the caller can name operator-only keys the file
+	// tried to set. The struct above structurally cannot hold them; this is
+	// only so the refusal is visible instead of silent.
+	if err := yaml.Unmarshal(block, &fm.Raw); err != nil {
 		return fm, err
 	}
 	return fm, nil
