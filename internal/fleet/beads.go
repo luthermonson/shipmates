@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/beadid"
 	"github.com/luthermonson/shipmates/internal/personaname"
 )
 
@@ -204,28 +205,12 @@ func (b *Server) dispatchSweepLoop(ctx context.Context) {
 	}
 }
 
-// beadIDOK mirrors the captain-side guard: prefix-hash ids only, so a path
-// segment can never smuggle request-line framing into the tunnel proxy, nor
-// walk out of the segment it was interpolated into. url.PathEscape leaves "."
-// alone, so "/bead/../update" would reach the ship as a traversal if the
-// alphabet check were the only guard — real ids are hashes and never contain
-// "..", so rejecting it costs nothing.
-func beadIDOK(id string) bool {
-	if id == "" || len(id) > 64 {
-		return false
-	}
-	if strings.Contains(id, "..") {
-		return false
-	}
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
-		default:
-			return false
-		}
-	}
-	return id[0] != '-'
-}
+// beadIDOK is the fleet's name for the one shared bead-id guard. The rule used
+// to live here as its own copy, and the ship had a second copy that drifted —
+// it still accepted ".." long after this one stopped (issue #42, M2). The rule
+// now lives in internal/beadid and both sides delegate; the local name is kept
+// so every call site (and the path-safety tests from PR #38) reads the same.
+func beadIDOK(id string) bool { return beadid.Valid(id) }
 
 // handleAggregateBeads fans /beads.json out to every connected captain and
 // returns the union deduped by bead id — ships syncing one shared graph
