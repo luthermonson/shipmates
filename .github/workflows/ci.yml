@@ -93,6 +93,16 @@ jobs:
           # The fleet's runners are ephemeral, so this is their only cache.
           cache: true
 
+      - name: Trust the workspace
+        # Inside the job image the build runs as root over a checkout owned by
+        # the runner's uid, so git refuses it as "dubious ownership" and
+        # `go build` fails at the VCS stamp with `error obtaining VCS status:
+        # exit status 128` — before compiling anything. Cheaper than dropping
+        # the stamp with -buildvcs=false, which would silently strip the commit
+        # from every binary this job produces.
+        if: matrix.container != ''
+        run: git config --global --add safe.directory "${{ github.workspace }}"
+
       - name: Toolchain
         # Records which Go actually ran, so a mismatch between the image tag
         # and go.mod is visible in the log rather than inferred from a failure.
@@ -126,6 +136,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Trust the workspace
+        # See the note on the same step in `test`: root-in-image over a
+        # runner-owned checkout trips git's dubious-ownership guard.
+        run: git config --global --add safe.directory "${{ github.workspace }}"
 
       - name: Toolchain
         run: |
