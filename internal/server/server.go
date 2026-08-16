@@ -25,6 +25,7 @@ import (
 	"github.com/luthermonson/shipmates/internal/berth"
 	"github.com/luthermonson/shipmates/internal/brig"
 	"github.com/luthermonson/shipmates/internal/permissions"
+	"github.com/luthermonson/shipmates/internal/personaname"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/luthermonson/shipmates/internal/streamjson"
 )
@@ -76,7 +77,7 @@ type pending struct {
 type Server struct {
 	port     int
 	mu       sync.Mutex
-	events   []Event
+	events   eventLog
 	live     map[string]*liveProc
 	ptys     map[string]*ptyProc
 	pendings map[string]*pending
@@ -178,7 +179,7 @@ func New() *Server {
 func (s *Server) addEvent(e Event) {
 	e.Time = time.Now().Format(time.RFC3339)
 	s.mu.Lock()
-	s.events = append(s.events, e)
+	s.events.Append(e)
 	s.lastActivity = time.Now()
 	if e.Persona != "" {
 		s.lastSeen[e.Persona] = time.Now()
@@ -370,8 +371,16 @@ func (s *Server) routes() *http.ServeMux {
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	var e Event
-	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-		http.Error(w, "bad event", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, maxJSONBody, &e, "bad event") {
+		return
+	}
+	// A persona also arrives in this body, not just in a path wildcard. It
+	// does not reach the filesystem here, but it keys s.lastSeen and shows up
+	// in /status.json as an addressable mate, so an anonymous poster does not
+	// get to invent one. Empty stays legal: ship-level events (attach:received)
+	// belong to no persona.
+	if e.Persona != "" && !personaname.Valid(e.Persona) {
+		http.Error(w, "invalid persona name", http.StatusBadRequest)
 		return
 	}
 	s.addEvent(e)
@@ -405,11 +414,17 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTell(w http.ResponseWriter, r *http.Request) {
-	persona := r.PathValue("persona")
+	persona, ok := pathPersona(w, r)
+	if !ok {
+		return
+	}
 	var body struct {
 		Message string `json:"message"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Message == "" {
+	if !decodeJSONBody(w, r, maxJSONBody, &body, "missing message") {
+		return
+	}
+	if body.Message == "" {
 		http.Error(w, "missing message", http.StatusBadRequest)
 		return
 	}
@@ -458,9 +473,20 @@ func (s *Server) handleTell(w http.ResponseWriter, r *http.Request) {
 // PostToolUse) are recorded and acknowledged immediately; PermissionRequest is
 // a blocking decision and is delegated to handlePermission.
 func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
-	persona := r.PathValue("persona")
+	persona, ok := pathPersona(w, r)
+	if !ok {
+		return
+	}
 	event := r.PathValue("event")
+	if !hookEventOK(event) {
+		http.Error(w, "invalid hook event", http.StatusBadRequest)
+		return
+	}
+	// The decode error is still ignored — a hook with an unparseable body is
+	// recorded as "(no tool_name)" rather than dropped, which is deliberate —
+	// but the body is bounded first.
 	var payload map[string]any
+	r.Body = http.MaxBytesReader(w, r.Body, maxHookBody)
 	_ = json.NewDecoder(r.Body).Decode(&payload)
 
 	text, _ := payload["tool_name"].(string)
@@ -757,8 +783,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		Behavior string `json:"behavior"`
 		Duration string `json:"duration,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, maxJSONBody, &body, "bad body") {
 		return
 	}
 	if body.Behavior != "allow" && body.Behavior != "deny" {
