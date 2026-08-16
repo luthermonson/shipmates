@@ -182,3 +182,107 @@ central fleet cannot read the file — it usually runs on another host — so th
 captain sends it up the tunnel it dialled, in the connect headers, and the
 fleet replays it on every request it proxies back down. The fleet keeps it in
 memory only: never in its store, never in an API response.
+
+## The fleet link: https, or nothing
+
+A ship's link to Fleet Command carries more than telemetry. Going up it are
+the fleet's shared secret (`Authorization: Bearer`), the ship's own per-run API
+token — handed over in the tunnel connect headers, because the fleet usually
+runs on another host and cannot read the token file — and operator commands
+that inject prompts into live agents. Coming down it is `/api/fleet-policy`,
+the Admiral's unconditional deny list: the one permission layer no ship-side
+rule, persona overlay or time-box can override.
+
+On plaintext both halves are lost. Anyone on the path reads the tokens, and a
+man in the middle can answer the policy fetch with `{"deny":[]}` and switch the
+fleet-wide floor off without a single log line saying so.
+
+**So plaintext to a non-loopback host is refused, not downgraded.** `http://`
+and `ws://` are accepted only when the host is loopback (`127.0.0.1`, `::1`,
+`localhost`) — local development, where the "network" is the machine itself.
+Anything else must be `https://` / `wss://`. The rule lives in
+`internal/fleeturl` and is applied in three places: the ship's tunnel dial
+(`internal/server/fleet.go`), the ship's policy fetch
+(`internal/server/fleet_policy.go`), and every `shipmates fleet` operator
+command (`--fleet` / `$SHIPMATES_FLEET_URL`). It is the same rule the openai
+runtime applies to `base_url` when an API key is present.
+
+**This breaks a fleet configured as `http://fleet.internal:8443`.** That is
+deliberate — that config was leaking the token on every request. Put TLS in
+front of the fleet and change the URL. There is no opt-out flag: the failure is
+loud at configuration time (`ERROR fleet disabled: unusable fleet url` on the
+ship, a refusal before the first request on the CLI) rather than a silent
+downgrade.
+
+## The fleet deny list survives a reboot
+
+The fleet policy used to live only in memory. A fetch failure kept the
+last-known policy — but a *restart* had no last-known policy to keep, so a ship
+that came up while Fleet Command was unreachable ran every mate with **no**
+fleet-wide deny list at all, and only retried every five minutes. A network
+outage silently switched off a security control.
+
+Now the last policy Fleet Command successfully handed down is persisted to
+`.shipmates/fleet-policy.json` (0600) and re-applied at boot *before* the first
+fetch, so the Admiral's floor is in force from the first tool call. Ordering:
+
+1. Boot: install the cached policy from disk, if any.
+2. Fetch. Success replaces the cache in memory and on disk.
+3. Failure keeps whatever is in force and logs a warning — and when nothing is
+   in force at all, logs at ERROR ("this ship is running WITHOUT the fleet-wide
+   deny list") and retries every 15s instead of every 5 minutes.
+
+A fetch that succeeds with an empty deny list is logged as a warning too: it is
+a legitimate Admiral choice and it is also what a man in the middle would send,
+so it should never pass unnoticed. The response is capped at 1 MiB and the
+cache stores what was parsed, not the bytes a remote sent.
+
+## Ship text is scrubbed before it reaches your terminal
+
+Feed lines, pending permission prompts, bead titles, captain keys, delegate
+output — everything the CLI prints from a ship is agent- or GitHub-derived, and
+it lands on a real terminal that will happily act on escape sequences. A feed
+line carrying `ESC [ 2 J` clears the operator's screen; an OSC 52 writes their
+clipboard; a bidi override can make a command in a pending-approval listing
+render as something harmless the operator is about to approve.
+
+The TUI already had this covered — agent bytes inside the pane are confined to
+a virtual grid by `internal/bridge/vt`, and everything the bridge draws around
+it goes through `bridge.Chrome`. The CLI did not. It does now: `shipmates
+feed`, `shipmates pending`, `shipmates fleet tail|pending|ls|status|beads|show|
+dispatch`, `shipmates fanout`, `shipmates drain`, and the error bodies the
+fleet returns are all sanitized on the way to stdout
+(`internal/commands/scrub.go`). Complete escape sequences are removed as a
+unit, 7-bit and 8-bit (C1) introducers alike, along with C0/C1 controls and
+Unicode format characters such as bidi overrides. Line structure is preserved
+so a feed still reads like a feed.
+
+## Keystroke logging
+
+`shipmates bridge` contains a keylogger. It is **off by default** and there is
+exactly one way to turn it on: set `SHIPMATES_BRIDGE_KEYLOG` to a file path
+before starting the bridge.
+
+    SHIPMATES_BRIDGE_KEYLOG=/tmp/keys.log shipmates bridge
+
+It exists to answer a question that cannot be answered without a real keyboard
+on a real console — what bubbletea reports for each key, and what the bridge
+encodes it as — and it is meant to be deleted once that question is settled
+(`internal/bridge/keylog.go`).
+
+- **What it captures.** One line per key event: the literal characters, their
+  code points, the key type, and the exact bytes sent to the mate's PTY.
+  Nothing is redacted or masked.
+- **So it captures secrets.** Anything typed *or pasted* into a mate's terminal
+  while it is on — an API key, a password, a token, the contents of a `.env` —
+  is in that file in cleartext.
+- **Where it lands.** Only the path you named. The file is created `0600`; on
+  Windows the mode buys nothing and access is decided by the directory's DACL,
+  so put it somewhere already owner-only.
+- **How to turn it off.** Unset `SHIPMATES_BRIDGE_KEYLOG` and restart the
+  bridge. Nothing is written when the variable is unset or empty — no file is
+  opened at all. The log already on disk is not cleaned up for you: delete it
+  when you are done, and read it before you paste any of it into an issue.
+
+There is deliberately no `shipmates.yaml` key and no CLI flag for this, so a
+checked-in config can never turn a keylogger on for somebody else's crew.

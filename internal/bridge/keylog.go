@@ -27,6 +27,29 @@ import (
 //
 // Delete this file once the question is answered.
 //
+// IT IS A KEYLOGGER. Read that plainly: while it is on, every keystroke the
+// operator types into a mate's terminal is written to a file in cleartext —
+// the literal characters, their code points, and the bytes sent to the PTY.
+// That includes anything pasted into a prompt: an API key, a password, a
+// token, the contents of a .env. Nothing is redacted, because a redacted log
+// could not answer the question the file exists to answer.
+//
+// Three things keep that honest:
+//
+//   - It is OFF unless the operator turns it on. No config file, no flag, no
+//     default path: the ONLY switch is the SHIPMATES_BRIDGE_KEYLOG environment
+//     variable naming a path. Unset or empty and no file is opened, no bytes
+//     are recorded, and record() returns on a nil receiver.
+//   - The file is created 0600, owner-only (see the note in
+//     project.WritePrivateFile about what that does and does not buy on
+//     Windows).
+//   - Turning it off is unsetting the variable and restarting the bridge. The
+//     file that was already written is not deleted — delete it yourself when
+//     the measurement is done, and do not paste it into an issue without
+//     reading it first.
+//
+// Documented for operators in docs/security.md, "Keystroke logging".
+//
 // Enable with:
 //
 //	SHIPMATES_BRIDGE_KEYLOG=/path/to/keys.log shipmates bridge
@@ -38,7 +61,9 @@ import (
 
 // keyLogEnv names the environment variable that turns the log on. Empty or unset
 // means no instrumentation at all — no file is opened and record() is a nil-method
-// call that returns immediately.
+// call that returns immediately. This is the only switch: there is deliberately
+// no shipmates.yaml key and no flag, so nobody can turn a keylogger on for
+// somebody else's crew by editing a file in a repo.
 const keyLogEnv = "SHIPMATES_BRIDGE_KEYLOG"
 
 // keyLog appends one line per key event to a file. A nil *keyLog is valid and
