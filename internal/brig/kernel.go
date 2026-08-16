@@ -93,6 +93,15 @@ var kernelEntries = []kernelEntry{
 		// deny lands on the bare interpreter subcommand — exactly the shape
 		// that only ever appears as the receiving end of a pipe in agent
 		// usage (an interactive bare shell would hang the session anyway).
+		//
+		// A directly typed `sh -c 'curl … | sh'` reaches the SAME rule rather
+		// than needing one of its own: the evaluator now judges an `sh -c`
+		// script (and a command-substitution body) as a command line, so the
+		// pipe inside it splits and the inner bare `sh` matches here. Adding
+		// `Bash(sh -c*)` was the other option and was rejected — a shell
+		// one-liner is ordinary work, and denying every one of them would
+		// make this Article mean "no shell scripting", which is not what it
+		// says and not what the incident basis supports.
 		deny: []string{
 			"Bash(sh)", "Bash(bash)", "Bash(zsh)",
 			"Bash(sh -s*)", "Bash(bash -s*)", "Bash(zsh -s*)",

@@ -189,7 +189,7 @@ var canonicalRules = []Rule{
 		Category:  CategoryConduct,
 		Layers:    []Layer{LayerKernel},
 		Source:    "industry: the archetypal supply-chain vector; every serious distro documents why not to do this",
-		Rationale: "Shell patterns that execute code fetched directly over the wire are denied: curl | sh, curl | bash, wget | sh, wget | bash, irm | iex, Invoke-Expression + Invoke-WebRequest. Download the artifact, hash it, inspect it, then run it. The evaluator splits compounds on the pipe, so the deny lands on the bare shell interpreter that would receive the stream.",
+		Rationale: "Shell patterns that execute code fetched directly over the wire are denied: curl | sh, curl | bash, wget | sh, wget | bash, irm | iex, Invoke-Expression + Invoke-WebRequest. Download the artifact, hash it, inspect it, then run it. The evaluator splits compounds on the pipe, so the deny lands on the bare shell interpreter that would receive the stream. The same deny reaches a pipe hidden one level down: the evaluator judges the body of a command substitution and the script of an `sh -c` as command lines in their own right, so `echo $(curl … | sh)` and `sh -c 'curl … | sh'` land on it too. `sh -c` itself is NOT denied — running a shell one-liner is ordinary work, and denying it outright would turn this Article into 'no shell scripting'.",
 	},
 	{
 		Number:    11,
@@ -234,6 +234,6 @@ var canonicalRules = []Rule{
 		Category:  CategoryConduct,
 		Layers:    []Layer{LayerKernel},
 		Source:    "incident: personas 'helpfully' adding SSH config entries or touching global git config while working inside a project",
-		Rationale: "Writes to the high-value locations outside the project are refused: /etc/**, .ssh/**, .aws/**, .gnupg/**. The persona works in the ship — the project directory — and nowhere else. (The evaluator's pattern language cannot express 'anything outside the project root'; these are the representative targets.)",
+		Rationale: "Writes to the high-value locations outside the project are refused: /etc/**, .ssh/**, .aws/**, .gnupg/**. The persona works in the ship — the project directory — and nowhere else. Paths are cleaned and resolved against the project root before matching, so `/tmp/../etc/cron.d/x` and a relative walk out of the ship are the same file as far as this Article is concerned. (The evaluator's pattern language cannot express 'anything outside the project root'; these are the representative targets.)",
 	},
 }
