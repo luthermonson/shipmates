@@ -69,11 +69,34 @@ const defaultMaxFrameBytes = 8 * 1024 * 1024
 // output is always at the end.
 const stderrTailBytes = 16 * 1024
 
-// stderrDrainGrace bounds the wait for the stderr reader to finish before a
-// terminal event is published. cmd.Wait closes the pipe on process exit, so
-// the reader returns immediately; the bound only exists so a stuck reader can
-// never delay teardown.
-const stderrDrainGrace = 2 * time.Second
+// readerDrainGrace bounds how long a dead child's stdout/stderr pipe read ends
+// stay open before they are force-closed.
+//
+// The pipes are ours (os.Pipe, wired onto cmd.Stdout/cmd.Stderr) rather than
+// cmd.StdoutPipe/cmd.StderrPipe on purpose. os/exec closes the pipes IT created
+// the instant Wait reaps the child — "it is incorrect to call Wait before all
+// reads from the pipe have completed", and the supervisor calls Wait on its own
+// goroutine, concurrently with both readers. Losing that race discarded
+// whatever was still buffered, which showed up two ways: the stderr tail came
+// out empty, so a terminal event reported a bare exit code instead of "Invalid
+// API key · Please run /login"; or the stdout scanner was aborted mid-read, so
+// the terminal event was published through the framing-failure path as a
+// *string* instead of a Terminal. Owning the pipes means only this package ever
+// closes them, and it does so only once the readers are finished.
+//
+// The cost of owning them is that EOF now needs every writer gone, and a
+// descendant that inherited the child's stdout can hold one open past the
+// child's own death. This grace bounds that case and nothing else: once the
+// process is reaped, draining what it already wrote takes microseconds, so
+// reaching this deadline means somebody else still holds the descriptor.
+const readerDrainGrace = 10 * time.Second
+
+// stderrDrainBackstop bounds readLoop's wait for the stderr tail before it
+// publishes a terminal event. It is a deadlock guard, not a policy: reapPipes
+// closes the read end after readerDrainGrace, which ends the copy, so the only
+// way to reach this is a proc that has no reaper (readLoop driven directly by a
+// test). It must stay comfortably larger than readerDrainGrace.
+const stderrDrainBackstop = readerDrainGrace + 5*time.Second
 
 // Runtime is the claude-backed runtime.Runtime. Zero value is not usable;
 // call New.
@@ -612,35 +635,47 @@ func (r *Runtime) spawn(ctx context.Context, s *session) (*proc, error) {
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	// Claude Code reports auth failures ("Invalid API key · Please run
-	// /login"), config errors and crash detail on stderr. Left unwired it goes
+	// Both output pipes are opened here rather than through
+	// cmd.StdoutPipe/cmd.StderrPipe so that os/exec's Wait cannot close them out
+	// from under a reader that is still draining — see readerDrainGrace for the
+	// two bugs that caused. reapPipes closes them instead, once the readers are
+	// done. Claude Code reports auth failures ("Invalid API key · Please run
+	// /login"), config errors and crash detail on stderr; left unwired it goes
 	// to the void and every one of those failures looks like a generic timeout.
-	// StderrPipe rather than an io.Writer on purpose: cmd.Wait closes the pipe
-	// once the process exits instead of waiting for the copy to finish, so a
-	// grandchild holding the descriptor open can never block the reap — and the
-	// tail reader below drains continuously, so a chatty child never blocks on
-	// a full pipe either.
-	stderr, err := cmd.StderrPipe()
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		closeFiles(stdoutR, stdoutW)
+		return nil, err
+	}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 	// Route the spawn through the supervisor so RSS/CPU can be bounded and the
 	// tree torn down.
 	handle, err := r.supervise.Start(cmd)
 	if err != nil {
-		_ = stderr.Close()
+		closeFiles(stdoutR, stdoutW, stderrR, stderrW)
 		return nil, err
 	}
-	p := &proc{handle: handle, stdin: stdin, stderr: newStderrTail(stderrTailBytes), stderrDone: make(chan struct{})}
+	// The child holds its own duplicates of the write ends now; ours have to go
+	// or the read ends would never reach EOF.
+	closeFiles(stdoutW, stderrW)
+	p := newProc(handle, stdin, stdoutR, stderrR)
 	go func() {
 		defer close(p.stderrDone)
-		// Errors here are expected: cmd.Wait closes the read end on exit.
-		_, _ = io.Copy(p.stderr, stderr)
+		// The read end is ours, so this copy ends at a clean EOF once the child
+		// (and anything that inherited its stderr) is gone: every byte the child
+		// wrote is in the tail before the terminal event is published. The tail
+		// is a bounded ring whose Write never blocks, so a chatty child can
+		// never wedge on a full pipe either.
+		_, _ = io.Copy(p.stderr, stderrR)
 	}()
+	// The reaper is what eventually closes the read ends. Started before the
+	// closed-runtime check below so no path can leak the descriptors.
+	go r.reapPipes(p)
 
 	r.sessMu.Lock()
 	if r.closed {
@@ -661,9 +696,59 @@ func (r *Runtime) spawn(ctx context.Context, s *session) (*proc, error) {
 
 	go func() {
 		defer r.fanWG.Done()
-		r.readLoop(s, p, stdout)
+		r.readLoop(s, p, stdoutR)
 	}()
 	return p, nil
+}
+
+// closeFiles closes every non-nil file, ignoring errors. Used on the spawn
+// error paths, where a half-wired set of pipes has to go back.
+func closeFiles(files ...*os.File) {
+	for _, f := range files {
+		if f != nil {
+			_ = f.Close()
+		}
+	}
+}
+
+// reapPipes closes the child's pipe read ends — but never while a reader could
+// still be mid-stream. That ordering IS the fix for the teardown race: os/exec
+// used to own these pipes and closed them the instant it reaped the child,
+// which either discarded unread stderr (a terminal event with no reason) or
+// aborted the stdout scanner mid-read (a terminal event whose payload changed
+// from Terminal to string). Nothing closes them here until both readers have
+// finished, the drain backstop has expired on an already-dead process, or the
+// runtime is shutting down.
+func (r *Runtime) reapPipes(p *proc) {
+	select {
+	case <-p.termDone:
+		// The process is gone. Anything still holding a write end is a
+		// descendant that inherited it, not the child, so bound the wait.
+		t := time.NewTimer(readerDrainGrace)
+		defer t.Stop()
+		waitClosed(p.stdoutDone, t.C, r.stopFan)
+		waitClosed(p.stderrDone, t.C, r.stopFan)
+	case <-r.stopFan:
+		// Explicit shutdown: Close must not sit through a drain window.
+	}
+	p.closePipes()
+}
+
+// waitClosed blocks until c is closed, reporting whether it actually was.
+// Expiring the deadline or aborting both mean "stop waiting", never "the wait
+// succeeded" — the difference is what lets a caller say "no stderr" instead of
+// silently implying the child said nothing.
+func waitClosed(c <-chan struct{}, deadline <-chan time.Time, abort <-chan struct{}) bool {
+	if c == nil {
+		return false
+	}
+	select {
+	case <-c:
+		return true
+	case <-deadline:
+	case <-abort:
+	}
+	return false
 }
 
 // readLoop streams the session process's JSONL frames into r.stream for
@@ -673,6 +758,10 @@ func (r *Runtime) spawn(ctx context.Context, s *session) (*proc, error) {
 // KindError so consumers learn WHY the turn ended (memory kill, requested
 // close, crash) rather than only that it did.
 func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
+	// Whatever ends this goroutine, the stdout reader is finished with the pipe
+	// once it returns; reapPipes must not have to sit out the whole drain grace
+	// on the early-return paths below.
+	defer p.stdoutFinished()
 	scanner := bufio.NewScanner(stdout)
 	max := r.maxFrameBytes
 	if max <= 0 {
@@ -721,6 +810,19 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 	// which in turn hung Close on fanWG.Wait forever. Report the real cause and
 	// tear the desynced process down.
 	scanErr := scanner.Err()
+	p.stdoutFinished()
+	if isPipeClosed(scanErr) {
+		// ...but a read that failed because the PIPE went away is teardown, not
+		// a malformed stream: the descriptor is closed by reapPipes once the
+		// child is reaped (and, before this package owned the pipes, by
+		// os/exec's Wait, mid-frame). Reporting that as a framing failure made
+		// the terminal event's payload type depend on which reader finished
+		// first — a consumer type-switching on it silently took another branch —
+		// so a closed pipe classifies as EOF, exactly like a clean exit. A
+		// genuinely malformed stream still arrives as ErrTooLong or a real I/O
+		// fault and is still reported below.
+		scanErr = nil
+	}
 	if scanErr != nil {
 		r.sessMu.Lock()
 		turnID := s.turnID
@@ -744,16 +846,21 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 	var ev Terminal
 	ok := false
 	select {
-	case ev, ok = <-p.handle.Done():
+	case <-p.termDone:
+		ev, ok = p.terminal()
 	case <-r.stopFan:
 	}
-	if ok && p.stderrDone != nil {
-		// Give the stderr drain the moment it needs to finish so the terminal
-		// event carries the child's last words.
-		select {
-		case <-p.stderrDone:
-		case <-time.After(stderrDrainGrace):
-		}
+	drained := true
+	if ok {
+		// Wait for the stderr reader to finish, unconditionally. The pipe read
+		// end belongs to this package and reapPipes closes it only after this
+		// same drain window, so the copy is guaranteed to end and the child's
+		// last words are guaranteed to be in the tail. The backstop below is a
+		// deadlock guard, not a budget: the 2s budget it replaces is what let a
+		// terminal event go out reporting a bare exit code.
+		t := time.NewTimer(stderrDrainBackstop)
+		drained = waitClosed(p.stderrDone, t.C, r.stopFan)
+		t.Stop()
 	}
 	r.sessMu.Lock()
 	if s.proc == p {
@@ -776,13 +883,14 @@ func (r *Runtime) readLoop(s *session, p *proc, stdout io.Reader) {
 	}
 
 	kind := runtime.KindSessionClosed
+	tail := stderrDiagnosis(p.lastStderr(), drained)
 	var payload any = ev
 	if !ok {
-		payload = withStderr("handle closed without terminal event", p.lastStderr())
+		payload = withStderr("handle closed without terminal event", tail)
 	} else {
 		// Terminal.Detail is the diagnosis slot: an exit code alone never
 		// explains WHY claude refused to run.
-		ev.Detail = withStderr(ev.Detail, p.lastStderr())
+		ev.Detail = withStderr(ev.Detail, tail)
 		payload = ev
 	}
 	if active {
@@ -809,6 +917,31 @@ func (r *Runtime) publish(ev runtime.Event) bool {
 	case r.stream <- ev:
 		return true
 	}
+}
+
+// isPipeClosed reports whether a read failed because the descriptor went away
+// rather than because the stream was malformed. os/exec's Wait and reapPipes
+// both surface as *fs.PathError{Err: os.ErrClosed} ("read |0: file already
+// closed"); an io.Pipe surfaces as io.ErrClosedPipe.
+func isPipeClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
+}
+
+// stderrDiagnosis describes what was collected from the child's stderr. An
+// operator has to be able to tell "the child said nothing" from "we never
+// finished collecting what it said" — the two used to be spelled identically,
+// which is how a dropped tail read as a silent child.
+func stderrDiagnosis(tail string, drained bool) string {
+	if drained {
+		return tail
+	}
+	if tail == "" {
+		return "stderr not collected: the pipe was still open at teardown"
+	}
+	return tail + " (stderr may be incomplete: the pipe was still open at teardown)"
 }
 
 // withStderr appends a captured stderr tail to a diagnostic string.
@@ -909,21 +1042,87 @@ func (s *session) workingDir() string {
 	return s.projectDir
 }
 
-// proc bundles a session's persistent claude process: the supervisor handle
-// and the stream-json stdin.
+// proc bundles a session's persistent claude process: the supervisor handle,
+// the stream-json stdin, and the two output pipes this package owns.
 type proc struct {
 	handle Handle
 	stdin  io.WriteCloser
+	// stdoutPipe and stderrPipe are the read ends of the child's output pipes.
+	// They belong to this package rather than to os/exec (see
+	// readerDrainGrace), so nothing can close them while a reader is
+	// mid-stream; reapPipes closes them. nil in tests that drive readLoop over
+	// a plain io.Reader.
+	stdoutPipe, stderrPipe *os.File
 	// stderr retains the tail of the child's stderr so a failure that only
 	// shows up there (auth, config, crash detail) reaches the operator instead
 	// of looking like a generic timeout.
 	stderr *stderrTail
-	// stderrDone closes when the stderr reader has drained the pipe.
+	// stdoutDone closes when readLoop has finished with the stdout pipe,
+	// stderrDone when the stderr copy has finished with its own. reapPipes
+	// waits for both before closing either.
+	stdoutDone chan struct{}
 	stderrDone chan struct{}
+	stdoutOnce sync.Once
+	// termDone closes once the supervisor's terminal event has been consumed;
+	// term/termOK hold it. Handle.Done delivers that event exactly once, so a
+	// single consumer reads it and republishes it here — readLoop and
+	// reapPipes both need to know the process died, and neither may steal it
+	// from the other.
+	termDone chan struct{}
+	termMu   sync.Mutex
+	term     Terminal
+	termOK   bool
+	pipeOnce sync.Once
 	// writeMu serializes stdin writers (SendTurn vs SteerTurn vs
 	// InterruptTurn) so JSONL lines never interleave.
 	writeMu   sync.Mutex
 	stdinDone bool
+}
+
+// newProc wires a started session process and begins consuming the handle's
+// single terminal event. stdout/stderr are the read ends of the child's output
+// pipes and may be nil in tests.
+func newProc(handle Handle, stdin io.WriteCloser, stdout, stderr *os.File) *proc {
+	p := &proc{
+		handle:     handle,
+		stdin:      stdin,
+		stdoutPipe: stdout,
+		stderrPipe: stderr,
+		stderr:     newStderrTail(stderrTailBytes),
+		stdoutDone: make(chan struct{}),
+		stderrDone: make(chan struct{}),
+		termDone:   make(chan struct{}),
+	}
+	go func() {
+		defer close(p.termDone)
+		ev, ok := <-handle.Done()
+		p.termMu.Lock()
+		p.term, p.termOK = ev, ok
+		p.termMu.Unlock()
+	}()
+	return p
+}
+
+// terminal returns the supervisor's terminal event. Only valid once termDone
+// is closed; ok is false when the handle closed without reporting one.
+func (p *proc) terminal() (Terminal, bool) {
+	p.termMu.Lock()
+	defer p.termMu.Unlock()
+	return p.term, p.termOK
+}
+
+// stdoutFinished records that no reader is touching the stdout pipe any more.
+func (p *proc) stdoutFinished() {
+	if p == nil || p.stdoutDone == nil {
+		return
+	}
+	p.stdoutOnce.Do(func() { close(p.stdoutDone) })
+}
+
+// closePipes releases the child's pipe read ends. Only reapPipes calls it, and
+// only once no reader can still be draining them.
+func (p *proc) closePipes() {
+	p.pipeOnce.Do(func() { closeFiles(p.stdoutPipe, p.stderrPipe) })
 }
 
 // lastStderr returns the child's retained stderr, or "" when nothing was

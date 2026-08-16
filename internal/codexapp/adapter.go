@@ -344,14 +344,28 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 	if err != nil {
 		return nil, Capabilities{}, failure(Internal)
 	}
-	stdout, err := cmd.StdoutPipe()
+	// The stdout pipe is opened here rather than through cmd.StdoutPipe. os/exec
+	// closes the pipes IT created the instant Wait reaps the child — "it is
+	// incorrect to call Wait before all reads from the pipe have completed" —
+	// and the reaper below runs concurrently with the read loop. Losing that
+	// race discarded frames the child had ALREADY written: a malformed frame
+	// that never reached json.Unmarshal came back as unexpected_eof instead,
+	// so the fault the adapter reported depended on scheduling rather than on
+	// what the backend said. Owning the pipe means only a.wait closes it, and
+	// only once the read loop is finished with it.
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		return nil, Capabilities{}, failure(Internal)
 	}
+	// stderr is discarded rather than parsed, so it has nothing to lose to that
+	// race, and StderrPipe keeps its own advantage: Wait closes it, so a
+	// descendant that inherited the descriptor can never delay the reap.
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		closeFiles(stdoutR, stdoutW)
 		return nil, Capabilities{}, failure(Internal)
 	}
+	cmd.Stdout = stdoutW
 	// The spawn goes through the supervisor when there is one, so the child is
 	// inside its containment (process group / Job Object, and the operator's
 	// RSS and CPU limits) from the moment it runs any code.
@@ -359,11 +373,16 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 	if opts.Supervisor != nil {
 		handle, err = opts.Supervisor.Start(cmd)
 		if err != nil {
+			closeFiles(stdoutR, stdoutW)
 			return nil, Capabilities{}, failure(Internal)
 		}
 	} else if err := cmd.Start(); err != nil {
+		closeFiles(stdoutR, stdoutW)
 		return nil, Capabilities{}, failure(Internal)
 	}
+	// The child holds its own duplicate of the write end now; ours has to go or
+	// the read end would never reach EOF.
+	closeFiles(stdoutW)
 	// A failure here is fatal on purpose: without a stable process identity
 	// the adapter cannot promise it will ever kill the right process. That
 	// makes openProcessIdentity load-bearing on every platform — see
@@ -378,9 +397,10 @@ func (Factory) Start(ctx context.Context, opts StartOptions) (*Adapter, Capabili
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
 		}
+		closeFiles(stdoutR)
 		return nil, Capabilities{}, failure(Internal)
 	}
-	a := &Adapter{cmd: cmd, pidfd: pidfd, handle: handle, stdin: stdin, stdout: stdout, nextID: 1, pending: make(map[int64]pendingCall), done: make(chan struct{}), waitDone: make(chan struct{}), shutdown: opts.ShutdownTimeout, maxFrame: opts.MaxFrameBytes, events: make(chan Event, 256), approvals: make(map[string]pendingApproval)}
+	a := &Adapter{cmd: cmd, pidfd: pidfd, handle: handle, stdin: stdin, stdout: stdoutR, nextID: 1, pending: make(map[int64]pendingCall), done: make(chan struct{}), waitDone: make(chan struct{}), shutdown: opts.ShutdownTimeout, maxFrame: opts.MaxFrameBytes, events: make(chan Event, 256), approvals: make(map[string]pendingApproval)}
 	go drainBounded(stderr, opts.MaxStderrBytes)
 	go a.wait()
 	go a.readLoop()
@@ -558,13 +578,34 @@ func (a *Adapter) superviseError() error {
 	return a.superviseErr
 }
 
-// wait reaps the child and closes waitDone.
+// readerDrainGrace bounds how long the reaped child's stdout pipe stays open
+// waiting for the read loop to finish with it. Once the process is gone,
+// everything it wrote is already in the pipe and draining it takes
+// microseconds; reaching this deadline means a descendant inherited the write
+// end and is keeping the read end from ever seeing EOF, which must not strand
+// the reaper's goroutine or leak the descriptor forever.
+const readerDrainGrace = 10 * time.Second
+
+// closeFiles closes every non-nil file, ignoring errors.
+func closeFiles(files ...*os.File) {
+	for _, f := range files {
+		if f != nil {
+			_ = f.Close()
+		}
+	}
+}
+
+// wait reaps the child, closes waitDone, and finally releases the stdout pipe.
 //
 // Which reap depends on who owns the process: a Supervisor calls cmd.Wait
 // itself and publishes the terminal event on Done(), so calling cmd.Wait here
-// too would be a double-wait. Either way os/exec closes the parent ends of the
-// pipes when the wait returns, which is what readLoop's os.ErrClosed handling
-// depends on.
+// too would be a double-wait.
+//
+// The pipe is closed LAST, and only after the read loop has finished with it.
+// This adapter owns that descriptor precisely so the reap cannot yank it — see
+// the os.Pipe call in Factory.Start — because closing it under a blocked read
+// discards frames the child had already written and turns whatever the backend
+// actually said into unexpected_eof.
 func (a *Adapter) wait() {
 	if a.handle != nil {
 		<-a.handle.Done()
@@ -575,6 +616,13 @@ func (a *Adapter) wait() {
 		_ = closeProcessIdentity(a.pidfd)
 	}
 	close(a.waitDone)
+	t := time.NewTimer(readerDrainGrace)
+	defer t.Stop()
+	select {
+	case <-a.done:
+	case <-t.C:
+	}
+	_ = a.stdout.Close()
 }
 
 func (a *Adapter) readLoop() {
@@ -594,12 +642,13 @@ func (a *Adapter) readLoop() {
 			closing := a.closing
 			a.mu.Unlock()
 			if !closing {
-				// A child that stops talking is observed through two independent
-				// events: stdout reaching EOF, and the reaper's cmd.Wait returning,
-				// which makes os/exec close the parent end of this pipe. Whichever
-				// wins the race, the meaning is identical, so a closed pipe must
-				// classify as EOF and never as a frame fault. Only the adapter ever
-				// closes this descriptor, so os.ErrClosed cannot come from the child.
+				// A child that stops talking reaches this loop as EOF: the pipe is
+				// the adapter's own, so nothing closes it out from under this read
+				// and every byte the child wrote has already been delivered.
+				// os.ErrClosed is still accepted as the same thing because a.wait
+				// force-closes the descriptor when a descendant holds it open past
+				// the drain grace; it can never come from the child, and it is not
+				// a frame fault either way.
 				if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
 					a.fail(failure(UnexpectedEOF))
 				} else {

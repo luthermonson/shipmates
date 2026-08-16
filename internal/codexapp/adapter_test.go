@@ -113,6 +113,16 @@ func TestFakeAppServerProcess(t *testing.T) {
 		fmt.Println(`{"id":`)
 		select {}
 	}
+	// Same malformed frame, but the child is unambiguously gone the moment
+	// after it writes: the reaper is guaranteed to run against a live read
+	// loop. That is the ordering that used to lose the frame — os/exec closed
+	// the parent end of stdout as soon as Wait returned, so a frame the child
+	// had already written was discarded and the adapter blamed an unexpected
+	// EOF for a fault it had been told about.
+	if scenario == "malformed-exit" {
+		fmt.Println(`{"id":`)
+		os.Exit(0)
+	}
 	if scenario == "oversized" {
 		fmt.Println(`{"method":"` + strings.Repeat("x", 4096) + `"}`)
 		select {}
@@ -225,7 +235,7 @@ func TestStartupRefusalsAreSanitizedAndReaped(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		code Code
-	}{{"old-version", UnsupportedVersion}, {"missing-capability", UnsupportedCapability}, {"malformed", MalformedFrame}, {"oversized", MalformedFrame}, {"eof", UnexpectedEOF}, {"unknown-request", ProtocolViolation}, {"timeout", StartupTimeout}} {
+	}{{"old-version", UnsupportedVersion}, {"missing-capability", UnsupportedCapability}, {"malformed", MalformedFrame}, {"malformed-exit", MalformedFrame}, {"oversized", MalformedFrame}, {"eof", UnexpectedEOF}, {"unknown-request", ProtocolViolation}, {"timeout", StartupTimeout}} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := fakeOptions(t, tc.name)
 			if tc.name == "timeout" {
@@ -239,6 +249,60 @@ func TestStartupRefusalsAreSanitizedAndReaped(t *testing.T) {
 				t.Fatalf("secret leaked: %v", err)
 			}
 		})
+	}
+}
+
+// reapedHandle is a Handle whose process has already exited.
+type reapedHandle struct{ done chan Terminal }
+
+func newReapedHandle() *reapedHandle {
+	d := make(chan Terminal, 1)
+	d <- Terminal{Reason: "exited", ExitCode: 0, At: time.Now()}
+	close(d)
+	return &reapedHandle{done: d}
+}
+
+func (h *reapedHandle) Pid() int                    { return 0 }
+func (h *reapedHandle) Done() <-chan Terminal       { return h.done }
+func (h *reapedHandle) Close(context.Context) error { return nil }
+
+// TestReapDoesNotDiscardFramesTheChildAlreadyWrote pins the ordering that owning
+// the stdout pipe exists to guarantee: the reaper may not invalidate the
+// descriptor while the read loop still has frames to take off it.
+//
+// The scheduling is forced rather than hoped for — the frame is in the pipe, the
+// reap completes, and only then does the read loop start — because the CI
+// failure this reproduces (TestStartupRefusalsAreSanitizedAndReaped/malformed
+// reporting unexpected_eof) was exactly this order winning on a contended
+// runner. With cmd.StdoutPipe the reap closed the parent end and the frame the
+// child had already written was gone.
+func TestReapDoesNotDiscardFramesTheChildAlreadyWrote(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+	a := &Adapter{
+		handle:    newReapedHandle(),
+		stdout:    r,
+		maxFrame:  1024,
+		shutdown:  time.Second,
+		done:      make(chan struct{}),
+		waitDone:  make(chan struct{}),
+		pending:   map[int64]pendingCall{},
+		events:    make(chan Event, 4),
+		approvals: map[string]pendingApproval{},
+	}
+	// The child's last frame reaches the pipe before anything reaps it.
+	if _, err := w.Write([]byte("{\"id\":\n")); err != nil {
+		t.Fatal(err)
+	}
+	go a.wait()
+	<-a.waitDone    // the reap has completed...
+	go a.readLoop() // ...and only now does the read loop touch the pipe.
+	<-a.done
+	if code := ErrorCode(a.terminal); code != MalformedFrame {
+		t.Fatalf("error = %v, want malformed_frame: the reap discarded a frame the child had already written", code)
 	}
 }
 

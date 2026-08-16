@@ -1,8 +1,12 @@
 package claude
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -77,20 +81,21 @@ type nopWriteCloser struct{}
 func (nopWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (nopWriteCloser) Close() error                { return nil }
 
-// fakeProc builds a proc whose handle has already reported a clean exit, so
-// readLoop's post-scan teardown never blocks.
-func fakeProc() *proc {
+// fakeProc builds a proc whose handle has already reported the given terminal
+// event and whose stderr is already drained, so readLoop's post-scan teardown
+// never blocks. There is no reaper behind it: nothing owns real pipes.
+func fakeProc(ev Terminal) *proc {
 	done := make(chan Terminal, 1)
-	done <- Terminal{Reason: ReasonExited, ExitCode: 0, At: time.Now()}
+	done <- ev
 	close(done)
-	drained := make(chan struct{})
-	close(drained)
-	return &proc{
-		handle:     NewHandle(0, done, nil),
-		stdin:      nopWriteCloser{},
-		stderr:     newStderrTail(64),
-		stderrDone: drained,
-	}
+	p := newProc(NewHandle(0, done, nil), nopWriteCloser{}, nil, nil)
+	close(p.stderrDone)
+	return p
+}
+
+// exitedProc is the common case: a child that exited cleanly.
+func exitedProc() *proc {
+	return fakeProc(Terminal{Reason: ReasonExited, ExitCode: 0, At: time.Now()})
 }
 
 // TestReadLoopClampsScannerStartBufferToMax pins the buffer clamp on its own,
@@ -111,7 +116,7 @@ func TestReadLoopClampsScannerStartBufferToMax(t *testing.T) {
 		rt := New(Config{})
 		rt.maxFrameBytes = 4096
 		s := rt.rememberSession("sess-clamp", runtime.SessionSpec{}, false)
-		rt.readLoop(s, fakeProc(), strings.NewReader(line))
+		rt.readLoop(s, exitedProc(), strings.NewReader(line))
 
 		select {
 		case ev := <-rt.Events():
@@ -140,7 +145,7 @@ func TestReadLoopClampsScannerStartBufferToMax(t *testing.T) {
 		// about large frames being broken in general.
 		rt := New(Config{})
 		s := rt.rememberSession("sess-ok", runtime.SessionSpec{}, false)
-		rt.readLoop(s, fakeProc(), strings.NewReader(line))
+		rt.readLoop(s, exitedProc(), strings.NewReader(line))
 
 		ev := <-rt.Events()
 		if ev.Kind != runtime.KindText {
@@ -193,6 +198,154 @@ func TestSpawnCapturesChildStderr(t *testing.T) {
 		case <-deadline:
 			t.Fatal("no terminal event within 20s")
 		}
+	}
+}
+
+// slowDrainDelay is how long the stderr reader is held past the terminal event
+// in the test below. It only has to exceed the 2s stderrDrainGrace this change
+// removed: past that bound the old code published whatever was assembled, which
+// was nothing.
+const slowDrainDelay = 2500 * time.Millisecond
+
+// TestReadLoopWaitsForTheStderrDrainBeforePublishing is issue #41's first
+// symptom, made deterministic. The supervisor's terminal event and the stderr
+// reader race: cmd.Wait reaps the child on its own goroutine while io.Copy is
+// still moving the child's last words into the tail. The old code gave that
+// drain a 2s budget and then published without it, so on a contended runner an
+// auth failure reached the operator as a bare exit code — the exact regression
+// TestSpawnCapturesChildStderr exists to prevent.
+//
+// The drain here is held open well past that budget rather than left to
+// scheduling luck, so the assertion is about the ordering guarantee and not
+// about how loaded the machine is.
+func TestReadLoopWaitsForTheStderrDrainBeforePublishing(t *testing.T) {
+	const boom = "Invalid API key · Please run /login"
+	rt := New(Config{})
+	s := rt.rememberSession("sess-slow-drain", runtime.SessionSpec{}, false)
+
+	// The handle has already reported the death; the stderr reader has not
+	// finished, exactly as when cmd.Wait wins the race.
+	p := fakeProc(Terminal{Reason: ReasonExited, Detail: "exit status 1", ExitCode: 1, At: time.Now()})
+	p.stderrDone = make(chan struct{})
+	go func() {
+		time.Sleep(slowDrainDelay)
+		_, _ = p.stderr.Write([]byte(boom))
+		close(p.stderrDone)
+	}()
+
+	rt.readLoop(s, p, strings.NewReader(""))
+
+	ev := <-rt.Events()
+	if ev.Kind != runtime.KindSessionClosed {
+		t.Fatalf("Kind = %q, want session_closed", ev.Kind)
+	}
+	term, isTerm := ev.Payload.(Terminal)
+	if !isTerm {
+		t.Fatalf("terminal payload is %T, want Terminal", ev.Payload)
+	}
+	if !strings.Contains(term.Detail, boom) {
+		t.Fatalf("terminal event published before the stderr drain finished: Detail = %q", term.Detail)
+	}
+}
+
+// closedOnExitReader delivers a frame and then fails the way a child's stdout
+// pipe does when the process is reaped: os.ErrClosed, not io.EOF. Before this
+// package owned its pipes, os/exec's Wait produced this error verbatim ("read
+// |0: file already closed") whenever it closed the descriptor while the scanner
+// was mid-read.
+type closedOnExitReader struct {
+	frames []byte
+	n      int
+}
+
+func (r *closedOnExitReader) Read(p []byte) (int, error) {
+	if r.n < len(r.frames) {
+		n := copy(p, r.frames[r.n:])
+		r.n += n
+		return n, nil
+	}
+	return 0, &fs.PathError{Op: "read", Path: "|0", Err: os.ErrClosed}
+}
+
+// TestReadLoopTeardownPipeCloseKeepsTheTerminalPayloadType is issue #41's second
+// symptom. When the stdout reader lost the teardown race instead of the stderr
+// one, scanner.Err() came back as os.ErrClosed and readLoop reported it through
+// the framing-failure path — a KindError carrying a *string*. The reason still
+// made it to the operator, but the terminal event's payload TYPE now depended on
+// which reader finished first, so a consumer type-switching on it silently took
+// a different branch. Nothing was malformed: the pipe simply went away because
+// the child exited.
+func TestReadLoopTeardownPipeCloseKeepsTheTerminalPayloadType(t *testing.T) {
+	const boom = "Invalid API key · Please run /login"
+	rt := New(Config{})
+	s := rt.rememberSession("sess-pipe-closed", runtime.SessionSpec{}, false)
+	p := fakeProc(Terminal{Reason: ReasonExited, Detail: "exit status 1", ExitCode: 1, At: time.Now()})
+	if _, err := p.stderr.Write([]byte(boom)); err != nil {
+		t.Fatal(err)
+	}
+
+	rt.readLoop(s, p, &closedOnExitReader{frames: []byte(`{"type":"text","text":"hi"}` + "\n")})
+
+	if ev := <-rt.Events(); ev.Kind != runtime.KindText {
+		t.Fatalf("first Kind = %q (%v), want text", ev.Kind, ev.Payload)
+	}
+	ev := <-rt.Events()
+	if ev.Kind != runtime.KindSessionClosed {
+		t.Fatalf("terminal Kind = %q, want session_closed", ev.Kind)
+	}
+	term, isTerm := ev.Payload.(Terminal)
+	if !isTerm {
+		t.Fatalf("terminal payload is %T (%v), want Terminal: a pipe closed by the child's exit was reported as a framing failure", ev.Payload, ev.Payload)
+	}
+	if term.ExitCode != 1 || term.Reason != ReasonExited {
+		t.Errorf("terminal = %+v, want the supervisor's exited/1", term)
+	}
+	if !strings.Contains(term.Detail, boom) {
+		t.Errorf("Detail dropped the child's stderr: %q", term.Detail)
+	}
+	// One death, one terminal event.
+	select {
+	case extra := <-rt.Events():
+		t.Fatalf("second terminal event for one death: %+v", extra)
+	default:
+	}
+}
+
+// TestIsPipeClosedSeparatesTeardownFromMalformedStreams pins the classification
+// on its own: only a vanished descriptor is teardown. A frame that genuinely
+// broke framing must still be reported as one.
+func TestIsPipeClosedSeparatesTeardownFromMalformedStreams(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"os/exec closed the pipe on reap", &fs.PathError{Op: "read", Path: "|0", Err: os.ErrClosed}, true},
+		{"io pipe closed", io.ErrClosedPipe, true},
+		{"oversized frame", bufio.ErrTooLong, false},
+		{"unexpected eof", io.ErrUnexpectedEOF, false},
+	} {
+		if got := isPipeClosed(tc.err); got != tc.want {
+			t.Errorf("%s: isPipeClosed(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestStderrDiagnosisNamesAnIncompleteCollection keeps "the child said nothing"
+// distinguishable from "we never finished collecting what it said".
+func TestStderrDiagnosisNamesAnIncompleteCollection(t *testing.T) {
+	if got := stderrDiagnosis("", true); got != "" {
+		t.Errorf("a silent child decorated the detail: %q", got)
+	}
+	if got := stderrDiagnosis("boom", true); got != "boom" {
+		t.Errorf("a drained tail was rewritten: %q", got)
+	}
+	if got := stderrDiagnosis("", false); !strings.Contains(got, "not collected") {
+		t.Errorf("an abandoned drain reads as a silent child: %q", got)
+	}
+	if got := stderrDiagnosis("boom", false); !strings.Contains(got, "boom") || !strings.Contains(got, "incomplete") {
+		t.Errorf("a partial tail is not marked partial: %q", got)
 	}
 }
 
