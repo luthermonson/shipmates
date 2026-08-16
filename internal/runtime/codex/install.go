@@ -6,28 +6,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/luthermonson/shipmates/internal/brig"
+	"github.com/luthermonson/shipmates/internal/personaname"
 	"github.com/luthermonson/shipmates/internal/runtime"
 )
 
-// personaNameRE bounds a persona name to something that cannot escape or alias a
-// persona-scoped path.
+// validatePersonaName bounds a persona name to something that cannot escape or
+// alias a persona-scoped path.
 //
-// This duplicates project.ValidatePersonaName's rule rather than calling it:
-// internal/project does not export that helper on this branch, and this package
-// must not be the one to add it. When the shared helper lands, replace this with
-// a call to it — the pattern is deliberately identical so the swap is mechanical.
-var personaNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
-
+// This used to carry its own copy of the regexp, with a note saying to replace
+// it with a call to the shared helper once one existed. internal/personaname
+// is that helper, and this is the replacement.
 func validatePersonaName(persona string) error {
-	if !personaNameRE.MatchString(persona) {
-		return fmt.Errorf("invalid persona %q (use lowercase letters, digits, hyphens, or underscores)", persona)
-	}
-	return nil
+	return personaname.Validate(persona)
 }
 
 // InstallPersona writes .codex/agents/<name>.md under projectDir. Codex's
