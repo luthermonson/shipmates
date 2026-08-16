@@ -22,6 +22,7 @@
 package permissions
 
 import (
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -128,15 +129,20 @@ func matchHere(pattern, s string) bool {
 //
 // A leading `**/` means "at any depth". A pattern like `.env` (no slashes)
 // matches a file with that basename anywhere in the tree — matching gitignore.
+//
+// The path is lexically cleaned before matching (M6 of #42). It was not,
+// which meant a deny rule judged a spelling rather than a file, and the agent
+// picks the spelling: `.claude/foo/../settings.json` walked past Article 14's
+// `Write(**/.claude/settings.json)` and `/tmp/../etc/cron.d/x` past Article
+// 15's `/etc/**`, both naming exactly the file the Article forbids. Same
+// family as the Bash head-token respellings in #37.
 func MatchPath(pattern, path string) bool {
 	pattern = strings.TrimSpace(pattern)
-	path = strings.TrimSpace(path)
 	if pattern == "" {
 		return true
 	}
 	pattern = filepath.ToSlash(pattern)
-	path = filepath.ToSlash(path)
-	path = strings.TrimPrefix(path, "./")
+	path = cleanMatchPath(path)
 
 	// Gitignore convention: patterns without a slash match by basename
 	// anywhere. `.env` matches `foo/.env`.
@@ -159,6 +165,81 @@ func MatchPath(pattern, path string) bool {
 		return false
 	}
 	return pathGlob(pattern, path)
+}
+
+// MatchPathIn is MatchPath with a project root to resolve relative paths
+// against. A relative path is matched BOTH as written and as its absolute
+// resolution under root, so patterns written relative to the project
+// (`Edit(src/**)`) keep working while rules that name an absolute location
+// (`Write(/etc/**)`) can no longer be dodged by approaching from inside the
+// project — `../../etc/cron.d/x` resolves to the file the rule names.
+//
+// Matching the union rather than replacing the spelling is deliberate: a
+// deny that used to fire must still fire, whatever root happens to be.
+func MatchPathIn(pattern, path, root string) bool {
+	if MatchPath(pattern, path) {
+		return true
+	}
+	abs, ok := absoluteUnder(path, root)
+	if !ok {
+		return false
+	}
+	return MatchPath(pattern, abs)
+}
+
+// cleanMatchPath puts a path into the one spelling patterns are written
+// against: forward slashes, no `.`/`..` components, no doubled separators.
+//
+// filepath.ToSlash runs first and is a no-op off Windows, which is the right
+// behaviour in both places: on Windows a backslash IS a separator and
+// `.claude\foo\..\settings.json` must clean to `.claude/settings.json`, while
+// on unix a backslash is an ordinary filename byte and that same string is one
+// strange basename that no path rule should match. (internal/brig's
+// TestKernelNormalizesWindowsSeparators pins this split.)
+func cleanMatchPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	cleaned := path.Clean(filepath.ToSlash(p))
+	if cleaned == "." {
+		// `.` and `./` name the project root itself, not a file. Returning
+		// the dot would let `*` patterns match it; empty matches nothing,
+		// which is what an unnamed target deserves.
+		return ""
+	}
+	return cleaned
+}
+
+// absoluteUnder resolves a relative path against root, returning ok=false
+// when there is nothing to resolve (no root, or the path is already absolute).
+// "Absolute" is judged on the slash form and covers both a leading `/` and a
+// `C:/` volume, so a Windows-shaped path is recognised as absolute even on a
+// unix CI leg.
+func absoluteUnder(p, root string) (string, bool) {
+	p = strings.TrimSpace(p)
+	root = strings.TrimSpace(root)
+	if p == "" || root == "" {
+		return "", false
+	}
+	s := filepath.ToSlash(p)
+	if isAbsSlash(s) {
+		return "", false
+	}
+	r := strings.TrimSuffix(filepath.ToSlash(root), "/")
+	return path.Clean(r + "/" + s), true
+}
+
+func isAbsSlash(s string) bool {
+	if strings.HasPrefix(s, "/") {
+		return true
+	}
+	// `C:/…` — a volume-rooted Windows path in slash form.
+	if len(s) >= 3 && s[1] == ':' && s[2] == '/' {
+		c := s[0]
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	}
+	return false
 }
 
 // pathGlob is a small glob matcher with `**` (any path segments) and `*`
