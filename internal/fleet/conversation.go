@@ -94,8 +94,7 @@ func (b *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req conversationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+	if !decodeLimitedJSON(w, r, convBodyLimit, &req) {
 		return
 	}
 

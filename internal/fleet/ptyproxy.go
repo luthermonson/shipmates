@@ -22,17 +22,21 @@ import (
 // captain's local server through its tunnel, regardless of the request URL's
 // host.
 func (b *Server) captainTransport(clientKey string) (http.RoundTripper, error) {
-	b.mu.Lock()
-	captain, ok := b.captains[clientKey]
-	b.mu.Unlock()
+	// Snapshot under the lock (see captainDialInfo): authorize rewrites Port in
+	// place on every reconnect, so reading it through the pointer after the
+	// unlock races that write.
+	port, _, ok := b.captainDialInfo(clientKey)
 	if !ok {
 		return nil, fmt.Errorf("no such captain: %s", clientKey)
+	}
+	if err := checkDialPort(port, clientKey); err != nil {
+		return nil, err
 	}
 	if !b.dialer.HasSession(clientKey) {
 		return nil, fmt.Errorf("captain %s not currently connected", clientKey)
 	}
 	dial := b.dialer.Dialer(clientKey)
-	addr := fmt.Sprintf("127.0.0.1:%d", captain.Port)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	return &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dial(ctx, "tcp", addr)
@@ -51,10 +55,16 @@ func (b *Server) proxyPTYPost(captainPathFmt string) http.HandlerFunc {
 		key := r.PathValue("key")
 		persona := r.PathValue("persona")
 		if !personaname.Valid(persona) {
-			http.Error(w, "bad persona", http.StatusBadRequest)
+			httpError(w, "bad persona", http.StatusBadRequest)
 			return
 		}
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		// MaxBytesReader, not LimitReader: a truncated PTY write is a corrupt
+		// keystroke stream, and a truncated JSON body is a 400 on the ship
+		// that reads as "the fleet is broken". Reject instead.
+		body, ok := readLimitedBody(w, r, ptyBodyLimit)
+		if !ok {
+			return
+		}
 		path := fmt.Sprintf(captainPathFmt, url.PathEscape(persona))
 		if r.URL.RawQuery != "" {
 			path += "?" + r.URL.RawQuery
@@ -68,7 +78,10 @@ func (b *Server) proxyPTYPost(captainPathFmt string) http.HandlerFunc {
 func (b *Server) proxyPost(captainPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		body, ok := readLimitedBody(w, r, beadBodyLimit)
+		if !ok {
+			return
+		}
 		out, status, err := b.proxy(r.Context(), key, "POST", captainPath, body)
 		writeProxied(w, status, out, err)
 	}
@@ -89,10 +102,13 @@ func (b *Server) proxyPost2(captainPathFmt, param string, ok segmentOK) http.Han
 		key := r.PathValue("key")
 		val := r.PathValue(param)
 		if !ok(val) {
-			http.Error(w, "bad "+param, http.StatusBadRequest)
+			httpError(w, "bad "+param, http.StatusBadRequest)
 			return
 		}
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		body, sized := readLimitedBody(w, r, beadBodyLimit)
+		if !sized {
+			return
+		}
 		out, status, err := b.proxy(r.Context(), key, "POST", fmt.Sprintf(captainPathFmt, url.PathEscape(val)), body)
 		writeProxied(w, status, out, err)
 	}
@@ -104,7 +120,7 @@ func (b *Server) proxyGet2(captainPathFmt, param string, ok segmentOK) http.Hand
 		key := r.PathValue("key")
 		val := r.PathValue(param)
 		if !ok(val) {
-			http.Error(w, "bad "+param, http.StatusBadRequest)
+			httpError(w, "bad "+param, http.StatusBadRequest)
 			return
 		}
 		out, status, err := b.proxy(r.Context(), key, "GET", fmt.Sprintf(captainPathFmt, url.PathEscape(val)), nil)
@@ -119,7 +135,7 @@ func (b *Server) handlePTYStreamProxy(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	persona := r.PathValue("persona")
 	if !personaname.Valid(persona) {
-		http.Error(w, "bad persona", http.StatusBadRequest)
+		httpError(w, "bad persona", http.StatusBadRequest)
 		return
 	}
 

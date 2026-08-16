@@ -23,7 +23,14 @@ func (b *Server) handleBeadsNudge(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		From string `json:"from"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	// Best-effort decode (an empty body still means "nudge everyone"), but the
+	// read itself is bounded — this endpoint is reachable by any connected
+	// ship and used to accept an unbounded body.
+	raw, ok := readLimitedBody(w, r, nudgeBodyLimit)
+	if !ok {
+		return
+	}
+	_ = json.Unmarshal(raw, &body)
 	targets := 0
 	for _, key := range b.dialer.ListClients() {
 		if key == body.From {
@@ -56,7 +63,7 @@ func (b *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	id := r.PathValue("id")
 	if !beadIDOK(id) {
-		http.Error(w, "bad bead id", http.StatusBadRequest)
+		httpError(w, "bad bead id", http.StatusBadRequest)
 		return
 	}
 	var body struct {
@@ -64,16 +71,20 @@ func (b *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 		Persona string `json:"persona"` // target mate
 		Title   string `json:"title"`   // bead title, for the dispatch message
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+	raw, sized := readLimitedBody(w, r, beadBodyLimit)
+	if !sized {
+		return
+	}
+	if err := json.Unmarshal(raw, &body); err != nil ||
 		strings.TrimSpace(body.Ship) == "" || strings.TrimSpace(body.Persona) == "" {
-		http.Error(w, "want {ship, persona, title?}", http.StatusBadRequest)
+		httpError(w, "want {ship, persona, title?}", http.StatusBadRequest)
 		return
 	}
 	persona := strings.TrimSpace(body.Persona)
 	// persona becomes a path segment in the dispatch tell (deliverDispatch)
 	// and an assignee on the shared graph; gate it at the boundary.
 	if !personaname.Valid(persona) {
-		http.Error(w, "bad persona", http.StatusBadRequest)
+		httpError(w, "bad persona", http.StatusBadRequest)
 		return
 	}
 	shipName, _, _ := strings.Cut(strings.TrimSpace(body.Ship), ":")
@@ -103,7 +114,7 @@ func (b *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 	if err := b.deliverDispatch(r.Context(), queuedDispatch{
 		Ship: body.Ship, Persona: persona, Bead: id, Title: strings.TrimSpace(body.Title),
 	}, body.Ship != key); err != nil {
-		http.Error(w, fmt.Sprintf("assigned %s, but dispatch failed: %v", assignee, err), http.StatusBadGateway)
+		httpError(w, fmt.Sprintf("assigned %s, but dispatch failed: %v", assignee, err), http.StatusBadGateway)
 		return
 	}
 

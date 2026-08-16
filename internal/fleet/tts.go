@@ -204,8 +204,7 @@ func (b *Server) handleTTS(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Text string `json:"text"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	if !decodeLimitedJSON(w, r, ttsBodyLimit, &req) {
 		return
 	}
 	if strings.TrimSpace(req.Text) == "" {
