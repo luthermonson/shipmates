@@ -121,6 +121,12 @@ type Server struct {
 	// deny list is NOT the Brig's: FleetDeny stays in force in
 	// decidePermission even with the Brig disabled.
 	brigConf brig.Settings
+
+	// token is this run's API bearer credential. Minted in New (crypto/rand),
+	// published to project.TokenFile at 0600 in Run, and required by every
+	// route except GET /health — see auth.go. Never mutated after New, so it
+	// is read without s.mu.
+	token string
 }
 
 // idleTimeoutEphemeral is the lifecycle bound for a server spawned by a
@@ -142,7 +148,15 @@ const idleTimeoutFleeted = 1 * time.Hour
 // this is where `.claude/settings.json` lives.
 func New() *Server {
 	root, _ := os.Getwd()
+	// A failure here leaves the token empty, which fails every request closed
+	// and makes Run refuse to start. It is not silently downgraded to "no
+	// auth".
+	tok, tokErr := project.NewAPIToken()
+	if tokErr != nil {
+		slog.Error("could not mint an API token", "err", tokErr)
+	}
 	s := &Server{
+		token:        tok,
 		live:         map[string]*liveProc{},
 		ptys:         map[string]*ptyProc{},
 		pendings:     map[string]*pending{},
@@ -187,21 +201,19 @@ func (s *Server) Run(ctx context.Context) error {
 	s.lastActivity = time.Now() // seed so the idle watcher never fires before activity
 	s.mu.Unlock()
 
-	if err := os.MkdirAll(project.SessionsDir(), 0o755); err != nil {
+	if err := s.writeSessionFiles(port); err != nil {
+		// Fail closed. If the credential can't be published there is no way
+		// for a legitimate client to authenticate, and starting anyway would
+		// mean either an unreachable server or (worse, if the token check
+		// were softened) an open one.
+		_ = ln.Close()
 		return err
 	}
-	if err := os.WriteFile(project.PortFile(), []byte(strconv.Itoa(port)), 0o644); err != nil {
-		return err
-	}
-	if err := os.WriteFile(project.PidFile(), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
-		return err
-	}
+	defer os.Remove(project.TokenFile())
 	defer os.Remove(project.PortFile())
 	defer os.Remove(project.PidFile())
 
-	mux := s.routes()
-
-	httpSrv := &http.Server{Handler: mux}
+	httpSrv := &http.Server{Handler: s.guard(s.routes())}
 	go func() {
 		<-s.stopCh
 		s.closeLive()
@@ -280,6 +292,29 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// writeSessionFiles publishes this run's credential, port and pid under
+// .shipmates/sessions. The token goes first: a client that has found the port
+// file must be able to find the credential that goes with it.
+//
+// All three are 0600. The port and pid used to be 0644, which made the port
+// readable by every account on the machine — and the port was, wrongly, being
+// treated as the capability.
+func (s *Server) writeSessionFiles(port int) error {
+	if s.token == "" {
+		return errors.New("refusing to start: no API token was generated")
+	}
+	if err := os.MkdirAll(project.SessionsDir(), 0o755); err != nil {
+		return err
+	}
+	if err := project.WriteAPIToken(s.token); err != nil {
+		return fmt.Errorf("write api token: %w", err)
+	}
+	if err := project.WritePrivateFile(project.PortFile(), []byte(strconv.Itoa(port))); err != nil {
+		return err
+	}
+	return project.WritePrivateFile(project.PidFile(), []byte(strconv.Itoa(os.Getpid())))
 }
 
 // routes builds the captain's complete HTTP surface. Split out of Run so tests
@@ -778,20 +813,27 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 // the only approval surface. gate=false is observe-only (PostToolUse): right
 // for PTY mates, where interactive claude renders its own y/n permission
 // prompt in the terminal the operator is already looking at.
+//
+// The hook endpoints are authenticated like everything else, so the settings
+// carry this run's token two ways: an Authorization header (the documented
+// field on HTTP hooks) and a ?token= query parameter for Claude Code builds
+// that ignore the header field. Belt and braces, because the failure mode of
+// getting it wrong is a permission gate that silently stops gating.
 func (s *Server) hookSettings(persona string, gate bool) string {
 	url := func(event string) string {
-		return fmt.Sprintf("http://127.0.0.1:%d/hook/%s/%s", s.port, persona, event)
+		return fmt.Sprintf("http://127.0.0.1:%d/hook/%s/%s?token=%s", s.port, persona, event, s.token)
 	}
+	auth := map[string]string{"Authorization": "Bearer " + s.token}
 	hooks := map[string]any{
 		"PostToolUse": []map[string]any{{
-			"hooks": []map[string]any{{"type": "http", "url": url("PostToolUse")}},
+			"hooks": []map[string]any{{"type": "http", "url": url("PostToolUse"), "headers": auth}},
 		}},
 	}
 	if gate {
 		// PreToolUse is the gate (it may block on a human decision), so give
 		// it a generous timeout.
 		hooks["PreToolUse"] = []map[string]any{{
-			"hooks": []map[string]any{{"type": "http", "url": url("PreToolUse"), "timeout": 120}},
+			"hooks": []map[string]any{{"type": "http", "url": url("PreToolUse"), "headers": auth, "timeout": 120}},
 		}}
 	}
 	b, _ := json.Marshal(map[string]any{"hooks": hooks})

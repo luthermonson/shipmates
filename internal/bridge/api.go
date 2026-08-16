@@ -52,10 +52,14 @@ var ErrNoPTY = errors.New("no pty mate")
 var ErrLocked = errors.New("another viewer holds the keyboard")
 
 // API is a client for one ship's coordination server. All calls are to
-// 127.0.0.1 on the port recorded in the ship's port file; there is no
-// authentication because the server exposes none — see client.BaseURL.
+// 127.0.0.1 on the port recorded in the ship's port file, and every one of
+// them carries the ship's per-run bearer token — loopback is not a
+// credential, so the server refuses anything unauthenticated.
 type API struct {
 	Base string
+	// Token is the ship's per-run API credential, read from the token file
+	// beside the port file (client.Token). Sent on every request.
+	Token string
 	// ClientID is this bridge's writer-lock identity. It must never be empty:
 	// the server treats an empty ?client= as an internal write that BYPASSES
 	// the single-writer lock, which would let the bridge stomp on whoever holds
@@ -66,10 +70,12 @@ type API struct {
 	stream *http.Client
 }
 
-// NewAPI builds a client against base with a freshly generated writer identity.
-func NewAPI(base string) *API {
+// NewAPI builds a client against base, authenticated with token, and with a
+// freshly generated writer identity.
+func NewAPI(base, token string) *API {
 	return &API{
 		Base:     strings.TrimRight(base, "/"),
+		Token:    token,
 		ClientID: newClientID(),
 		short: &http.Client{
 			Timeout: requestTimeout,
@@ -301,10 +307,20 @@ func (a *API) newRequest(ctx context.Context, method, path, contentType string, 
 	if err != nil {
 		return nil, err
 	}
+	a.authorize(req)
 	if contentType != "" && body != nil {
 		req.Header.Set("Content-Type", contentType)
 	}
 	return req, nil
+}
+
+// authorize attaches the ship's bearer credential. Every endpoint but the
+// health probe requires it; a bridge without one gets 401s it can't recover
+// from, so an empty token is a bug at construction, not here.
+func (a *API) authorize(req *http.Request) {
+	if a.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+a.Token)
+	}
 }
 
 // statusError maps HTTP status to the sentinel errors the model branches on,

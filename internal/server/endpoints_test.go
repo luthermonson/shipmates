@@ -9,9 +9,17 @@ import (
 	"time"
 )
 
+// authedHandler is the guarded route table plus the credential that opens it,
+// so do() can authenticate without every caller threading a token through.
+type authedHandler struct {
+	http.Handler
+	token string
+}
+
 // newTestServer builds a Server sandboxed in a fresh temp directory and hands
-// back the REAL route table from routes(). Chdir'ing first matters: nearly
-// every handler resolves cwd-relative state (persona frontmatter under
+// back the REAL served handler: the route table from routes() behind the same
+// auth/cross-site guard Run installs. Chdir'ing first matters: nearly every
+// handler resolves cwd-relative state (persona frontmatter under
 // .claude/agents, shipmates.yaml, .beads/), so without the sandbox these tests
 // would read the developer's actual checkout and pass or fail by accident.
 func newTestServer(t *testing.T) (*Server, http.Handler) {
@@ -24,10 +32,14 @@ func newTestServer(t *testing.T) (*Server, http.Handler) {
 	t.Setenv("HOME", home)        // Unix os.UserHomeDir
 	t.Chdir(t.TempDir())
 	s := New()
-	return s, s.routes()
+	return s, &authedHandler{Handler: s.guard(s.routes()), token: s.token}
 }
 
-// do issues one request against a handler and returns the recorder.
+// do issues one authenticated request against a handler and returns the
+// recorder. Anything built by newTestServer gets this run's bearer token and,
+// for requests with a body, the JSON content type the guard requires — the
+// credentialled path is the one every other test in the package is about.
+// Tests of the guard itself build their requests by hand.
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var req *http.Request
@@ -35,6 +47,12 @@ func do(t *testing.T, h http.Handler, method, path, body string) *httptest.Respo
 		req = httptest.NewRequest(method, path, nil)
 	} else {
 		req = httptest.NewRequest(method, path, strings.NewReader(body))
+	}
+	if ah, ok := h.(*authedHandler); ok {
+		req.Header.Set("Authorization", "Bearer "+ah.token)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

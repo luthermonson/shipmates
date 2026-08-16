@@ -42,8 +42,13 @@ func serveInProject(t *testing.T, dir string, h http.Handler) *httptest.Server {
 		t.Fatal(err)
 	}
 	writeSession(t, dir, "server.port", portStr+"\n")
+	writeSession(t, dir, "server.token", supervisorTestToken+"\n")
 	return srv
 }
+
+// supervisorTestToken stands in for the captain's per-run API credential,
+// which the supervisor must present to shut a captain down.
+const supervisorTestToken = "0123456789abcdef0123456789abcdef"
 
 // deadPort returns a port nothing listens on — the stale-port-file case.
 func deadPort(t *testing.T) int {
@@ -127,9 +132,9 @@ func TestServerHealthyNon200(t *testing.T) {
 
 func TestShutdownServer(t *testing.T) {
 	dir := projectDir(t)
-	var gotPath, gotMethod string
+	var gotPath, gotMethod, gotAuth string
 	serveInProject(t, dir, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath, gotMethod = r.URL.Path, r.Method
+		gotPath, gotMethod, gotAuth = r.URL.Path, r.Method, r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
 	}))
 	if !shutdownServer(dir) {
@@ -137,6 +142,31 @@ func TestShutdownServer(t *testing.T) {
 	}
 	if gotMethod != http.MethodPost || gotPath != "/shutdown" {
 		t.Fatalf("server saw %s %s, want POST /shutdown", gotMethod, gotPath)
+	}
+	// /shutdown authenticates like every other route: a supervisor that
+	// forgets the token gets a 401 and silently stops reaping captains.
+	if want := "Bearer " + supervisorTestToken; gotAuth != want {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, want)
+	}
+}
+
+// TestShutdownServerWithoutToken: a captain whose token file is gone (or a
+// captain from before tokens existed) answers 401, and the supervisor must
+// report the failure so its hard-kill fallback fires.
+func TestShutdownServerWithoutToken(t *testing.T) {
+	dir := projectDir(t)
+	serveInProject(t, dir, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+supervisorTestToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	if err := os.Remove(filepath.Join(dir, ".shipmates", "sessions", "server.token")); err != nil {
+		t.Fatal(err)
+	}
+	if shutdownServer(dir) {
+		t.Fatal("shutdownServer = true against a 401 — the hard-kill fallback would never fire")
 	}
 }
 

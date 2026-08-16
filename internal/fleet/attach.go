@@ -42,8 +42,15 @@ const (
 func (b *Server) handleCaptainAttach(w http.ResponseWriter, r *http.Request) {
 	clientKey := r.PathValue("key")
 
+	// Snapshot the one field this handler needs while holding the lock;
+	// authorize rewrites Captain in place on reconnect, so keeping the
+	// pointer and reading through it later would race that write.
 	b.mu.Lock()
 	captain, known := b.captains[clientKey]
+	var captainPersona string
+	if known {
+		captainPersona = captain.Persona
+	}
 	b.mu.Unlock()
 	if !known {
 		writeFleetAttachError(w, http.StatusNotFound, "unknown captain")
@@ -134,7 +141,7 @@ func (b *Server) handleCaptainAttach(w http.ResponseWriter, r *http.Request) {
 	// the operator needing to type. Delivered on the same tunnel via
 	// /tell/<persona>; failures are logged but don't fail the upload —
 	// the file already landed and the UI event stream will surface it.
-	b.fireAttachAutoTell(r.Context(), clientKey, captain.Persona, parsed.Path, caption)
+	b.fireAttachAutoTell(r.Context(), clientKey, captainPersona, parsed.Path, caption)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(parsed)
@@ -177,9 +184,9 @@ func (b *Server) proxyRaw(ctx context.Context, clientKey, method, path, contentT
 	if err := checkProxyPath(path); err != nil {
 		return nil, http.StatusBadRequest, err
 	}
-	b.mu.Lock()
-	captain, ok := b.captains[clientKey]
-	b.mu.Unlock()
+	// Snapshot under the lock; see captainDialInfo — reaching through the
+	// *Captain after unlocking races authorize's in-place reconnect writes.
+	port, token, ok := b.captainDialInfo(clientKey)
 	if !ok {
 		return nil, http.StatusNotFound, fmt.Errorf("no such captain: %s", clientKey)
 	}
@@ -187,7 +194,7 @@ func (b *Server) proxyRaw(ctx context.Context, clientKey, method, path, contentT
 		return nil, http.StatusGatewayTimeout, fmt.Errorf("captain %s not currently connected", clientKey)
 	}
 	dial := b.dialer.Dialer(clientKey)
-	addr := fmt.Sprintf("127.0.0.1:%d", captain.Port)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	conn, err := dial(ctx, "tcp", addr)
 	if err != nil {
 		return nil, http.StatusBadGateway, fmt.Errorf("dial captain: %w", err)
@@ -197,8 +204,8 @@ func (b *Server) proxyRaw(ctx context.Context, clientKey, method, path, contentT
 	// disk-write step can eat more than the 30s the JSON proxy uses.
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 
-	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: captain\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-		method, path, contentType, len(body))
+	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: captain\r\n%sContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		method, path, authHeaderLine(token), contentType, len(body))
 	if _, err := io.WriteString(conn, req); err != nil {
 		return nil, http.StatusBadGateway, err
 	}

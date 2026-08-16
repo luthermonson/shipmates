@@ -128,3 +128,57 @@ had started.
 a persona file or in `shipmates.yaml`'s `crew:` block, move it to
 `~/.shipmates/personas.yaml`.** It stopped taking effect; the server log names
 each key it dropped.
+
+## The captain API: loopback is not a permission
+
+Every ship runs a captain-spawned HTTP server on `127.0.0.1` (a random port)
+that can inject prompts into live mates, spawn PTY-hosted agents, resolve
+permission requests, and shut the ship down. Binding loopback is necessary but
+nowhere near sufficient:
+
+- **Every local process can reach it**, not just shipmates.
+- **So can any web page the operator visits.** A cross-origin
+  `fetch('http://127.0.0.1:PORT/tell/<persona>', {method:'POST', body:'…'})`
+  is a CORS-"simple" request, so the browser sends it with no preflight. The
+  page cannot read the reply and does not need to — the prompt has already
+  landed in a live agent.
+- **The port is not a secret.** It is written into the repo tree, and a page
+  can scan loopback ports until one answers.
+
+So the API authenticates.
+
+**Per-run bearer token.** At startup the server mints 32 random bytes from
+`crypto/rand` and writes them, hex-encoded, to
+`.shipmates/sessions/server.token` — beside `server.port` and `server.pid`,
+with the same lifetime (written on start, removed on exit). All three files
+are now `0600`; the port and pid used to be `0644`. On Windows the mode
+argument buys nothing (Go maps it onto the read-only attribute and access is
+decided by the inherited DACL of `.shipmates`), which is the same limitation
+`internal/recovery` documents for its journal — stated rather than papered
+over.
+
+Every route requires `Authorization: Bearer <token>`, compared with
+`crypto/subtle.ConstantTimeCompare`. The one exemption is `GET /health`: a
+liveness probe that returns a constant `ok`, changes nothing, and is polled by
+clients *before* a captain exists — gating it would replace "not running yet"
+with a credential error. If the token cannot be minted or published, the
+server refuses to start; it never falls back to serving unauthenticated.
+
+**Cross-site defence in depth.** A page cannot read the token file, but the
+guard does not rely on that alone. Any request carrying an `Origin` header, or
+`Sec-Fetch-Site: cross-site` / `same-site`, is refused with 403 — nothing in
+shipmates talks to the captain from a browser. JSON-decoding endpoints
+additionally require `Content-Type: application/json`, which is not a
+CORS-simple content type, so a page must ask permission with a preflight and
+be told no. (`/attach` carries multipart and `/pty/{persona}/input` carries raw
+keystrokes; both are exempt from the media-type rule and covered by the token
+and origin checks.)
+
+**Who holds the token.** The CLI, `shipmates bridge`, and the host supervisor
+read it from the token file. Crew hooks get it in the `--settings` blob the
+captain hands the process it spawned (Authorization header, plus the same
+token in the hook URL for Claude Code builds that ignore the header field). A
+central fleet cannot read the file — it usually runs on another host — so the
+captain sends it up the tunnel it dialled, in the connect headers, and the
+fleet replays it on every request it proxies back down. The fleet keeps it in
+memory only: never in its store, never in an API response.

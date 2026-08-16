@@ -47,6 +47,7 @@ type shipHit struct {
 	rawPath string // path + "?" + query, as the fleet framed it
 	body    []byte
 	ctype   string
+	auth    string // Authorization the fleet replayed (the captain's own API token)
 }
 
 // fakeShip stands in for a shipmates captain's local 127.0.0.1 server. Routes
@@ -79,6 +80,7 @@ func newFakeShip(t *testing.T) *fakeShip {
 		s.seen = append(s.seen, shipHit{
 			method: r.Method, path: r.URL.Path, rawPath: raw,
 			body: body, ctype: r.Header.Get("Content-Type"),
+			auth: r.Header.Get("Authorization"),
 		})
 		key := r.Method + " " + r.URL.Path
 		out, hasBody := s.bodies[key]
@@ -149,9 +151,15 @@ func connectShip(t *testing.T, b *Server, ship *fakeShip, clientKey string) {
 	connectShipWithHeaders(t, b, clientKey, shipHeaders(clientKey, ship.port, b.token))
 }
 
+// fakeCaptainAPIToken is the credential a fake ship claims for its own local
+// API — the fleet has to replay it on everything it proxies back through the
+// tunnel, or the captain answers 401.
+const fakeCaptainAPIToken = "0123456789abcdef0123456789abcdef"
+
 func shipHeaders(clientKey string, port int, token string) http.Header {
 	h := http.Header{}
 	h.Set("X-Shipmates-Identity", clientKey)
+	h.Set("X-Shipmates-API-Token", fakeCaptainAPIToken)
 	h.Set("X-Shipmates-Repo", strings.SplitN(clientKey, ":", 2)[0])
 	h.Set("X-Shipmates-Repo-URL", "https://example.invalid/"+strings.SplitN(clientKey, ":", 2)[0])
 	h.Set("X-Shipmates-Install-ID", "install-"+clientKey)

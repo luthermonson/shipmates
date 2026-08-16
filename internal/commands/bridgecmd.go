@@ -66,8 +66,14 @@ func Bridge() *cli.Command {
 				return fmt.Errorf("locate coordination server: %w", err)
 			}
 
+			tok, err := client.Token()
+			if err != nil {
+				return fmt.Errorf("read coordination server token: %w", err)
+			}
+
 			opts := bridge.Options{
 				Base:  base,
+				Token: tok,
 				Focus: c.String("persona"),
 			}
 			if !c.Bool("no-bell") {

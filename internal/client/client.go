@@ -46,9 +46,40 @@ func base() (string, error) {
 // BaseURL is the exported form of base(), for callers that need to build their
 // own requests instead of going through Get/Post — `shipmates bridge` holds a
 // long-lived SSE stream per persona, which the buffered helpers can't express.
-// The address is always loopback and carries no credentials: the coordination
-// server has no auth surface of its own, its port file is the capability.
+//
+// The address is always loopback, and loopback is NOT the capability: any
+// local process, and any web page the operator visits, can reach it. Callers
+// building their own requests must attach the credential from Token() —
+// everything but GET /health is refused without it.
 func BaseURL() (string, error) { return base() }
+
+// Token reads the running server's per-run bearer credential, written next to
+// the port file at startup and removed when the server exits. A missing file
+// means no captain is running (or it is still starting up).
+func Token() (string, error) { return project.ReadAPIToken() }
+
+// newRequest builds an authenticated request against the running server. The
+// token is read per call rather than cached: a CLI process can outlive the
+// captain it started with, and the next captain mints a different one.
+func newRequest(method, path, contentType string, body io.Reader) (*http.Request, error) {
+	b, err := base()
+	if err != nil {
+		return nil, err
+	}
+	tok, err := Token()
+	if err != nil {
+		return nil, fmt.Errorf("read server token: %w", err)
+	}
+	req, err := http.NewRequest(method, b+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	return req, nil
+}
 
 // Healthy reports whether a server is reachable.
 func Healthy() bool {
@@ -99,17 +130,17 @@ func EnsureRunning() error {
 
 // Post sends a JSON body to a server path.
 func Post(path string, body any) ([]byte, error) {
-	b, err := base()
-	if err != nil {
-		return nil, err
-	}
 	var buf bytes.Buffer
 	if body != nil {
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
 			return nil, err
 		}
 	}
-	resp, err := http.Post(b+path, "application/json", &buf)
+	req, err := newRequest(http.MethodPost, path, "application/json", &buf)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -123,11 +154,11 @@ func Post(path string, body any) ([]byte, error) {
 
 // Get fetches a server path.
 func Get(path string) ([]byte, error) {
-	b, err := base()
+	req, err := newRequest(http.MethodGet, path, "", nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.Get(b + path)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -139,10 +170,6 @@ func Get(path string) ([]byte, error) {
 // form-data with an optional caption, returning the parsed AttachResp. Used
 // by `shipmates show` — the CLI file-attach counterpart to Tell.
 func PostAttach(filePath, caption string) (*AttachResp, error) {
-	b, err := base()
-	if err != nil {
-		return nil, err
-	}
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", filePath, err)
@@ -167,7 +194,11 @@ func PostAttach(filePath, caption string) (*AttachResp, error) {
 		return nil, err
 	}
 
-	resp, err := http.Post(b+"/attach", w.FormDataContentType(), &buf)
+	req, err := newRequest(http.MethodPost, "/attach", w.FormDataContentType(), &buf)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
