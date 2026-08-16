@@ -161,7 +161,9 @@ func Feed() *cli.Command {
 			if err != nil {
 				return err
 			}
-			_, _ = os.Stdout.Write(out)
+			// Crew output and tells: agent- and GitHub-derived text on its way
+			// to a real terminal. Same scrubber the TUI uses (see scrub.go).
+			printRemote(out)
 			return nil
 		},
 	}

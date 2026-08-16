@@ -698,3 +698,122 @@ func TestFleet_NoTokenFlagAnywhere(t *testing.T) {
 		check(sub.Name, sub.Flags)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// L3 — the fleet URL must not put the bearer token on the wire in cleartext.
+// ---------------------------------------------------------------------------
+
+func TestFleetBaseURL_PlaintextRule(t *testing.T) {
+	cases := []struct {
+		name    string
+		url     string
+		wantErr string // substring; empty means accepted
+	}{
+		{name: "https is the normal case", url: "https://fleet.example.com:8443"},
+		{name: "https with a trailing slash", url: "https://fleet.example.com/"},
+		{name: "loopback http is local development", url: "http://127.0.0.1:8443"},
+		{name: "localhost http is local development", url: "http://localhost:8443"},
+		{name: "ipv6 loopback http", url: "http://[::1]:8443"},
+
+		{name: "plaintext to a dns host is refused", url: "http://fleet.example.com", wantErr: "plaintext"},
+		{name: "plaintext to a LAN host is refused", url: "http://10.0.0.5:8443", wantErr: "plaintext"},
+		{name: "a lookalike loopback host is refused", url: "http://127.0.0.1.evil.com:8443", wantErr: "plaintext"},
+		{name: "credentials in the url are refused", url: "https://u:p@fleet.example.com", wantErr: "credentials"},
+		{name: "a scheme-less url is refused", url: "fleet.example.com:8443", wantErr: "scheme"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateFleetEnv(t)
+			err := runWithOperatorFlags(t, []string{"--fleet", tc.url}, func(ctx context.Context, c *cli.Command) error {
+				got, err := fleetBaseURL(c)
+				if err != nil {
+					return err
+				}
+				if strings.HasSuffix(got, "/") {
+					t.Errorf("base %q keeps a trailing slash", got)
+				}
+				return nil
+			})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("--fleet %s: %v, want it accepted", tc.url, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("--fleet %s was accepted, want a refusal mentioning %q", tc.url, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want it to mention %q", err, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), "--fleet") {
+				t.Errorf("err = %v, want it to name the flag the operator has to change", err)
+			}
+		})
+	}
+}
+
+// The URL is checked BEFORE the token is loaded and before any request goes
+// out: a leaked token cannot be un-leaked by a later error.
+func TestFleetDo_PlaintextURLIsRefusedBeforeTheTokenIsTouched(t *testing.T) {
+	isolateFleetEnv(t)
+	t.Setenv("SHIPMATES_FLEET_TOKEN", "s3cret")
+
+	err := runWithOperatorFlags(t, []string{"--fleet", "http://fleet.example.com"},
+		func(ctx context.Context, c *cli.Command) error {
+			_, err := fleetGet(ctx, c, "/api/captains")
+			return err
+		})
+	if err == nil {
+		t.Fatal("a plaintext fleet URL was accepted")
+	}
+	if !strings.Contains(err.Error(), "plaintext") {
+		t.Errorf("err = %v, want it to name the plaintext transport", err)
+	}
+	if strings.Contains(err.Error(), "s3cret") {
+		t.Errorf("err = %v leaks the token", err)
+	}
+
+	// With a broken token file AND a bad URL, the URL error must win — which
+	// is only possible if the URL is validated first.
+	err = runWithOperatorFlags(t,
+		[]string{"--fleet", "http://fleet.example.com", "--token-file", filepath.Join(t.TempDir(), "nope")},
+		func(ctx context.Context, c *cli.Command) error {
+			_, err := fleetGet(ctx, c, "/api/captains")
+			return err
+		})
+	if err == nil || !strings.Contains(err.Error(), "plaintext") {
+		t.Fatalf("err = %v, want the URL to be refused before the credential is read", err)
+	}
+}
+
+// The same rule applies to the multipart path (`fleet show`).
+func TestFleetDoRaw_RefusesAPlaintextURL(t *testing.T) {
+	isolateFleetEnv(t)
+	err := runWithOperatorFlags(t, []string{"--fleet", "http://fleet.example.com"},
+		func(ctx context.Context, c *cli.Command) error {
+			_, err := fleetDoRaw(ctx, c, "POST", "/api/captain/x/attach", "text/plain", []byte("x"))
+			return err
+		})
+	if err == nil || !strings.Contains(err.Error(), "plaintext") {
+		t.Fatalf("err = %v, want a plaintext refusal", err)
+	}
+}
+
+// The shipped default stays usable: a fleet on the operator's own machine.
+func TestOperatorFlags_DefaultFleetURLIsAcceptedByTheTransportRule(t *testing.T) {
+	isolateFleetEnv(t)
+	err := runWithOperatorFlags(t, nil, func(ctx context.Context, c *cli.Command) error {
+		base, err := fleetBaseURL(c)
+		if err != nil {
+			return err
+		}
+		if base != "http://127.0.0.1:8443" {
+			t.Errorf("base = %q", base)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("the default fleet URL was refused: %v", err)
+	}
+}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/luthermonson/shipmates/internal/client"
@@ -24,7 +23,9 @@ func Pending() *cli.Command {
 			if err != nil {
 				return err
 			}
-			_, _ = os.Stdout.Write(out)
+			// The prompt quotes the agent's own tool input; scrub it before it
+			// paints the terminal the operator is deciding on (see scrub.go).
+			printRemote(out)
 			return nil
 		},
 	}

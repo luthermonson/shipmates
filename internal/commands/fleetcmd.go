@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/luthermonson/shipmates/internal/fleet"
+	"github.com/luthermonson/shipmates/internal/fleeturl"
 	"github.com/urfave/cli/v3"
 )
 
@@ -58,9 +59,24 @@ func Fleet() *cli.Command {
 // operator command needs. Defined once so we don't drift across subcommands.
 func operatorFlags() []cli.Flag {
 	return []cli.Flag{
-		&cli.StringFlag{Name: "fleet", Sources: cli.EnvVars("SHIPMATES_FLEET_URL"), Value: "http://127.0.0.1:8443", Usage: "fleet URL"},
+		&cli.StringFlag{Name: "fleet", Sources: cli.EnvVars("SHIPMATES_FLEET_URL"), Value: "http://127.0.0.1:8443", Usage: "fleet URL (https:// required unless the host is loopback)"},
 		&cli.StringFlag{Name: "token-file", Usage: "read the fleet token from this file (overrides $SHIPMATES_FLEET_TOKEN)"},
 	}
+}
+
+// fleetBaseURL resolves --fleet / $SHIPMATES_FLEET_URL and refuses a URL that
+// would put the operator's bearer token on the wire in cleartext. The check
+// happens before the request is built, so a misconfigured URL is an error the
+// operator sees rather than a token they have already leaked.
+//
+// The default (http://127.0.0.1:8443) is loopback and stays legal — a fleet on
+// the operator's own machine has no network to eavesdrop.
+func fleetBaseURL(c *cli.Command) (string, error) {
+	raw := strings.TrimSpace(c.String("fleet"))
+	if _, err := fleeturl.Validate(raw); err != nil {
+		return "", fmt.Errorf("--fleet/$SHIPMATES_FLEET_URL: %w", err)
+	}
+	return strings.TrimRight(raw, "/"), nil
 }
 
 func fleetServe() *cli.Command {
@@ -158,7 +174,8 @@ func fleetLs() *cli.Command {
 				if l.Connected {
 					state = "online"
 				}
-				fmt.Printf("%-9s %s  (port %d, last %s)\n", state, l.ClientKey, l.Port, l.LastSeen.Format(time.RFC3339))
+				// client_key is ship-supplied (X-Shipmates-Identity): scrub it.
+				fmt.Printf("%-9s %s  (port %d, last %s)\n", state, safeLine(l.ClientKey), l.Port, l.LastSeen.Format(time.RFC3339))
 			}
 			return nil
 		},
@@ -180,7 +197,10 @@ func fleetTail() *cli.Command {
 			if err != nil {
 				return err
 			}
-			_, _ = os.Stdout.Write(body)
+			// Feed text is agent- and GitHub-derived. It goes to the
+			// operator's real terminal, so it gets the same scrubber the TUI
+			// applies to everything it draws outside the PTY pane.
+			printRemote(body)
 			return nil
 		},
 	}
@@ -255,7 +275,7 @@ func fleetShow() *cli.Command {
 			if err != nil {
 				return err
 			}
-			_, _ = os.Stdout.Write(out)
+			printRemote(out)
 			fmt.Println()
 			return nil
 		},
@@ -277,7 +297,10 @@ func fleetPending() *cli.Command {
 			if err != nil {
 				return err
 			}
-			_, _ = os.Stdout.Write(body)
+			// A pending prompt quotes the agent's own tool input — the most
+			// attacker-shaped text in the system, and the operator is about to
+			// make an allow/deny decision on what it renders as.
+			printRemote(body)
 			return nil
 		},
 	}
@@ -324,7 +347,7 @@ func fleetStatus() *cli.Command {
 				return fmt.Errorf("decode status: %w", err)
 			}
 			for _, m := range mates {
-				fmt.Printf("%-9s %s/%s\n", m.Status, m.ClientKey, m.Persona)
+				fmt.Printf("%-9s %s/%s\n", safeLine(m.Status), safeLine(m.ClientKey), safeLine(m.Persona))
 			}
 			return nil
 		},
@@ -365,11 +388,13 @@ func fleetBeads() *cli.Command {
 				if b.Priority != nil {
 					prio = fmt.Sprintf("p%d", *b.Priority)
 				}
-				assignee := b.Assignee
+				// Bead titles and assignees are written by agents from GitHub
+				// issue text — hostile input by definition. Scrub every field.
+				assignee := safeLine(b.Assignee)
 				if assignee != "" {
 					assignee = " → " + assignee
 				}
-				fmt.Printf("%-12s %-3s %-8s %s%s\n", b.ID, prio, b.Status, b.Title, assignee)
+				fmt.Printf("%-12s %-3s %-8s %s%s\n", safeLine(b.ID), prio, safeLine(b.Status), safeLine(b.Title), assignee)
 			}
 			return nil
 		},
@@ -392,7 +417,7 @@ func fleetDispatch() *cli.Command {
 			if err != nil {
 				return err
 			}
-			_, _ = os.Stdout.Write(out)
+			printRemote(out)
 			fmt.Println()
 			return nil
 		},
@@ -415,7 +440,10 @@ func fleetPost(ctx context.Context, c *cli.Command, path string, body []byte) ([
 // Used by `fleet show` to POST multipart/form-data uploads. The bearer
 // token, base URL resolution, and error handling all match fleetDo.
 func fleetDoRaw(ctx context.Context, c *cli.Command, method, path, contentType string, body []byte) ([]byte, error) {
-	base := strings.TrimRight(c.String("fleet"), "/")
+	base, err := fleetBaseURL(c)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -438,13 +466,16 @@ func fleetDoRaw(ctx context.Context, c *cli.Command, method, path, contentType s
 		return out, fmt.Errorf("unauthorized — set $SHIPMATES_FLEET_TOKEN or pass --token-file")
 	}
 	if resp.StatusCode >= 300 {
-		return out, fmt.Errorf("fleet %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
+		return out, fmt.Errorf("fleet %d: %s", resp.StatusCode, safeErr(out))
 	}
 	return out, nil
 }
 
 func fleetDo(ctx context.Context, c *cli.Command, method, path string, body []byte) ([]byte, error) {
-	base := strings.TrimRight(c.String("fleet"), "/")
+	base, err := fleetBaseURL(c)
+	if err != nil {
+		return nil, err
+	}
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -473,7 +504,7 @@ func fleetDo(ctx context.Context, c *cli.Command, method, path string, body []by
 		return out, fmt.Errorf("unauthorized — set $SHIPMATES_FLEET_TOKEN or pass --token-file")
 	}
 	if resp.StatusCode >= 300 {
-		return out, fmt.Errorf("fleet %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
+		return out, fmt.Errorf("fleet %d: %s", resp.StatusCode, safeErr(out))
 	}
 	return out, nil
 }
