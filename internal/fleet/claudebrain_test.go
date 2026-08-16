@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -145,7 +146,7 @@ func TestClaudeBrainChildEnv(t *testing.T) {
 
 	var pathVars []string
 	var pathValue string
-	fleetURL, fleetToken := "", ""
+	fleetURL := ""
 	for _, kv := range env {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
@@ -157,8 +158,6 @@ func TestClaudeBrainChildEnv(t *testing.T) {
 			pathValue = v
 		case k == "SHIPMATES_FLEET_URL":
 			fleetURL = v
-		case k == "SHIPMATES_FLEET_TOKEN":
-			fleetToken = v
 		}
 	}
 
@@ -177,37 +176,146 @@ func TestClaudeBrainChildEnv(t *testing.T) {
 	if fleetURL != "http://127.0.0.1:8443" {
 		t.Errorf("SHIPMATES_FLEET_URL = %q", fleetURL)
 	}
-	if fleetToken != "shhh" {
-		t.Errorf("SHIPMATES_FLEET_TOKEN = %q", fleetToken)
+}
+
+// M7: the session's context is filled with ship feeds and GitHub-derived text,
+// so anything in its environment is one prompt injection away from being
+// echoed out through an allowed command. The fleet credential must not be
+// there — not under its own name, and not as a loose value either.
+func TestClaudeBrainChildEnv_CarriesNoFleetToken(t *testing.T) {
+	// The fleet process itself is usually started with the token exported;
+	// the child env is built from os.Environ(), so this is the realistic case.
+	t.Setenv("SHIPMATES_FLEET_TOKEN", "inherited-secret")
+	c := newClaudeBrain("haiku", "127.0.0.1:8443", "shhh")
+
+	for _, kv := range c.childEnv() {
+		k, v, _ := strings.Cut(kv, "=")
+		if strings.EqualFold(k, "SHIPMATES_FLEET_TOKEN") {
+			t.Errorf("the fleet token must not be in the child env, found %q", kv)
+		}
+		if v == "shhh" || v == "inherited-secret" {
+			t.Errorf("the fleet token leaked into the child env as %q", kv)
+		}
 	}
 }
 
-// A fleet started without a token still has to produce a well-formed env — an
-// empty token is a valid dev configuration, not a reason to omit the variable.
-func TestClaudeBrainChildEnv_EmptyTokenStillExported(t *testing.T) {
+// The credential reaches the session as a 0600 file it can name but not read
+// with any tool it is allowed to run.
+func TestClaudeBrainTokenFile(t *testing.T) {
+	c := newClaudeBrain("haiku", "127.0.0.1:8443", "shhh")
+	path, err := c.ensureTokenFile()
+	if err != nil {
+		t.Fatalf("ensureTokenFile: %v", err)
+	}
+	if path == "" {
+		t.Fatal("a fleet with a token must materialize a credential file")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if string(raw) != "shhh" {
+		t.Errorf("token file holds %q", raw)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows does not model the unix mode bits, so only assert where it means
+	// something. The group/other bits are the whole point of the check.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Errorf("credential file mode = %v, want 0600", info.Mode().Perm())
+	}
+	// Repeated calls reuse the same file rather than littering temp dirs.
+	again, err := c.ensureTokenFile()
+	if err != nil || again != path {
+		t.Errorf("ensureTokenFile is not idempotent: %q vs %q (%v)", again, path, err)
+	}
+
+	c.close()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("close must remove the credential file, stat err = %v", err)
+	}
+}
+
+// A token-less dev fleet has no credential to write and no flag to teach.
+func TestClaudeBrainTokenFile_NoneWithoutAToken(t *testing.T) {
 	c := newClaudeBrain("", "localhost:1", "")
-	var found bool
-	for _, kv := range c.childEnv() {
-		if kv == "SHIPMATES_FLEET_TOKEN=" {
-			found = true
+	path, err := c.ensureTokenFile()
+	if err != nil || path != "" {
+		t.Fatalf("want no file for a token-less fleet, got %q (%v)", path, err)
+	}
+	if got := captainPrompt(path); strings.Contains(got, "--token-file") {
+		t.Error("a token-less fleet must not teach a --token-file argument")
+	}
+	c.close() // must not panic
+}
+
+// M7: curl was a general-purpose egress primitive in a session whose context
+// is attacker-influenceable. The `shipmates fleet` CLI covers the Commodore's
+// whole job, so the tool list is exactly that and nothing else.
+func TestAllowedBrainTools_NoEgressPrimitive(t *testing.T) {
+	if allowedBrainTools != "Bash(shipmates fleet:*)" {
+		t.Fatalf("the brain's tool surface changed: %q", allowedBrainTools)
+	}
+
+	// Assert on the argv the child is ACTUALLY launched with, not just on the
+	// constant: widening the surface at the call site is exactly the mistake
+	// this test exists to catch.
+	c := newClaudeBrain("haiku", "127.0.0.1:8443", "shhh")
+	c.sessionID = "sess-1"
+	argv := c.args("/tmp/creds/fleet-token")
+
+	var allowed string
+	for i, a := range argv {
+		if a == "--allowedTools" && i+1 < len(argv) {
+			allowed = argv[i+1]
 		}
 	}
-	if !found {
-		t.Error("SHIPMATES_FLEET_TOKEN must be exported even when empty")
+	if allowed == "" {
+		t.Fatalf("no --allowedTools in argv: %q", argv)
+	}
+	for _, banned := range []string{"curl", "wget", "nc ", "Bash(*)", "WebFetch", "Read"} {
+		if strings.Contains(allowed, banned) {
+			t.Errorf("--allowedTools must not include %q, got %q", banned, allowed)
+		}
+	}
+
+	// And the credential must never appear as an argument — argv is visible in
+	// ps/Task Manager to every process on the host.
+	for _, a := range argv {
+		if strings.Contains(a, "shhh") {
+			t.Errorf("the fleet token appears in the child argv: %q", a)
+		}
 	}
 }
 
 // The Commodore prompt rides every invocation; a resumed turn without it is
 // generic Claude that has forgotten it commands a fleet.
 func TestCaptainPromptCoversToolSurface(t *testing.T) {
+	got := captainPrompt("/tmp/creds/fleet-token")
 	for _, want := range []string{
 		"Commodore", "Admiral",
 		"shipmates fleet ls", "shipmates fleet status", "shipmates fleet tell",
 		"shipmates fleet tail", "shipmates fleet pending", "shipmates fleet resolve",
 		"shipmates fleet beads", "shipmates fleet dispatch",
 	} {
-		if !strings.Contains(captainPrompt, want) {
+		if !strings.Contains(got, want) {
 			t.Errorf("captainPrompt is missing %q — the session can't use that tool", want)
 		}
+	}
+	// Every subcommand has to carry the credential argument, or the session
+	// silently loses the ability to do its job.
+	for _, sub := range []string{"ls", "status", "tell", "tail", "pending", "resolve", "beads", "dispatch"} {
+		if !strings.Contains(got, "shipmates fleet "+sub+" --token-file /tmp/creds/fleet-token") {
+			t.Errorf("`%s` is missing its --token-file argument in the prompt", sub)
+		}
+	}
+	if strings.Contains(got, "{{AUTH}}") {
+		t.Error("prompt template placeholder left unexpanded")
+	}
+	// And the session is told not to hand the credential to anyone.
+	if !strings.Contains(got, "never print its contents") {
+		t.Error("prompt should tell the session the file is a credential")
 	}
 }
