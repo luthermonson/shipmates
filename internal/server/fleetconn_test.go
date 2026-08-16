@@ -18,14 +18,20 @@ func TestToWebsocketURL(t *testing.T) {
 		name, in, want string
 		wantErr        bool
 	}{
-		{name: "http gets ws and the default path", in: "http://fleet.example.com", want: "ws://fleet.example.com/connect"},
 		{name: "https gets wss", in: "https://fleet.example.com", want: "wss://fleet.example.com/connect"},
 		{name: "bare root path is replaced", in: "https://fleet.example.com/", want: "wss://fleet.example.com/connect"},
 		{name: "explicit path is preserved", in: "https://fleet.example.com/tunnel", want: "wss://fleet.example.com/tunnel"},
-		{name: "ws passes through", in: "ws://localhost:9000/connect", want: "ws://localhost:9000/connect"},
+		{name: "ws passes through for loopback", in: "ws://localhost:9000/connect", want: "ws://localhost:9000/connect"},
 		{name: "wss passes through", in: "wss://fleet.example.com/connect", want: "wss://fleet.example.com/connect"},
-		{name: "port is preserved", in: "http://10.0.0.5:8080", want: "ws://10.0.0.5:8080/connect"},
+		{name: "loopback http gets ws and the default path", in: "http://127.0.0.1:8443", want: "ws://127.0.0.1:8443/connect"},
 		{name: "surrounding whitespace is trimmed", in: "  https://fleet.example.com  ", want: "wss://fleet.example.com/connect"},
+		// L3: the connect headers carry the fleet token AND this ship's own
+		// API token. Plaintext to anything but loopback is refused, never
+		// silently downgraded.
+		{name: "plaintext http to a remote host is refused", in: "http://fleet.example.com", wantErr: true},
+		{name: "plaintext http to a LAN address is refused", in: "http://10.0.0.5:8080", wantErr: true},
+		{name: "plaintext ws to a remote host is refused", in: "ws://fleet.example.com/connect", wantErr: true},
+		{name: "credentials in the url are refused", in: "https://user:pw@fleet.example.com", wantErr: true},
 		// A scheme-less host parses as a bare path, not a host — silently
 		// dialing that would produce a confusing connection error much later.
 		{name: "no scheme is rejected", in: "fleet.example.com", wantErr: true},
@@ -171,6 +177,7 @@ func TestFetchFleetPolicyRejectsGarbage(t *testing.T) {
 func TestFetchFleetPolicySendsNoBearerWhenTokenless(t *testing.T) {
 	// An empty token must mean no Authorization header at all — sending
 	// "Bearer " reads as a malformed credential to most gateways.
+	t.Chdir(t.TempDir()) // a successful fetch persists the policy cache
 	var sawAuth string
 	var sawAccept string
 	mux := http.NewServeMux()
