@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/luthermonson/shipmates/internal/personaname"
 	"github.com/luthermonson/shipmates/internal/project"
 )
 
@@ -51,17 +52,43 @@ func ParsePolicy(s string) Policy {
 	return PolicyOff
 }
 
+// ErrInvalidPersona is returned by the berth operations that would otherwise
+// hand an unchecked persona name to `git worktree add`.
+var ErrInvalidPersona = errors.New("invalid persona name")
+
+// invalidPersonaSegment is the quarantine segment Dir and Branch substitute
+// for a name that is not a legal persona name. Same reasoning, and the same
+// NUL trick, as project.invalidPersonaSegment: the result stays inside
+// .shipmates/berths (nothing lands somewhere surprising) and cannot be opened
+// or passed to git, because both unix and Windows reject a path or an argv
+// entry containing a NUL byte. Ensure and Remove refuse with ErrInvalidPersona
+// before it gets that far; this is the backstop for any other caller.
+const invalidPersonaSegment = "\x00invalid-persona"
+
+func personaSegment(persona string) string {
+	if !personaname.Valid(persona) {
+		return invalidPersonaSegment
+	}
+	return persona
+}
+
 // Dir returns the conventional berth path for a persona, relative to the repo
 // root: .shipmates/berths/<persona>. This is the *conventional* path; a
 // persona may override cwd in frontmatter to point elsewhere.
+//
+// A berth path is not merely read: it is the argument to `git worktree add`,
+// so an unchecked "../.." here creates a checkout wherever the caller's
+// attacker pointed. An illegal persona name therefore yields a contained,
+// unopenable path rather than a joined one.
 func Dir(persona string) string {
-	return filepath.Join(project.Dir, "berths", persona)
+	return filepath.Join(project.Dir, "berths", personaSegment(persona))
 }
 
 // Branch returns the conventional berth branch name — one worktree per branch
-// is a git rule, so each berth needs its own ref.
+// is a git rule, so each berth needs its own ref. An illegal persona name
+// yields a ref git will refuse rather than one it might resolve.
 func Branch(persona string) string {
-	return "berth/" + persona
+	return "berth/" + personaSegment(persona)
 }
 
 // IsGitRepo reports whether the current directory is inside a git working tree.
@@ -104,6 +131,11 @@ func baseRef() string {
 func Ensure(persona string, policy Policy) (string, error) {
 	if policy == PolicyOff {
 		return "", nil
+	}
+	// Ahead of IsGitRepo so the refusal is the same whether or not the
+	// project happens to be a git checkout.
+	if err := personaname.Validate(persona); err != nil {
+		return "", fmt.Errorf("%w: %s", ErrInvalidPersona, err)
 	}
 	if !IsGitRepo() {
 		if policy == PolicyRequire {
@@ -251,6 +283,9 @@ func HasNestedWorktree(worktreePath string) (bool, error) {
 // check (nested-worktree refusal stands regardless — that's mid-flight work).
 // A non-existent berth is not an error.
 func Remove(persona string, force bool) error {
+	if err := personaname.Validate(persona); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidPersona, err)
+	}
 	rel := Dir(persona)
 	if _, err := os.Stat(rel); errors.Is(err, os.ErrNotExist) {
 		return nil

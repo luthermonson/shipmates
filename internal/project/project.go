@@ -16,6 +16,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/luthermonson/shipmates/internal/personaname"
 )
 
 const (
@@ -30,14 +32,53 @@ const (
 	CommandsDir      = ".claude/commands"
 )
 
-// MemoryDir is a persona's persistent memory directory.
+// ErrInvalidPersona is returned by the persona-scoped read/write helpers in
+// this package when the name would not survive personaname.Valid. Callers that
+// only build a path get the quarantine segment below instead; callers that do
+// I/O get this.
+var ErrInvalidPersona = errors.New("invalid persona name")
+
+// invalidPersonaSegment is what the persona-scoped path helpers substitute for
+// a name that is not a legal persona name.
+//
+// Every one of those helpers returns a bare string that a caller immediately
+// joins, opens, writes, or hands to git. Historically each of them trusted its
+// argument, so the guarantee that a persona name cannot escape its directory
+// lived entirely in whoever called them — and the captain's HTTP handlers,
+// which take the name from a URL wildcard, did not. Validating here as well
+// means a future caller cannot reintroduce the traversal by forgetting.
+//
+// The refusal has to satisfy two things at once: it must stay *inside* the
+// directory the caller expected (so nothing lands somewhere surprising), and
+// it must be impossible to actually open. A NUL byte does both. It is not a
+// path separator, so filepath.Join keeps the segment where it is; and both
+// syscall.BytePtrFromString (unix) and syscall.UTF16PtrFromString (Windows)
+// reject a string containing one, so every os.Open/os.WriteFile/os.Stat and
+// every exec argv built from it fails with EINVAL rather than touching the
+// filesystem. Refusal is therefore enforced by the OS, not by a convention the
+// next caller has to remember.
+const invalidPersonaSegment = "\x00invalid-persona"
+
+// personaSegment returns the persona name to use as a path segment: the name
+// itself when it is legal, the unopenable quarantine segment when it is not.
+func personaSegment(persona string) string {
+	if !personaname.Valid(persona) {
+		return invalidPersonaSegment
+	}
+	return persona
+}
+
+// MemoryDir is a persona's persistent memory directory. An illegal persona
+// name yields a contained, unopenable path — see invalidPersonaSegment.
 func MemoryDir(persona string) string {
-	return filepath.Join(Dir, MemoryDirName, persona)
+	return filepath.Join(Dir, MemoryDirName, personaSegment(persona))
 }
 
 // AgentPath is where a persona's subagent file is vendored for Claude Code.
+// An illegal persona name yields a contained, unopenable path — see
+// invalidPersonaSegment.
 func AgentPath(persona string) string {
-	return filepath.Join(AgentsDir, persona+".md")
+	return filepath.Join(AgentsDir, personaSegment(persona)+".md")
 }
 
 // CommandPath is where a slash command is vendored for Claude Code.
@@ -53,9 +94,10 @@ func PoliciesDir() string {
 }
 
 // PolicyPath is the vendored location of a persona's policy.yaml overlay.
-// See PoliciesDir for why it lives under .shipmates/.
+// See PoliciesDir for why it lives under .shipmates/. An illegal persona name
+// yields a contained, unopenable path — see invalidPersonaSegment.
 func PolicyPath(persona string) string {
-	return filepath.Join(PoliciesDir(), persona+".yaml")
+	return filepath.Join(PoliciesDir(), personaSegment(persona)+".yaml")
 }
 
 // ArticlesPath is the vendored location of the Ship's Articles document
@@ -78,9 +120,12 @@ func PidFile() string  { return filepath.Join(SessionsDir(), "server.pid") }
 func LogFile() string  { return filepath.Join(SessionsDir(), "server.log") }
 
 // SessionMarker records that a persona's claude session has been created, so
-// `ask` knows whether to create (--session-id) or continue (--resume).
+// `ask` knows whether to create (--session-id) or continue (--resume). An
+// illegal persona name yields a contained, unopenable path — see
+// invalidPersonaSegment. This one is a file *write* with attacker-influenced
+// JSON content, so it is the helper that most needed the guard.
 func SessionMarker(persona string) string {
-	return filepath.Join(SessionsDir(), persona+".session")
+	return filepath.Join(SessionsDir(), personaSegment(persona)+".session")
 }
 
 // SessionMeta is the per-persona session record stored at SessionMarker. It
@@ -103,6 +148,9 @@ type SessionMeta struct {
 // exists yet. A legacy plain-name marker is read as a name with empty hash
 // (which suppresses auto-fresh — we don't abandon a pre-upgrade session).
 func ReadSessionMeta(persona string) (meta SessionMeta, ok bool) {
+	if !personaname.Valid(persona) {
+		return SessionMeta{}, false
+	}
 	b, err := os.ReadFile(SessionMarker(persona))
 	if err != nil {
 		return SessionMeta{}, false
@@ -117,7 +165,15 @@ func ReadSessionMeta(persona string) (meta SessionMeta, ok bool) {
 // fingerprint. cwd is stored so subsequent resumes land in the same directory
 // the session was created in — the "berth only at creation" guardrail. Pass
 // "" for cwd to preserve today's repo-root behavior.
+// The marker is written 0600, not 0644. It carries the session UUID that
+// `claude --resume` accepts as the whole identity of a conversation; a
+// world-readable copy hands every account on the machine the handle to resume
+// another user's agent session. See WritePrivateFile for what 0600 does and
+// does not buy on Windows.
 func WriteSessionMeta(persona, name, id, configHash, cwd string) error {
+	if err := personaname.Validate(persona); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidPersona, err)
+	}
 	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
 		return err
 	}
@@ -125,7 +181,7 @@ func WriteSessionMeta(persona, name, id, configHash, cwd string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(SessionMarker(persona), b, 0o644)
+	return WritePrivateFile(SessionMarker(persona), b)
 }
 
 // DeleteSessionMeta removes a persona's session marker. Called by auto-repair
@@ -133,6 +189,9 @@ func WriteSessionMeta(persona, name, id, configHash, cwd string) error {
 // (rotated jsonl, cache clean, upgrade wipe). A missing marker is not an
 // error — the next SessionLaunch will start fresh regardless.
 func DeleteSessionMeta(persona string) error {
+	if err := personaname.Validate(persona); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidPersona, err)
+	}
 	err := os.Remove(SessionMarker(persona))
 	if err != nil && os.IsNotExist(err) {
 		return nil
@@ -474,6 +533,13 @@ func IsFleetPersonaFile(path string) bool {
 // silently dropped. See personatrust.go.
 func ResolvePersonaConfig(persona string) (PersonaConfig, error) {
 	var cfg PersonaConfig
+
+	// An illegal name never reaches the filesystem. Callers that ignore the
+	// error (there are several — the spawn paths) get a zero config, which
+	// fails closed: no bypass mode, no command backing, no berth.
+	if err := personaname.Validate(persona); err != nil {
+		return cfg, fmt.Errorf("%w: %s", ErrInvalidPersona, err)
+	}
 
 	// A persona with no file on disk resolves to nothing, unchanged: the
 	// operator's file configures personas the crew actually has, and an

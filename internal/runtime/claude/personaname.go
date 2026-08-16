@@ -1,15 +1,6 @@
 package claude
 
-import (
-	"fmt"
-	"regexp"
-)
-
-// personaNameRE is the one spelling of a legal persona name in this package.
-// Lowercase-first, then lowercase letters, digits, hyphens and underscores —
-// nothing that can be a path separator, a parent-directory hop, a leading
-// flag dash, or whitespace.
-var personaNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+import "github.com/luthermonson/shipmates/internal/personaname"
 
 // validatePersonaName rejects names that could escape or alias persona-scoped
 // paths, or smuggle an extra CLI flag into the child's argv. A persona name
@@ -25,15 +16,10 @@ var personaNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 // UninstallPersona, StartSession, ResumeSession — not only at the CLI
 // boundary, because the runtime interface is a public seam.
 //
-// NOTE: shipmates has one canonical validator, project.ValidatePersonaName,
-// and this function deliberately mirrors its regexp and its error text so the
-// two cannot disagree. It is duplicated here only because that function does
-// not exist on this branch's base (`main` carries no ValidatePersonaName in
-// internal/project); once it lands, this file should become a one-line
-// delegation to it.
+// This file used to carry its own copy of the regexp, with a note saying it
+// should collapse into shipmates' canonical validator once one landed on main.
+// internal/personaname is that validator, and this is the collapse: one rule,
+// one error message, nothing left here that can drift away from it.
 func validatePersonaName(persona string) error {
-	if !personaNameRE.MatchString(persona) {
-		return fmt.Errorf("invalid persona %q (use lowercase letters, digits, hyphens, or underscores)", persona)
-	}
-	return nil
+	return personaname.Validate(persona)
 }

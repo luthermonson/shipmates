@@ -52,3 +52,39 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// eventLogCap bounds the in-memory activity feed. A captain wired to a fleet
+// never exits on idle (see idleTimeoutFleeted), so "grows for the life of the
+// process" meant "grows forever": every hook callback, every assistant chunk,
+// every auto-allow appended a struct that was then copied wholesale on every
+// GET /events — which the fleet polls every 2 seconds per ship. 5000 events is
+// several hours of a busy crew and a few megabytes at worst.
+//
+// What capping means for consumers: /events is a *recent* feed, not an
+// archive. The fleet's mirrorLoop already persists what it reads into SQLite
+// and advances a timestamp watermark, so history survives on the fleet side
+// and a cap only matters if a ship emits more than eventLogCap events between
+// two 2-second polls — which would take a sustained ~2500 events/second.
+// Consumers that page backwards through the ship's own /events (the fleet's
+// conversation transcript reader) now see the newest eventLogCap entries
+// rather than all of them; that is the intended trade, and the alternative
+// was an unbounded allocation an anonymous caller could drive.
+const eventLogCap = 5000
+
+// eventLog is the activity feed's fixed-capacity counterpart to ring: same
+// drop-oldest rule, Event elements instead of bytes. It stays a slice type so
+// the feed can still be ranged and indexed directly.
+//
+// Not goroutine-safe — callers hold the owning Server's mutex.
+type eventLog []Event
+
+// Append adds one event, evicting the oldest when the log is at capacity. The
+// eviction copies down in place rather than reslicing, so the backing array
+// stays bounded instead of the slice header merely walking forward through an
+// ever-growing allocation.
+func (l *eventLog) Append(e Event) {
+	*l = append(*l, e)
+	if over := len(*l) - eventLogCap; over > 0 {
+		*l = append((*l)[:0], (*l)[over:]...)
+	}
+}

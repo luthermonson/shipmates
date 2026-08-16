@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/beadid"
 )
 
 // Beads integration (fleet phase 4, single ship). Mates are beads-native: bd
@@ -222,12 +224,15 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 		Title       string  `json:"title"`
 		Description *string `json:"description"` // pointer: "" is a real edit (clear it)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, maxJSONBody, &body, "bad body") {
 		return
 	}
 	args := []string{"update", id}
-	if a := strings.TrimSpace(body.Assignee); a != "" {
+	a, ok := beadField(w, "assignee", body.Assignee, beadAssigneeMax, false)
+	if !ok {
+		return
+	}
+	if a != "" {
 		args = append(args, "--assignee="+a)
 	}
 	if p := strings.TrimSpace(body.Priority); p != "" {
@@ -237,11 +242,19 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		args = append(args, "--priority="+p)
 	}
-	if t := strings.TrimSpace(body.Title); t != "" {
+	t, ok := beadField(w, "title", body.Title, beadTitleMax, false)
+	if !ok {
+		return
+	}
+	if t != "" {
 		args = append(args, "--title="+t)
 	}
 	if body.Description != nil {
-		args = append(args, "--description="+strings.TrimSpace(*body.Description), "--allow-empty-description")
+		d, ok := beadField(w, "description", *body.Description, beadDescMax, true)
+		if !ok {
+			return
+		}
+		args = append(args, "--description="+d, "--allow-empty-description")
 	}
 	if len(args) == 2 {
 		http.Error(w, "want {assignee?, priority?, title?, description?}", http.StatusBadRequest)
@@ -252,7 +265,9 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bd update: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.addEvent(Event{Persona: "(fleet)", Type: "bead:update", Text: id + " → " + strings.TrimSpace(body.Assignee+" "+body.Priority)})
+	// The event line quotes the validated values, not the raw body: this text
+	// is rendered in the fleet UI and mirrored into other agents' context.
+	s.addEvent(Event{Persona: "(fleet)", Type: "bead:update", Text: id + " → " + strings.TrimSpace(a+" "+strings.TrimSpace(body.Priority))})
 	invalidateBeadsSummary()
 	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	_, _ = w.Write([]byte(out))
@@ -413,21 +428,40 @@ func (s *Server) handleBeadsSummary(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]int{"open": open})
 }
 
-// beadIDOK guards the show endpoint: bd ids are prefix-hash (proj-c03, with
+// beadIDOK guards the bead endpoints: bd ids are prefix-hash (proj-c03, with
 // dotted epics like proj-a3f8.1). Reject anything else so a path segment can
 // never smuggle flags or shell-ish input into the bd invocation.
-func beadIDOK(id string) bool {
-	if id == "" || len(id) > 64 {
-		return false
+//
+// The rule itself lives in internal/beadid. It used to live here AND in
+// internal/fleet, and the two drifted: the fleet copy was taught to reject
+// ".." (#24, hardened again in #38) and this one was not, so the ship still
+// accepted an id that the proxy in front of it refused. One guard, one place.
+func beadIDOK(id string) bool { return beadid.Valid(id) }
+
+// Bounds on the caller-supplied text that becomes a bd flag value. Nothing
+// here is a shell-injection defence — runBD builds argv directly and every
+// value rides flag=value form, so there is no shell and a leading dash cannot
+// become a flag. These bound *size* and *content*: an unbounded --description
+// lands in the shared beads graph, which every ship pulls and every mate
+// reads, and a title carrying a CR or an ANSI escape rewrites the terminal of
+// whoever lists the graph next. See safeText.
+const (
+	beadTitleMax    = 500
+	beadDescMax     = 32 << 10
+	beadAssigneeMax = 200
+	beadReasonMax   = 2000
+	beadRefMax      = 500
+)
+
+// beadField validates one caller-supplied bd flag value, writing a 400 and
+// reporting false when it is over-long or carries control characters.
+func beadField(w http.ResponseWriter, name, v string, limit int, multiline bool) (string, bool) {
+	out, ok := safeText(v, limit, multiline)
+	if !ok {
+		http.Error(w, name+" is too long or contains control characters", http.StatusBadRequest)
+		return "", false
 	}
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
-		default:
-			return false
-		}
-	}
-	return id[0] != '-'
+	return out, true
 }
 
 // handleBeadShow serves one bead's full record: `bd show <id> --json`.
@@ -465,12 +499,23 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 		Type        string `json:"type"`
 		ExternalRef string `json:"external_ref"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Title) == "" {
+	if !decodeJSONBody(w, r, maxJSONBody, &body, "want {title, description?, priority?, type?, external_ref?}") {
+		return
+	}
+	title, ok := beadField(w, "title", body.Title, beadTitleMax, false)
+	if !ok {
+		return
+	}
+	if title == "" {
 		http.Error(w, "want {title, description?, priority?, type?, external_ref?}", http.StatusBadRequest)
 		return
 	}
-	args := []string{"create", "--json", "--title=" + strings.TrimSpace(body.Title)}
-	if d := strings.TrimSpace(body.Description); d != "" {
+	args := []string{"create", "--json", "--title=" + title}
+	d, ok := beadField(w, "description", body.Description, beadDescMax, true)
+	if !ok {
+		return
+	}
+	if d != "" {
 		args = append(args, "--description="+d)
 	}
 	if p := strings.TrimSpace(body.Priority); p != "" {
@@ -489,7 +534,11 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if ref := strings.TrimSpace(body.ExternalRef); ref != "" {
+	ref, ok := beadField(w, "external_ref", body.ExternalRef, beadRefMax, false)
+	if !ok {
+		return
+	}
+	if ref != "" {
 		args = append(args, "--external-ref="+ref)
 	}
 	out, err := runBD(args...)
@@ -497,7 +546,7 @@ func (s *Server) handleBeadCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bd create: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	s.addEvent(Event{Persona: "(fleet)", Type: "bead:create", Text: strings.TrimSpace(body.Title)})
+	s.addEvent(Event{Persona: "(fleet)", Type: "bead:create", Text: title})
 	invalidateBeadsSummary()
 	s.markBeadsDirty() // announce to the fleet without waiting on the watcher
 	w.Header().Set("Content-Type", "application/json")
@@ -515,12 +564,19 @@ func (s *Server) handleBeadClose(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad bead id", http.StatusBadRequest)
 		return
 	}
+	// A close with no body is legal (the reason is optional), so a decode
+	// error stays ignored here — but the body is bounded first.
 	var body struct {
 		Reason string `json:"reason"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	args := []string{"close", id}
-	if reason := strings.TrimSpace(body.Reason); reason != "" {
+	reason, ok := beadField(w, "reason", body.Reason, beadReasonMax, true)
+	if !ok {
+		return
+	}
+	if reason != "" {
 		args = append(args, "--reason="+reason)
 	}
 	out, err := runBD(args...)
