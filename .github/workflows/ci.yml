@@ -100,8 +100,15 @@ jobs:
         # exit status 128` — before compiling anything. Cheaper than dropping
         # the stamp with -buildvcs=false, which would silently strip the commit
         # from every binary this job produces.
+        #
+        # "*" rather than the workspace path: github.workspace is the HOST path
+        # (/home/runner/_work/...), while inside the image the checkout is
+        # mounted at /__w/..., so naming it marks a directory that does not
+        # exist here. actions/checkout does mark the right path, but only in
+        # the temporary global config it scopes to its own step, so later steps
+        # are back to untrusted.
         if: matrix.container != ''
-        run: git config --global --add safe.directory "${{ github.workspace }}"
+        run: git config --global --add safe.directory "*"
 
       - name: Toolchain
         # Records which Go actually ran, so a mismatch between the image tag
@@ -140,7 +147,7 @@ jobs:
       - name: Trust the workspace
         # See the note on the same step in `test`: root-in-image over a
         # runner-owned checkout trips git's dubious-ownership guard.
-        run: git config --global --add safe.directory "${{ github.workspace }}"
+        run: git config --global --add safe.directory "*"
 
       - name: Toolchain
         run: |
