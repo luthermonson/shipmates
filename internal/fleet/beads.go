@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/beadid"
 	"github.com/luthermonson/shipmates/internal/personaname"
 )
 
@@ -23,7 +24,14 @@ func (b *Server) handleBeadsNudge(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		From string `json:"from"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	// Best-effort decode (an empty body still means "nudge everyone"), but the
+	// read itself is bounded — this endpoint is reachable by any connected
+	// ship and used to accept an unbounded body.
+	raw, ok := readLimitedBody(w, r, nudgeBodyLimit)
+	if !ok {
+		return
+	}
+	_ = json.Unmarshal(raw, &body)
 	targets := 0
 	for _, key := range b.dialer.ListClients() {
 		if key == body.From {
@@ -56,7 +64,7 @@ func (b *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	id := r.PathValue("id")
 	if !beadIDOK(id) {
-		http.Error(w, "bad bead id", http.StatusBadRequest)
+		httpError(w, "bad bead id", http.StatusBadRequest)
 		return
 	}
 	var body struct {
@@ -64,16 +72,20 @@ func (b *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 		Persona string `json:"persona"` // target mate
 		Title   string `json:"title"`   // bead title, for the dispatch message
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+	raw, sized := readLimitedBody(w, r, beadBodyLimit)
+	if !sized {
+		return
+	}
+	if err := json.Unmarshal(raw, &body); err != nil ||
 		strings.TrimSpace(body.Ship) == "" || strings.TrimSpace(body.Persona) == "" {
-		http.Error(w, "want {ship, persona, title?}", http.StatusBadRequest)
+		httpError(w, "want {ship, persona, title?}", http.StatusBadRequest)
 		return
 	}
 	persona := strings.TrimSpace(body.Persona)
 	// persona becomes a path segment in the dispatch tell (deliverDispatch)
 	// and an assignee on the shared graph; gate it at the boundary.
 	if !personaname.Valid(persona) {
-		http.Error(w, "bad persona", http.StatusBadRequest)
+		httpError(w, "bad persona", http.StatusBadRequest)
 		return
 	}
 	shipName, _, _ := strings.Cut(strings.TrimSpace(body.Ship), ":")
@@ -103,7 +115,7 @@ func (b *Server) handleBeadAssign(w http.ResponseWriter, r *http.Request) {
 	if err := b.deliverDispatch(r.Context(), queuedDispatch{
 		Ship: body.Ship, Persona: persona, Bead: id, Title: strings.TrimSpace(body.Title),
 	}, body.Ship != key); err != nil {
-		http.Error(w, fmt.Sprintf("assigned %s, but dispatch failed: %v", assignee, err), http.StatusBadGateway)
+		httpError(w, fmt.Sprintf("assigned %s, but dispatch failed: %v", assignee, err), http.StatusBadGateway)
 		return
 	}
 
@@ -193,28 +205,12 @@ func (b *Server) dispatchSweepLoop(ctx context.Context) {
 	}
 }
 
-// beadIDOK mirrors the captain-side guard: prefix-hash ids only, so a path
-// segment can never smuggle request-line framing into the tunnel proxy, nor
-// walk out of the segment it was interpolated into. url.PathEscape leaves "."
-// alone, so "/bead/../update" would reach the ship as a traversal if the
-// alphabet check were the only guard — real ids are hashes and never contain
-// "..", so rejecting it costs nothing.
-func beadIDOK(id string) bool {
-	if id == "" || len(id) > 64 {
-		return false
-	}
-	if strings.Contains(id, "..") {
-		return false
-	}
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
-		default:
-			return false
-		}
-	}
-	return id[0] != '-'
-}
+// beadIDOK is the fleet's name for the one shared bead-id guard. The rule used
+// to live here as its own copy, and the ship had a second copy that drifted —
+// it still accepted ".." long after this one stopped (issue #42, M2). The rule
+// now lives in internal/beadid and both sides delegate; the local name is kept
+// so every call site (and the path-safety tests from PR #38) reads the same.
+func beadIDOK(id string) bool { return beadid.Valid(id) }
 
 // handleAggregateBeads fans /beads.json out to every connected captain and
 // returns the union deduped by bead id — ships syncing one shared graph

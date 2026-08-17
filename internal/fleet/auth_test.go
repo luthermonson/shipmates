@@ -109,7 +109,7 @@ func TestAuthGate_AcceptsBearerAndCookie(t *testing.T) {
 	t.Run("cookie", func(t *testing.T) {
 		var reached bool
 		req := httptest.NewRequest("GET", "/api/captains", nil)
-		req.AddCookie(&http.Cookie{Name: cookieName, Value: "s3cret"})
+		req.AddCookie(&http.Cookie{Name: cookieName, Value: sessionID("s3cret")})
 		rec := httptest.NewRecorder()
 		b.authGate(okHandler(&reached)).ServeHTTP(rec, req)
 		if !reached {
@@ -130,7 +130,16 @@ func TestAuthenticated_RejectsNearMisses(t *testing.T) {
 		{"secret plus suffix", func(r *http.Request) { r.Header.Set("Authorization", "Bearer s3crets") }},
 		{"wrong cookie", func(r *http.Request) { r.AddCookie(&http.Cookie{Name: cookieName, Value: "nope"}) }},
 		{"right value wrong cookie name", func(r *http.Request) {
-			r.AddCookie(&http.Cookie{Name: "shipmates_bridge", Value: "s3cret"})
+			r.AddCookie(&http.Cookie{Name: "shipmates_bridge", Value: sessionID("s3cret")})
+		}},
+		// M5: the two credentials are not interchangeable in EITHER direction.
+		// A pre-derivation cookie (the raw secret) is no longer a session, and
+		// a session id is not a bearer token.
+		{"raw secret in the cookie", func(r *http.Request) {
+			r.AddCookie(&http.Cookie{Name: cookieName, Value: "s3cret"})
+		}},
+		{"session id as a bearer token", func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer "+sessionID("s3cret"))
 		}},
 	}
 	for _, tc := range cases {
@@ -218,8 +227,20 @@ func TestHandleLogin_POSTSetsHardenedCookie(t *testing.T) {
 		t.Fatalf("want exactly one cookie, got %d", len(cookies))
 	}
 	c := cookies[0]
-	if c.Name != cookieName || c.Value != "s3cret" {
-		t.Errorf("cookie name/value wrong: %s=%s", c.Name, c.Value)
+	if c.Name != cookieName {
+		t.Errorf("cookie name wrong: %s", c.Name)
+	}
+	// M5: the cookie carries a DERIVED session id. The shared secret is also
+	// the bearer token for every /api/* call and for the ship-side tunnel
+	// connect, so a cookie that leaks must not be the master key.
+	if c.Value == "s3cret" {
+		t.Errorf("session cookie carries the raw shared secret")
+	}
+	if c.Value != sessionID("s3cret") {
+		t.Errorf("cookie value %q is not the derived session id", c.Value)
+	}
+	if c.Value == "" {
+		t.Errorf("session cookie is empty")
 	}
 	if !c.HttpOnly {
 		t.Errorf("session cookie must be HttpOnly")

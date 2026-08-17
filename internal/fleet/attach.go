@@ -190,6 +190,9 @@ func (b *Server) proxyRaw(ctx context.Context, clientKey, method, path, contentT
 	if !ok {
 		return nil, http.StatusNotFound, fmt.Errorf("no such captain: %s", clientKey)
 	}
+	if err := checkDialPort(port, clientKey); err != nil {
+		return nil, http.StatusBadGateway, err
+	}
 	if !b.dialer.HasSession(clientKey) {
 		return nil, http.StatusGatewayTimeout, fmt.Errorf("captain %s not currently connected", clientKey)
 	}

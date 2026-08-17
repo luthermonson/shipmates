@@ -12,10 +12,12 @@ package fleet
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -23,6 +25,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +46,11 @@ var uiFS embed.FS
 type Server struct {
 	dialer *remotedialer.Server
 	token  string
+
+	// trustProxy says a TLS-terminating reverse proxy sits in front of us and
+	// its X-Forwarded-Proto may be believed. Off by default: the header is
+	// client-supplied on a direct connection. See requestIsHTTPS.
+	trustProxy bool
 
 	mu       sync.Mutex
 	captains map[string]*Captain // keyed by clientKey
@@ -116,13 +125,46 @@ type Options struct {
 	// PolicyPath overrides the on-disk fleet-policy YAML location. Empty =
 	// use the SHIPMATES_FLEET_POLICY env var or ~/.shipmates/fleet-policy.yaml.
 	PolicyPath string
+	// TrustProxy declares that a trusted TLS-terminating reverse proxy sits in
+	// front of the fleet, so its X-Forwarded-Proto may be believed when
+	// deciding whether to mark the session cookie Secure. Defaults to the
+	// SHIPMATES_FLEET_TRUST_PROXY env var when left false — turn it on ONLY
+	// when nothing but the proxy can reach the listener, because on a direct
+	// connection the header is written by the client.
+	TrustProxy bool
+}
+
+// trustProxyEnv is the env var that enables X-Forwarded-Proto trust without a
+// CLI flag, so an operator running behind nginx/Caddy/Cloudflare can opt in
+// from the same place they already set $SHIPMATES_FLEET_TOKEN.
+const trustProxyEnv = "SHIPMATES_FLEET_TRUST_PROXY"
+
+// envTrustProxy reads trustProxyEnv. Anything but the explicit off-values
+// counts as on — an operator who set the variable at all meant to set it.
+func envTrustProxy() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(trustProxyEnv))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
 }
 
 // New constructs the fleet. The returned Server is ready to Run.
 func New(opts Options) (*Server, error) {
 	b := &Server{
-		token: strings.TrimSpace(opts.Token),
-		captains: map[string]*Captain{},
+		token:      strings.TrimSpace(opts.Token),
+		trustProxy: opts.TrustProxy || envTrustProxy(),
+		captains:   map[string]*Captain{},
+	}
+	// Fail closed BEFORE anything expensive (store, LLM child, policy) is set
+	// up: a bind that must not happen should not leave a SQLite file or a
+	// claude session behind on its way to the error. Only when the caller
+	// actually declared an address — Options.Addr is optional here (Run takes
+	// the listen address), and Run is the authoritative check.
+	if opts.Addr != "" {
+		if err := requireTokenForAddr(opts.Addr, b.token); err != nil {
+			return nil, err
+		}
 	}
 	if opts.Store != "" {
 		s, err := openStore(opts.Store)
@@ -161,7 +203,24 @@ func New(opts Options) (*Server, error) {
 }
 
 // Run binds the fleet HTTP listener and serves until ctx is cancelled.
+//
+// Run is the authoritative fail-closed point for M4: New checks Options.Addr,
+// but the listen address is passed here separately and a caller may not have
+// filled Options.Addr at all. A token-less fleet authenticates nobody, so it
+// only ever binds loopback — the refusal is an error, not a warning, because
+// "started anyway and logged auth=false" is exactly how an operator ends up
+// with tells, PTY input and permission resolves open to the network.
 func (b *Server) Run(ctx context.Context, addr string) error {
+	if err := requireTokenForAddr(addr, b.token); err != nil {
+		return err
+	}
+	if b.token == "" {
+		// Loopback dev mode is legitimate, but it is not the state anyone
+		// wants to discover from an INFO line three screens up.
+		slog.Warn("fleet is running WITHOUT a shared secret — every request is accepted unauthenticated. "+
+			"This is loopback-only development mode; set $SHIPMATES_FLEET_TOKEN (or --token-file) before "+
+			"sharing this fleet.", "addr", addr)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/connect", b.dialer)
 	mux.HandleFunc("GET /login", b.handleLogin)
@@ -252,10 +311,7 @@ func (b *Server) authorize(req *http.Request) (clientKey string, authed bool, er
 	if clientKey == "" {
 		return "", false, fmt.Errorf("missing X-Shipmates-Identity")
 	}
-	port := 0
-	if p := req.Header.Get("X-Shipmates-Port"); p != "" {
-		_, _ = fmt.Sscanf(p, "%d", &port)
-	}
+	port := parseShipPort(req.Header.Get("X-Shipmates-Port"), clientKey)
 	now := time.Now()
 	b.mu.Lock()
 	existing, ok := b.captains[clientKey]
@@ -264,7 +320,7 @@ func (b *Server) authorize(req *http.Request) (clientKey string, authed bool, er
 		b.captains[clientKey] = existing
 	}
 	existing.Repo = req.Header.Get("X-Shipmates-Repo")
-	existing.RepoURL = req.Header.Get("X-Shipmates-Repo-URL")
+	existing.RepoURL = sanitizeRepoURL(req.Header.Get("X-Shipmates-Repo-URL"))
 	existing.InstallID = req.Header.Get("X-Shipmates-Install-ID")
 	existing.Persona = req.Header.Get("X-Shipmates-Persona")
 	existing.Port = port
@@ -276,6 +332,81 @@ func (b *Server) authorize(req *http.Request) (clientKey string, authed bool, er
 	}
 	slog.Info("fleet: captain connected", "client_key", clientKey, "port", port)
 	return clientKey, true, nil
+}
+
+// parseShipPort validates the dial target a connecting ship claims for its own
+// loopback server (L6). The value is the ship's own header, and the ship-side
+// remotedialer authorizer already pins dials to 127.0.0.1, so this is bounded
+// — but the fleet is the side that builds "127.0.0.1:%d" and it should not
+// accept a number it would never dial. Anything implausible becomes 0, which
+// proxy() reports as a clean error instead of attempting a nonsense dial.
+//
+// Unparseable is tolerated rather than fatal: the rest of the captain's record
+// (identity, feed mirroring, status) is still useful, and dropping the tunnel
+// over a bad header would make a cosmetic ship-side bug look like an outage.
+func parseShipPort(raw, clientKey string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	// strconv.Atoi, not Sscanf: Sscanf("8080junk") happily returns 8080. Atoi
+	// still accepts a leading sign, so require plain digits as well — a port
+	// header is a decimal number and nothing else.
+	n, err := strconv.Atoi(raw)
+	if err != nil || !allDigits(raw) || n < 1 || n > 65535 {
+		slog.Warn("fleet: ship reported an implausible port; dialing it is disabled",
+			"client_key", clientKey, "header", raw)
+		return 0
+	}
+	return n
+}
+
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// sanitizeRepoURL bounds the browsable origin a ship advertises. The value is
+// whatever `git config remote.origin.url` produced on the ship, and the fleet
+// UI turns it into an href — so a scheme like javascript: or data:, or a
+// value carrying a quote, is a stored XSS seed on the fleet origin (M3). We
+// reject rather than escape: a repo URL that isn't an http(s) URL with a host
+// is not usable as a link anyway, and dropping it only costs the gh-link
+// affordance.
+//
+// The UI escapes and re-validates independently — this is the "don't store
+// hostile data" half, not the only defence.
+func sanitizeRepoURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 512 {
+		return ""
+	}
+	// Control characters never appear in a real remote URL and would ride into
+	// the UI (and into log lines) intact.
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	if u.Host == "" {
+		return ""
+	}
+	// Re-serialize from the parsed form: this normalizes and percent-encodes,
+	// so quotes and angle brackets cannot survive into an attribute even if a
+	// consumer forgets to escape.
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
 }
 
 // handleCaptains lists all captains the fleet knows about, intersected with
@@ -322,10 +453,13 @@ func (b *Server) handleTell(w http.ResponseWriter, r *http.Request) {
 	// ServeMux hands back a percent-DECODED segment, so "%0d%0aGET /shutdown"
 	// arrives here as real CRLF. Reject before it can reach the request line.
 	if !personaname.Valid(persona) {
-		http.Error(w, "bad persona", http.StatusBadRequest)
+		httpError(w, "bad persona", http.StatusBadRequest)
 		return
 	}
-	bodyBytes, _ := io.ReadAll(r.Body)
+	bodyBytes, ok := readLimitedBody(w, r, tellBodyLimit)
+	if !ok {
+		return
+	}
 	body, status, err := b.proxy(r.Context(), key, "POST", "/tell/"+url.PathEscape(persona), bodyBytes)
 	writeProxied(w, status, body, err)
 }
@@ -336,10 +470,13 @@ func (b *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	// Pending-request ids are an 8-char UUID prefix; beadIDOK's alphabet
 	// covers them and rejects anything that could reframe the request.
 	if !beadIDOK(id) {
-		http.Error(w, "bad request id", http.StatusBadRequest)
+		httpError(w, "bad request id", http.StatusBadRequest)
 		return
 	}
-	bodyBytes, _ := io.ReadAll(r.Body)
+	bodyBytes, ok := readLimitedBody(w, r, resolveBodyLimit)
+	if !ok {
+		return
+	}
 	body, status, err := b.proxy(r.Context(), key, "POST", "/resolve/"+url.PathEscape(id), bodyBytes)
 	writeProxied(w, status, body, err)
 }
@@ -488,6 +625,9 @@ func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body
 	if !ok {
 		return nil, http.StatusNotFound, fmt.Errorf("no such captain: %s", clientKey)
 	}
+	if err := checkDialPort(port, clientKey); err != nil {
+		return nil, http.StatusBadGateway, err
+	}
 	if !b.dialer.HasSession(clientKey) {
 		return nil, http.StatusGatewayTimeout, fmt.Errorf("captain %s not currently connected", clientKey)
 	}
@@ -520,6 +660,17 @@ func (b *Server) proxy(ctx context.Context, clientKey, method, path string, body
 type proxyResp struct {
 	Status int
 	Body   []byte
+}
+
+// checkDialPort is the second half of L6: parseShipPort refuses to record an
+// implausible port, and this refuses to dial one. Keeping both means a ship
+// that connected before the validator landed (or a future path that writes
+// Captain.Port directly) still cannot steer the dial.
+func checkDialPort(port int, clientKey string) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("captain %s reported no usable port (%d)", clientKey, port)
+	}
+	return nil
 }
 
 // checkProxyPath is the last line of defence before a request-target is
@@ -564,13 +715,94 @@ func readHTTPResponse(conn net.Conn) (*proxyResp, error) {
 	return &proxyResp{Status: resp.StatusCode, Body: body}, nil
 }
 
+// writeProxied relays a tunnelled response to the operator.
+//
+// The Content-Type is set EXPLICITLY (L4). Without it Go's http.ResponseWriter
+// falls back to DetectContentType on the first write, and the bytes it sniffs
+// are a ship's feed line, a bead title, or a `bd show` record — agent- and
+// GitHub-derived text. A body that happens to start with "<html" (or even
+// leading whitespace then "<!DOCTYPE") would then be served as text/html FROM
+// THE FLEET ORIGIN, which is the origin holding the operator's session cookie.
+// Neither branch below can ever produce an HTML content type, and nosniff
+// stops the browser from second-guessing us.
 func writeProxied(w http.ResponseWriter, status int, body []byte, err error) {
 	if err != nil {
-		http.Error(w, err.Error(), status)
+		httpError(w, err.Error(), status)
 		return
 	}
+	w.Header().Set("Content-Type", proxiedContentType(body))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+}
+
+// proxiedContentType classifies a tunnelled body as JSON or plain text. Most
+// captain endpoints answer JSON; /feed answers plain text and the CLI reads it
+// as text. The classification only ever picks between two non-executable
+// types, so a hostile body cannot steer it anywhere dangerous.
+func proxiedContentType(body []byte) string {
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		return "application/json"
+	}
+	return "text/plain; charset=utf-8"
+}
+
+// httpError is http.Error plus nosniff. http.Error already writes
+// "text/plain; charset=utf-8", but these bodies carry proxied upstream error
+// text, so pinning the browser to it is worth the one extra line.
+func httpError(w http.ResponseWriter, msg string, status int) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.Error(w, msg, status)
+}
+
+// Request body limits (M8). Every inbound handler bounds its body: an
+// unbounded io.ReadAll on a public listener is a one-request OOM, and the
+// fleet holds the whole thing in memory before it can even look at it.
+const (
+	tellBodyLimit    = 1 << 20 // a tell is a chat message, not a payload
+	resolveBodyLimit = 64 << 10
+	beadBodyLimit    = 1 << 20 // title + description
+	nudgeBodyLimit   = 8 << 10 // {"from": "<client key>"}
+	ptyBodyLimit     = 64 << 10
+	convBodyLimit    = 4 << 20 // the UI replays conversation history
+	ttsBodyLimit     = 1 << 20
+)
+
+// readLimitedBody reads the request body with a hard ceiling, REJECTING an
+// oversized body rather than silently truncating it (which is what a bare
+// io.LimitReader does — the ship then acts on half a JSON document). Returns
+// ok=false when it has already written the error response.
+func readLimitedBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			httpError(w, fmt.Sprintf("request body exceeds %d bytes", limit), http.StatusRequestEntityTooLarge)
+			return nil, false
+		}
+		httpError(w, "read request body: "+err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	return body, true
+}
+
+// decodeLimitedJSON is readLimitedBody for the handlers that decode straight
+// into a struct. tolerateEmpty keeps the pre-existing "best effort" semantics
+// of handlers that ignored a decode error entirely.
+func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			httpError(w, fmt.Sprintf("request body exceeds %d bytes", limit), http.StatusRequestEntityTooLarge)
+			return false
+		}
+		httpError(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 // mirrorLoop polls each connected captain's /events endpoint at a fixed interval
@@ -665,8 +897,12 @@ func (s *store) insertEvent(clientKey, ts, persona, kind, text string) error {
 	return err
 }
 
-// Close releases the SQLite store, if any.
+// Close releases the SQLite store, if any, and removes the claude brain's
+// on-disk credential file.
 func (b *Server) Close() error {
+	if b.conv != nil && b.conv.brain != nil {
+		b.conv.brain.close()
+	}
 	if b.store != nil {
 		return b.store.db.Close()
 	}

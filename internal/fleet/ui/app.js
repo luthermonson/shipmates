@@ -367,10 +367,12 @@ function shortModel(m) {
 // matches after whitespace/punctuation-openers so escaped entities
 // (&amp;#39;) and code fragments don't false-link.
 function linkifyRefs(html) {
-  const captain = selected ? knownCaptains.get(selected) : null;
-  if (!captain || !captain.repo_url) return html;
+  const base = repoBase(selected ? knownCaptains.get(selected) : null);
+  if (!base) return html;
+  // base is a parser-normalized http(s) URL and n is \d+ from the regex, so
+  // the href is built from two vetted pieces — escape() is belt-and-braces.
   const link = (label, n) =>
-    `<a href="${captain.repo_url}/issues/${n}" target="_blank" rel="noopener">${label}</a>`;
+    `<a href="${escape(base + "/issues/" + n)}" target="_blank" rel="noopener">${label}</a>`;
   return html
     .replace(/\bgh-(\d+)\b/g, (m, n) => link(m, n))
     .replace(/(^|[\s(,:])#(\d+)\b/g, (m, pre, n) => pre + link("#" + n, n));
@@ -385,11 +387,59 @@ function appendEvent(e) {
   if (eventMatchesFilter(e)) appendEventDOM(e);
 }
 
+// escape makes a value safe to drop into HTML *text* AND into a quoted HTML
+// attribute. The quote entities are not decoration: nearly every interpolation
+// in this file lands inside a double-quoted attribute in a template literal,
+// and a `"` closes that attribute early — `" onmouseover=x` in a bead status,
+// title or ref then becomes an event handler running on the fleet origin, the
+// origin that holds the session cookie. Bead text is agent- and GitHub-derived,
+// so "nobody would type that" is not a defence.
+//
+// The & replacement must stay FIRST or it double-escapes the entities the
+// later replacements introduce.
 function escape(s) {
   return String(s)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// safeURL is the only way a value from the network becomes an href in this
+// UI. Escaping alone does not help in a URL context: `javascript:alert(1)`
+// contains no character escape() touches, and an href is a code-execution
+// sink. So we parse, allow http/https only, and hand back the parser's own
+// serialization — which percent-encodes anything that could break out of the
+// attribute even if a caller forgets to escape.
+//
+// Parsed WITHOUT a base, so relative input is rejected rather than resolved:
+// every URL this UI links to is a remote repository, and `" onload=x` must
+// not quietly become a link to a path on the fleet's own origin.
+//
+// Returns null for anything unusable; callers render a plain chip instead.
+function safeURL(raw) {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (s === "") return null;
+  let u;
+  try {
+    u = new URL(s);
+  } catch (err) {
+    return null;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  return u.href;
+}
+
+// repoBase resolves a captain's advertised repo origin to a link base. It is
+// the ONLY place in this file that reads repo_url — that value arrives from
+// the ship's X-Shipmates-Repo-URL header (i.e. `git config remote.origin.url`
+// on a machine the fleet does not control), so it gets exactly one entry point
+// and that entry point validates.
+function repoBase(captain) {
+  const u = captain ? safeURL(captain.repo_url) : null;
+  return u ? u.replace(/\/+$/, "") : null;
 }
 
 function nowISO() {
@@ -1103,20 +1153,47 @@ async function refreshBeads(force) {
 // one path shape covers both).
 function externalRefURL(ref, captainKey) {
   if (!ref) return null;
-  if (/^https?:\/\//.test(ref)) return ref;
-  const m = /^gh-(\d+)$/.exec(ref);
+  if (/^https?:\/\//i.test(String(ref))) return safeURL(ref);
+  const m = /^gh-(\d+)$/.exec(String(ref));
   if (!m) return null;
-  const captain = knownCaptains.get(captainKey);
-  if (!captain || !captain.repo_url) return null;
-  return `${captain.repo_url}/issues/${m[1]}`;
+  const base = repoBase(knownCaptains.get(captainKey));
+  if (!base) return null;
+  return `${base}/issues/${m[1]}`;
 }
 
-// refLink renders an external_ref as an anchor when resolvable, a plain chip
-// otherwise. Anchor clicks must not toggle the bead detail row.
-function refLink(ref, captainKey) {
+// statusClass keeps a ship-supplied status from becoming an arbitrary class
+// list. className assignment cannot execute anything, but "open x y z" would
+// still let remote text pick up styling meant for other states.
+function statusClass(s) {
+  const v = String(s === undefined || s === null || s === "" ? "open" : s);
+  return /^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(v) ? v : "unknown";
+}
+
+// span builds a text-only element. textContent never parses markup, so a
+// title or status carrying `"`, `<` or a whole <script> lands as characters.
+function span(className, text) {
+  const el = document.createElement("span");
+  if (className) el.className = className;
+  el.textContent = text;
+  return el;
+}
+
+// refLinkEl renders an external_ref as an anchor when resolvable, a plain chip
+// otherwise — as a NODE, not as HTML. The ref is GitHub-derived text and the
+// href is a code-execution sink, so it goes through safeURL and then through
+// setAttribute, which stores an attribute value instead of re-parsing one.
+// Anchor clicks must not toggle the bead detail row.
+function refLinkEl(ref, captainKey) {
   const url = externalRefURL(ref, captainKey);
-  if (!url) return `<span class="bref">${escape(ref)}</span>`;
-  return `<a class="bref" href="${escape(url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${escape(ref)}</a>`;
+  if (!url) return span("bref", ref);
+  const a = document.createElement("a");
+  a.className = "bref";
+  a.setAttribute("href", url);
+  a.setAttribute("target", "_blank");
+  a.setAttribute("rel", "noopener");
+  a.textContent = ref;
+  a.onclick = (ev) => ev.stopPropagation();
+  return a;
 }
 
 function renderBeads(beads) {
@@ -1135,13 +1212,21 @@ function renderBeads(beads) {
     // fleet view: show which ships carry the bead (synced graphs dedupe here)
     const ships = (b.ships || []).map((s) => s.split(":")[0]).join(", ");
     const detailKey = selected || (b.ships && b.ships[0]);
-    row.innerHTML =
-      `<span class="bstatus ${escape(b.status || "open")}">${escape(b.status || "?")}</span>` +
-      `<span class="bid">${escape(b.id || "")}</span>` +
-      `<span class="btitle">${escape(b.title || "")}</span>` +
-      (b.external_ref ? refLink(b.external_ref, detailKey) : "") +
-      (ships && !selected ? `<span class="bships">${escape(ships)}</span>` : "") +
-      (b.priority !== undefined && b.priority !== null ? `<span class="bprio" title="priority">p${escape(String(b.priority))}</span>` : "");
+    // Built node-by-node rather than as an innerHTML string: every field here
+    // (status, id, title, external_ref) originates on a ship, and the status
+    // in particular used to be interpolated into a class ATTRIBUTE, where a
+    // single `"` escapes into `onmouseover=`. className/textContent have no
+    // parser behind them, so there is nothing to escape out of.
+    row.appendChild(span("bstatus " + statusClass(b.status), b.status || "?"));
+    row.appendChild(span("bid", b.id || ""));
+    row.appendChild(span("btitle", b.title || ""));
+    if (b.external_ref) row.appendChild(refLinkEl(b.external_ref, detailKey));
+    if (ships && !selected) row.appendChild(span("bships", ships));
+    if (b.priority !== undefined && b.priority !== null) {
+      const prio = span("bprio", "p" + String(b.priority));
+      prio.title = "priority";
+      row.appendChild(prio);
+    }
     if (detailKey) row.onclick = () => toggleBeadDetail(row, b.id, detailKey);
     beadsPane.appendChild(row);
     // live refresh: reopen the detail rows the operator had expanded
@@ -1221,20 +1306,34 @@ async function expandBeadDetail(row, id, captainKey) {
     const arr = await r.json();
     const b = Array.isArray(arr) ? arr[0] : arr;
     if (!b) throw new Error("empty record");
-    const lines = [];
-    if (b.description) lines.push(`<div class="bdesc">${escape(b.description)}</div>`);
+    // Same rule as the row: built from nodes, so `bd show` output — which is
+    // whatever an agent or a GitHub issue put in the graph — is text.
+    detail.textContent = "";
+    if (b.description) {
+      const desc = document.createElement("div");
+      desc.className = "bdesc";
+      desc.textContent = b.description;
+      detail.appendChild(desc);
+    }
+    const metaEl = document.createElement("div");
+    metaEl.className = "bmeta";
     const meta = [];
-    if (b.external_ref) meta.push(`ref: ${refLink(b.external_ref, captainKey)}`);
-    if (b.assignee) meta.push(`assignee: ${escape(b.assignee)}`);
-    if (b.issue_type) meta.push(`type: ${escape(b.issue_type)}`);
-    if (b.owner) meta.push(`owner: ${escape(b.owner)}`);
-    if (b.created_at) meta.push(`created: ${escape(String(b.created_at).slice(0, 16).replace("T", " "))}`);
-    if (b.updated_at) meta.push(`updated: ${escape(String(b.updated_at).slice(0, 16).replace("T", " "))}`);
-    if (b.dependency_count) meta.push(`depends on: ${escape(String(b.dependency_count))}`);
-    if (b.dependent_count) meta.push(`blocks: ${escape(String(b.dependent_count))}`);
-    if (b.comment_count) meta.push(`comments: ${escape(String(b.comment_count))}`);
-    lines.push(`<div class="bmeta">${meta.join(" · ")}</div>`);
-    detail.innerHTML = lines.join("");
+    if (b.external_ref) meta.push(["ref: ", refLinkEl(b.external_ref, captainKey)]);
+    if (b.assignee) meta.push(["assignee: " + b.assignee]);
+    if (b.issue_type) meta.push(["type: " + b.issue_type]);
+    if (b.owner) meta.push(["owner: " + b.owner]);
+    if (b.created_at) meta.push(["created: " + String(b.created_at).slice(0, 16).replace("T", " ")]);
+    if (b.updated_at) meta.push(["updated: " + String(b.updated_at).slice(0, 16).replace("T", " ")]);
+    if (b.dependency_count) meta.push(["depends on: " + String(b.dependency_count)]);
+    if (b.dependent_count) meta.push(["blocks: " + String(b.dependent_count)]);
+    if (b.comment_count) meta.push(["comments: " + String(b.comment_count)]);
+    meta.forEach((parts, i) => {
+      if (i > 0) metaEl.appendChild(document.createTextNode(" · "));
+      for (const p of parts) {
+        metaEl.appendChild(typeof p === "string" ? document.createTextNode(p) : p);
+      }
+    });
+    detail.appendChild(metaEl);
     if (b.status !== "closed") {
       renderBeadClose(detail, id, captainKey); // red ✕, absolute top-right of the card
       const actions = document.createElement("div");
