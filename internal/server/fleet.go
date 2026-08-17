@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
+	"github.com/luthermonson/shipmates/internal/fleeturl"
 	"github.com/luthermonson/shipmates/internal/project"
 	"github.com/rancher/remotedialer"
 )
@@ -41,7 +41,11 @@ func (s *Server) startFleet(ctx context.Context, conf *project.Config) {
 
 	wsURL, err := toWebsocketURL(conf.Fleet.URL)
 	if err != nil {
-		slog.Warn("fleet disabled: bad url", "url", conf.Fleet.URL, "err", err)
+		// ERROR, not WARN: the operator asked for a fleet and is not getting
+		// one. A plaintext URL lands here, and the refusal has to be loud —
+		// silently downgrading to an unencrypted tunnel would put the fleet
+		// token and the ship's own API token on the wire.
+		slog.Error("fleet disabled: unusable fleet url", "url", conf.Fleet.URL, "err", err)
 		return
 	}
 
@@ -130,8 +134,13 @@ func (s *Server) fleetAuthorizer() remotedialer.ConnectAuthorizer {
 // toWebsocketURL converts the user's fleet URL to a ws:// or wss:// connect
 // URL. We accept http(s):// for convenience and rewrite the scheme. The path
 // defaults to /connect to match `shipmates fleet serve`.
+//
+// Plaintext to a non-loopback host is refused rather than dialled: this
+// connection carries the fleet bearer token AND the ship's own per-run API
+// token in its connect headers, and everything the fleet later proxies back
+// down the tunnel. See internal/fleeturl for the rule.
 func toWebsocketURL(raw string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
+	u, err := fleeturl.Validate(raw)
 	if err != nil {
 		return "", err
 	}
@@ -142,8 +151,6 @@ func toWebsocketURL(raw string) (string, error) {
 		u.Scheme = "wss"
 	case "ws", "wss":
 		// already correct
-	default:
-		return "", fmt.Errorf("unsupported scheme %q (use http, https, ws, or wss)", u.Scheme)
 	}
 	if u.Path == "" || u.Path == "/" {
 		u.Path = "/connect"

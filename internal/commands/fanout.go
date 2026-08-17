@@ -66,7 +66,9 @@ func Fanout() *cli.Command {
 			for _, r := range results {
 				fmt.Printf("==== %s ====\n", r.persona)
 				if len(r.output) > 0 {
-					_, _ = os.Stdout.Write(r.output)
+					// Delegate output is the agent's own stdout: scrub it on
+					// the way to the operator's terminal (see scrub.go).
+					printRemote(r.output)
 					if !bytes.HasSuffix(r.output, []byte("\n")) {
 						fmt.Println()
 					}
