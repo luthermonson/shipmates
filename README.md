@@ -88,7 +88,9 @@ shipmates --version
 
 On Windows, unzip `shipmates_<version>_windows_amd64.zip` and put `shipmates.exe` on your PATH.
 
-With a Go toolchain (1.26+): `go install github.com/luthermonson/shipmates@latest`, or build from source with `go build -o shipmates .`.
+To build from source with a Go toolchain (1.26+), clone the repo and run `go build -o shipmates .`.
+
+> **Note:** `go install github.com/luthermonson/shipmates@latest` does **not** work right now. shipmates pins a fork of `rancher/remotedialer` (carrying an unmerged data-race fix) via a `replace` directive, and Go refuses to `go install` a module that has `replace` directives. Use a release binary or a source build until [rancher/remotedialer#265](https://github.com/rancher/remotedialer/pull/265) merges upstream and the replace can be dropped.
 
 Shipmates drives the [`claude` CLI](https://claude.com/claude-code), so make sure Claude Code is installed and authenticated.
 
@@ -440,7 +442,7 @@ Working, deployed, and running against real projects. Recent milestones:
 
 - **v0.3.0** (July 2026) — naval-metaphor rename (Fleet Command / Captain / Commodore), permission model with Claude Code inheritance + fleet-native policies, binary attach (photo/file upload via UI or `fleet show` CLI), session auto-repair for stale claude session markers
 - **v0.4.0** (July 2026) — persona berths (per-persona git worktrees with launch ergonomics), deterministic memory loading via a managed `SessionStart` hook (`shipmates hook load-memory`), `shipmates show` local file attach
-- **Unreleased on main** — voyages (`plan` / `commission` / `sail` with the `first-mate` persona and structured recovery), the Brig (fifteen Ship's Articles with kernel enforcement, `freeze` / `release`, denial log), multi-runtime selection (`--runtime claude|codex|openai` with portable containment), hostile-input GitHub routing (see [`docs/security.md`](docs/security.md))
+- **v0.5.0** (August 2026) — voyages (`plan` / `commission` / `sail` with the `first-mate` persona and structured recovery), the Brig (fifteen Ship's Articles with kernel enforcement, `freeze` / `release`, denial log), multi-runtime selection (`--runtime claude|codex|openai` with portable containment), hostile-input GitHub routing, and a security pass that hardened the trust boundaries between a checkout, a ship, and the fleet. **Contains breaking changes** — see the v0.5.0 release notes and [`docs/security.md`](docs/security.md) before upgrading.
 
 The captain↔crew loop (dispatch → live steer → observe tool use → human-in-the-loop approval) is verified end-to-end against Claude Code. Cross-ship dispatch works via the beads graph. Voice control via the Commodore has been running against local qwen/haiku deployments and OpenAI-compatible endpoints.
 
