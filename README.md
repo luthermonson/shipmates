@@ -88,7 +88,9 @@ shipmates --version
 
 On Windows, unzip `shipmates_<version>_windows_amd64.zip` and put `shipmates.exe` on your PATH.
 
-With a Go toolchain (1.26+): `go install github.com/luthermonson/shipmates@latest`, or build from source with `go build -o shipmates .`.
+To build from source with a Go toolchain (1.26+), clone the repo and run `go build -o shipmates .`.
+
+> **Note:** `go install github.com/luthermonson/shipmates@latest` does **not** work right now. shipmates pins a fork of `rancher/remotedialer` (carrying an unmerged data-race fix) via a `replace` directive, and Go refuses to `go install` a module that has `replace` directives. Use a release binary or a source build until [rancher/remotedialer#265](https://github.com/rancher/remotedialer/pull/265) merges upstream and the replace can be dropped.
 
 Shipmates drives the [`claude` CLI](https://claude.com/claude-code), so make sure Claude Code is installed and authenticated.
 
