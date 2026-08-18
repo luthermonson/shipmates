@@ -12,6 +12,45 @@ Sailing needs **no external dependencies**: task tracking uses plain markdown fi
 
 **Runtime scope.** Sail launches crew turns through Claude Code's CLI and session protocol — the same launch path as `ask`. When a non-Claude runtime is selected (`--runtime codex`, project or user config), sail refuses with an error naming the runtime and what is missing, exactly like `ask` does; see [runtime-interface.md](runtime-interface.md).
 
+## Quickstart: your first voyage
+
+The whole loop is five commands. Only step 2 is a conversation — the rest are deterministic.
+
+```bash
+# 1. Install the first mate and whatever crew the work will need
+#    (one persona per `add`).
+shipmates add first-mate
+shipmates add backend
+shipmates add tester
+
+# 2. Ask the first mate to plan the work. It writes the draft to
+#    .shipmates/voyage.json (always uncommissioned) and describes it back.
+shipmates ask first-mate "Plan a voyage to add rate limiting to the API: \
+  design it, implement it, and write tests. Draft the voyage."
+
+# 3. Inspect the draft: objective, every task, its state and dependencies.
+#    Fix the plan by asking the first mate again if anything's off.
+shipmates plan
+
+# 4. Commission it — your authorization to execute. This is an admiral act;
+#    it refuses to run inside an agent turn, so only you can do it.
+shipmates commission
+
+# 5. Sail. Ready tasks dispatch with bounded concurrency, state persists after
+#    every task, and a re-run resumes exactly where it stopped.
+shipmates sail
+```
+
+What each step shows:
+
+- **`plan`** prints the objective and a line per task — state (`pending` / `done` / `blocked` / `failed`), its acceptance verdict, and any recovery ledger — or names the exact defect if the draft is invalid. It changes nothing.
+- **`commission`** validates the draft, flips `commissioned` to `true`, and prints the final summary. An uncommissioned voyage refuses to sail.
+- **`sail`** runs each task's crew turn, printing progress as tasks move. `Ctrl+C` once cancels cleanly — in-flight turns stop and their tasks return to pending, resumable state.
+
+If a run leaves failed or blocked tasks, review with `shipmates plan` and resume with `shipmates sail --retry-failed`. Add `--dry-run` to see the execution order without dispatching, or `--verbose` to see each task's full prompt and report.
+
+The rest of this document is the reference: the plan schema, task tracking, acceptance verdicts, recovery, and a longer worked example.
+
 ## Workflow
 
 1. Install the first mate and the crew personas the plan will name:
