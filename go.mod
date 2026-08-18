@@ -58,4 +58,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/rancher/remotedialer => github.com/luthermonson/remotedialer v0.2.6-0.20260805014355-7e65b789c524
+replace github.com/rancher/remotedialer => github.com/luthermonson/remotedialer v0.2.6-0.20260805053951-00b5151280f8
