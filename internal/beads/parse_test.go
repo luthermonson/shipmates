@@ -64,6 +64,19 @@ func TestIssueIDAcceptsObjectAndSingleItemList(t *testing.T) {
 	}
 }
 
+// TestIssueIDRejectsParentDirectoryHop pins the gap that the old local validID
+// left open: a bd-sourced id carrying ".." was accepted because that copy had
+// the alphabet but not the ..-hop check that internal/beadid enforces. The id
+// returned here becomes an argv/path segment downstream, so the hop must be
+// refused at the parse boundary.
+func TestIssueIDRejectsParentDirectoryHop(t *testing.T) {
+	for _, raw := range []string{`{"id":"ship-..evil"}`, `{"id":"a..b"}`, `[{"id":"proj-c03.."}]`} {
+		if id, err := issueID(raw); err == nil {
+			t.Fatalf("issueID(%q) = %q, want rejection of the .. hop", raw, id)
+		}
+	}
+}
+
 func TestClientRejectsUntrustedIssueIDs(t *testing.T) {
 	client := &Client{}
 	if err := client.AddDependency(context.Background(), "--help", "ship-parent"); err == nil {

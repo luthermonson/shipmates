@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/beadid"
 )
 
 const (
@@ -248,18 +250,17 @@ func issueID(raw string) (string, error) {
 	return "", errors.New("bd create returned no valid issue id")
 }
 
+// validID guards ids that come from bd's own JSON output (issueID parses them
+// from `bd create --json`, and the lifecycle methods above re-receive them as
+// persisted BeadID values). That is a different trust position from the remote
+// input the fleet and server validate, but the rule is the same one — so it
+// lives in exactly one place. This copy used to bound at 128 and omit the
+// ..-hop check; bd 1.1.2 mints only short hash-prefix ids (ship-8he,
+// proj-a3f8.1.2) that fit beadid.Valid's 64-byte bound with room to spare, and
+// the fleet and server already validate these same ids there, so folding onto
+// it drops nothing and closes the traversal gap the divergent copy left open.
 func validID(id string) bool {
-	if id == "" || len(id) > 128 || id[0] == '-' {
-		return false
-	}
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
-		default:
-			return false
-		}
-	}
-	return true
+	return beadid.Valid(id)
 }
 
 func bounded(text string, limit int) string {
