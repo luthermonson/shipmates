@@ -234,6 +234,6 @@ var canonicalRules = []Rule{
 		Category:  CategoryConduct,
 		Layers:    []Layer{LayerKernel},
 		Source:    "incident: personas 'helpfully' adding SSH config entries or touching global git config while working inside a project",
-		Rationale: "Writes to the high-value locations outside the project are refused: /etc/**, .ssh/**, .aws/**, .gnupg/**. The persona works in the ship — the project directory — and nowhere else. Paths are cleaned and resolved against the project root before matching, so `/tmp/../etc/cron.d/x` and a relative walk out of the ship are the same file as far as this Article is concerned. (The evaluator's pattern language cannot express 'anything outside the project root'; these are the representative targets.)",
+		Rationale: "Writes to the high-value locations outside the project are refused: /etc/** and its Windows counterpart C:\\Windows\\**, the per-user Startup folder (an autorun-persistence foothold), and .ssh/**, .aws/**, .gnupg/** (the last three `**/`-anchored, so they bind on both Unix homes and C:\\Users). The persona works in the ship — the project directory — and nowhere else. Paths are cleaned and resolved against the project root before matching, so `/tmp/../etc/cron.d/x` and a relative walk out of the ship are the same file as far as this Article is concerned. (The evaluator's pattern language cannot express 'anything outside the project root'; these are the representative targets.)",
 	},
 }
