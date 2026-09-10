@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	github.com/aymanbagabas/go-pty v0.2.3
+	github.com/bwmarrin/discordgo v0.29.0
 	github.com/charmbracelet/bubbles v0.21.1
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0

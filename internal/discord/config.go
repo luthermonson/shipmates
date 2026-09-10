@@ -1,0 +1,112 @@
+// Package discord is an EXPERIMENTAL spike of a Discord chat transport for
+// shipmates: one mate <-> one Discord bot <-> one channel, inbound and
+// outbound. It mirrors the voice-conversation loop in internal/fleet
+// (read GET /events, drive POST /tell/{persona}) but binds it to a Discord
+// text channel instead of the /api/conversation endpoint.
+//
+// It reuses the existing tell/events seam through internal/client, which reads
+// the per-run captain bearer token from .shipmates/sessions/server.token and
+// the port from server.port, and sends Authorization: Bearer on every request.
+// This package adds no new plumbing to that seam — it only bridges Discord
+// messages into a tell and captain events back out to the channel.
+//
+// SECURITY POSTURE (see docs/discord.md for the full model):
+//   - The bot token is a secret. It is read ONLY from the environment, never
+//     from the checkout, and is never logged or placed in an error message.
+//   - Inbound Discord text is hostile input: it becomes the *content* of a
+//     tell and nothing more. It is length-bounded and cannot smuggle a command.
+//   - The allowlist is fail-closed: an empty allowlist commands nobody.
+//   - Outbound mate text has Discord mentions neutralized and terminal escape
+//     sequences scrubbed before it is posted, with AllowedMentions set to none
+//     as a second layer.
+package discord
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"time"
+)
+
+// Environment variable names. Secrets and operator-owned configuration live in
+// the environment, mirroring the openai runtime's api_key_env posture: a key is
+// never read from config-in-repo, only named by an env var.
+const (
+	// EnvBotToken names the env var holding the Discord bot token. The token
+	// itself never appears in config or logs. This var already exists in the
+	// operator's environment.
+	EnvBotToken = "DISCORD_BOT_TOKEN"
+	// EnvChannel names the env var holding the single channel id this transport
+	// listens on and posts to. Already present in the operator's environment.
+	EnvChannel = "DISCORD_TRAINING_CHANNEL"
+	// EnvAllowedUsers names the env var holding a comma-separated allowlist of
+	// Discord user ids permitted to command the mate. Fail-closed: unset or
+	// empty means nobody can command.
+	EnvAllowedUsers = "SHIPMATES_DISCORD_ALLOWED_USERS"
+	// EnvPersona names the env var holding the persona a tell is addressed to.
+	EnvPersona = "SHIPMATES_DISCORD_PERSONA"
+)
+
+// Bounds. None may be disabled by setting them to zero; an unbounded value from
+// an untrusted source is how a spike turns into an incident.
+const (
+	// MaxInboundRunes caps the content of a single inbound tell. Discord's own
+	// message cap is 2000 characters; we bound below that so a maximally long
+	// message still becomes bounded tell content.
+	MaxInboundRunes = 1800
+	// MaxOutboundCells caps a single outbound post. Discord rejects messages
+	// over 2000 characters; we leave headroom for the ellipsis and any prefix.
+	MaxOutboundCells = 1900
+	// DefaultPollInterval is how often the outbound loop polls GET /events.
+	DefaultPollInterval = 1500 * time.Millisecond
+)
+
+// Config is the resolved, validated configuration for one Discord transport
+// instance. The bot token is deliberately NOT a field: it is read from the
+// environment at connect time only, so it never sits in a struct that could be
+// logged with %+v. See tokenFromEnv.
+type Config struct {
+	// Channel is the one channel id this transport is bound to.
+	Channel string
+	// Persona is the crew persona a tell is addressed to.
+	Persona string
+	// Allowed is the fail-closed set of Discord user ids permitted to command.
+	Allowed Allowlist
+	// PollInterval is the GET /events poll cadence.
+	PollInterval time.Duration
+}
+
+// ConfigFromEnv builds a Config from the operator's environment. It reads and
+// validates the channel, persona, and allowlist. It deliberately does NOT read
+// the bot token here — the token is fetched separately, immediately before use,
+// by tokenFromEnv, so it never lands in Config.
+func ConfigFromEnv() (Config, error) {
+	channel := strings.TrimSpace(os.Getenv(EnvChannel))
+	if channel == "" {
+		return Config{}, fmt.Errorf("discord: %s is unset; set it to the target channel id", EnvChannel)
+	}
+	persona := strings.TrimSpace(os.Getenv(EnvPersona))
+	if persona == "" {
+		return Config{}, fmt.Errorf("discord: %s is unset; set it to the persona a tell should address", EnvPersona)
+	}
+	// Fail-closed allowlist: an unset or empty var yields an empty set, which
+	// rejects everyone. ParseAllowlist never treats "empty" as "everyone".
+	allowed := ParseAllowlist(os.Getenv(EnvAllowedUsers))
+	return Config{
+		Channel:      channel,
+		Persona:      persona,
+		Allowed:      allowed,
+		PollInterval: DefaultPollInterval,
+	}, nil
+}
+
+// tokenFromEnv reads the bot token from the environment at the moment of use.
+// The token is never stored on Config, never logged, and a missing value is
+// reported by env-var NAME only — never by echoing any value back.
+func tokenFromEnv() (string, error) {
+	tok := strings.TrimSpace(os.Getenv(EnvBotToken))
+	if tok == "" {
+		return "", fmt.Errorf("discord: %s is unset or empty; the bot token must be provided in the environment", EnvBotToken)
+	}
+	return tok, nil
+}
