@@ -1,11 +1,11 @@
-# Discord transport (EXPERIMENTAL / SPIKE)
+# Discord transport (EXPERIMENTAL)
 
-> **Status: experimental spike.** This is a vertical slice that proves one loop —
-> one mate ↔ one Discord bot ↔ one channel, inbound and outbound. It is not a
-> finished feature. There is no CLI wiring yet, no multi-persona routing, and the
-> live path (a real bot in a real server talking to a running ship) is
-> **unverified** — see [Live-testing](#live-testing). Do not point this at a busy
-> production server.
+> **Status: experimental.** This is a vertical slice that proves one loop —
+> one mate ↔ one Discord bot ↔ one channel, inbound and outbound. It ships as
+> the `shipmates discord` command, but the live path (a real bot in a real
+> server talking to a running ship) has not been smoke-tested here, and there is
+> no multi-persona routing yet — see [Live smoke-test](#live-smoke-test). Do not
+> point this at a busy production server.
 
 ## What it does
 
@@ -71,46 +71,61 @@ The ship server address is discovered automatically: loopback + the port from
 `.shipmates/sessions/server.port`, using the per-run captain bearer token from
 `.shipmates/sessions/server.token` — the same files `internal/client` reads.
 
-## Live-testing
+## Running it
 
-Because this spike has no CLI command yet, drive it from a tiny program run from
-inside the ship's repo directory (so `.shipmates/sessions/*` resolves), with a
-captain already running:
+Run the transport from inside the ship's repo directory (so
+`.shipmates/sessions/*` resolves), with a captain already running:
 
-```go
-package main
-
-import (
-	"context"
-	"log"
-	"os"
-	"os/signal"
-
-	"github.com/luthermonson/shipmates/internal/discord"
-)
-
-func main() {
-	cfg, err := discord.ConfigFromEnv()
-	if err != nil {
-		log.Fatal(err)
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	if err := discord.New(cfg).Run(ctx); err != nil && ctx.Err() == nil {
-		log.Fatal(err)
-	}
-}
+```
+shipmates discord
 ```
 
-1. Start a ship/captain in the repo so `.shipmates/sessions/server.port` and
-   `server.token` exist and `GET /events` / `POST /tell/{persona}` are live.
-2. Export the four env vars above.
-3. `go run` the program from the repo root.
-4. From an allowlisted account, post a message in the configured channel. It
-   should arrive as a tell to the persona, and the persona's reply should post
-   back into the channel.
+It reads all four env vars, validates them (failing fast with a message that
+names any missing/invalid variable — the token value is never printed), connects
+to Discord, and runs until interrupted. Ctrl-C (SIGINT) or SIGTERM cancels the
+run context and shuts down cleanly.
 
-Wiring a proper `shipmates discord` subcommand is left as follow-up.
+## Live smoke-test
+
+The pure logic (allowlist, sanitization, config parsing) is unit-tested, but the
+live wire — a real bot in a real server talking to a running ship — has not been
+exercised here. Minimal steps to verify it:
+
+1. **Create the bot and enable the intent.** Discord Developer Portal → new
+   Application → **Bot** tab → **Reset Token** and copy it. Under **Privileged
+   Gateway Intents**, enable **MESSAGE CONTENT INTENT** (without it the bot
+   receives empty message bodies and inbound silently does nothing).
+2. **Invite it.** OAuth2 URL Generator → scope `bot`, permissions **View
+   Channel**, **Send Messages**, **Read Message History**. Open the URL and add
+   the bot to a server you control; pick or create one channel for it.
+3. **Collect ids** (Discord Developer Mode on): right-click the channel → **Copy
+   Channel ID**; right-click your own name → **Copy User ID**.
+4. **Start a ship** in the repo so `.shipmates/sessions/server.port` /
+   `server.token` exist and `GET /events` + `POST /tell/{persona}` are live —
+   e.g. `shipmates tell <persona> "hello"` (or `shipmates open`) puts a mate to
+   work and spawns the coordination server.
+5. **Export the env vars** (use the persona you just put to work):
+
+   ```
+   export DISCORD_BOT_TOKEN='<bot token>'
+   export DISCORD_TRAINING_CHANNEL='<channel id>'
+   export SHIPMATES_DISCORD_ALLOWED_USERS='<your user id>'
+   export SHIPMATES_DISCORD_PERSONA='<persona>'
+   ```
+
+6. **Run it from the repo root:** `shipmates discord` (add `--verbose` on the
+   root command — `shipmates --verbose discord` — to see connect/dispatch logs;
+   the token is never among them).
+7. **Inbound:** from the allowlisted account, post a message in the channel. It
+   should arrive at the mate as a tell. A message from any other account must be
+   ignored.
+8. **Outbound:** the persona's next assistant reply should post back into the
+   channel as the bot. Confirm a reply containing `@everyone` or a `<@id>`
+   mention posts without pinging anyone.
+9. **Shutdown:** Ctrl-C; the process should exit cleanly (no error, no stack).
+
+This feature stays marked experimental until steps 7–9 are confirmed against a
+live bot.
 
 ## Security model
 

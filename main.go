@@ -41,6 +41,7 @@ func main() {
 			commands.Routing(cat),
 			commands.Open(),
 			commands.Bridge(),
+			commands.Discord(),
 			commands.Ask(),
 			commands.Tell(),
 			commands.Show(),

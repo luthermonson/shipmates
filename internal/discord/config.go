@@ -26,6 +26,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/luthermonson/shipmates/internal/personaname"
 )
 
 // Environment variable names. Secrets and operator-owned configuration live in
@@ -98,6 +100,38 @@ func ConfigFromEnv() (Config, error) {
 		Allowed:      allowed,
 		PollInterval: DefaultPollInterval,
 	}, nil
+}
+
+// Preflight validates that ALL required operator configuration is present and
+// well-formed in the environment, WITHOUT opening a Discord connection or
+// touching the ship. It is the fail-fast gate the `shipmates discord` command
+// runs before it commits to a long-lived process, so a misconfiguration is a
+// clear one-line error at startup rather than a confusing silent no-op.
+//
+// It checks, and names in its error, the exact missing/invalid variable:
+//   - DISCORD_TRAINING_CHANNEL and SHIPMATES_DISCORD_PERSONA must be set
+//     (via ConfigFromEnv), and the persona must be a legal persona name;
+//   - DISCORD_BOT_TOKEN must be set — its VALUE is never read into the return,
+//     never logged, and never echoed in the error;
+//   - SHIPMATES_DISCORD_ALLOWED_USERS must list at least one id: an empty
+//     allowlist is valid fail-closed policy (nobody can command) but useless as
+//     a running bot, so the command refuses it with an actionable message.
+func Preflight() (Config, error) {
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
+	if err := personaname.Validate(cfg.Persona); err != nil {
+		return Config{}, fmt.Errorf("discord: %s is invalid: %w", EnvPersona, err)
+	}
+	// Presence-only check on the token; the value is intentionally discarded.
+	if _, err := tokenFromEnv(); err != nil {
+		return Config{}, err
+	}
+	if len(cfg.Allowed) == 0 {
+		return Config{}, fmt.Errorf("discord: %s is unset or empty; set it to at least one Discord user id (comma-separated) — an empty allowlist means no one can command the mate", EnvAllowedUsers)
+	}
+	return cfg, nil
 }
 
 // tokenFromEnv reads the bot token from the environment at the moment of use.
