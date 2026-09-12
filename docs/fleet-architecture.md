@@ -262,9 +262,11 @@ projects:                              # source, never store the secret
 
 `shipmates ship install` wires it to run at logon — **Windows: Scheduled Task
 (ONLOGON), macOS: launchd user agent** (`~/Library/LaunchAgents/cc.shipmates.ship.plist`,
-KeepAlive). Deliberately NOT a session-0 Windows service or launch daemon:
-claude needs the user's environment, credentials, and profile. `ship uninstall`
-reverses it. Linux: run `ship serve` from a systemd *user* unit.
+KeepAlive), **Linux: systemd `--user` unit** (`~/.config/systemd/user/shipmates-ship.service`,
+`Restart=always`, `WantedBy=default.target`; best-effort `loginctl enable-linger`
+so it survives logout). Deliberately NOT a session-0 Windows service or launch
+daemon: claude needs the user's environment, credentials, and profile.
+`ship uninstall` reverses it.
 
 ### The backend driver seam: `backend: claude|command`
 

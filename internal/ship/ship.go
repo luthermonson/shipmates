@@ -1,8 +1,9 @@
 // Package ship implements the per-host supervisor: one daemon that reads
 // ~/.shipmates/ship.yaml (a list of project dirs), keeps a captain server alive
 // in each, and restarts them on crash. It is the thing `ship install` wires
-// to run at logon (Windows Scheduled Task / macOS launchd user agent — NOT a
-// session-0 service: claude needs the user's environment and credentials).
+// to run at logon (Windows Scheduled Task / macOS launchd user agent / Linux
+// systemd --user unit — NOT a session-0 service: claude needs the user's
+// environment and credentials).
 package ship
 
 import (
@@ -322,4 +323,4 @@ func StatusAll(c *Config) []ProjectStatus {
 }
 
 // ErrUnsupported marks install/uninstall on platforms without an implementation.
-var ErrUnsupported = errors.New("ship install is implemented for windows (Scheduled Task) and darwin (launchd user agent) only")
+var ErrUnsupported = errors.New("ship install is implemented for windows (Scheduled Task), darwin (launchd user agent), and linux (systemd --user unit) only")
