@@ -14,8 +14,16 @@ type Allowlist map[string]bool
 // everyone. There is no wildcard: "allow everyone" is deliberately not
 // expressible.
 func ParseAllowlist(raw string) Allowlist {
+	return ParseAllowlistSlice(strings.Split(raw, ","))
+}
+
+// ParseAllowlistSlice builds an Allowlist from already-separated ids — the form
+// the YAML config supplies (allowedUsers: [...]). Each id is trimmed and empty
+// entries are dropped; an empty or all-blank slice yields an empty, non-nil set
+// that rejects everyone. Same fail-closed rule as ParseAllowlist, no wildcard.
+func ParseAllowlistSlice(ids []string) Allowlist {
 	out := Allowlist{}
-	for _, part := range strings.Split(raw, ",") {
+	for _, part := range ids {
 		id := strings.TrimSpace(part)
 		if id == "" {
 			continue

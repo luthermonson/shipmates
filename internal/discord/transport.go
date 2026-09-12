@@ -3,9 +3,11 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -76,7 +78,7 @@ func (t *Transport) Run(ctx context.Context) error {
 		return fmt.Errorf("discord: configured persona is invalid: %w", err)
 	}
 
-	tok, err := tokenFromEnv()
+	tok, err := readToken(t.cfg.TokenEnv)
 	if err != nil {
 		return err
 	}
@@ -197,8 +199,18 @@ func (t *Transport) pumpOutbound() {
 		if !ok {
 			continue
 		}
-		if err := t.postToChannel(out); err != nil {
-			slog.Warn("discord: outbound post failed", "err", err)
+		// Post to the mate's own channel first.
+		if err := t.postTo(t.cfg.Channel, out); err != nil {
+			slog.Warn("discord: outbound post failed", "persona", t.cfg.Persona, "err", err)
+		}
+		// All-hands mirror: the SAME sanitized text, posted as this mate's own
+		// bot so identities stay distinct. Post-only — inbound is not read from
+		// the all-hands channel. Skip when it is the mate's own channel (no
+		// double post) or unset.
+		if ah := t.cfg.AllHandsChannel; ah != "" && ah != t.cfg.Channel {
+			if err := t.postTo(ah, out); err != nil {
+				slog.Warn("discord: all-hands post failed", "persona", t.cfg.Persona, "err", err)
+			}
 		}
 	}
 	t.lastSeen = newHigh
@@ -217,16 +229,43 @@ func (t *Transport) fetchEvents() ([]event, error) {
 	return events, nil
 }
 
-// postToChannel posts already-sanitized text to the bound channel with
-// AllowedMentions set to none — the belt-and-braces second layer behind
-// stripMentions. A non-nil, empty Parse slice means Discord parses no mentions
-// of any kind, so even if a token slipped past stripMentions it cannot ping.
-func (t *Transport) postToChannel(content string) error {
-	_, err := t.sess.ChannelMessageSendComplex(t.cfg.Channel, &discordgo.MessageSend{
+// postTo posts already-sanitized text to a channel with AllowedMentions set to
+// none — the belt-and-braces second layer behind stripMentions. A non-nil,
+// empty Parse slice means Discord parses no mentions of any kind, so even if a
+// token slipped past stripMentions it cannot ping. Used for both the mate's own
+// channel and the all-hands mirror.
+func (t *Transport) postTo(channelID, content string) error {
+	_, err := t.sess.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content: content,
 		AllowedMentions: &discordgo.MessageAllowedMentions{
 			Parse: []discordgo.AllowedMentionType{},
 		},
 	})
 	return err
+}
+
+// RunMany starts one Transport per Config, each on its own goroutine and its
+// own discordgo session/token, all sharing the passed context. It blocks until
+// every transport has returned, which for healthy ones is after ctx is
+// cancelled (Ctrl-C / SIGTERM). A clean, signal-driven shutdown is not an
+// error; a transport that stops for any other reason (e.g. its gateway
+// connection could not open) is logged by persona and does NOT bring down the
+// others — partial availability beats a total outage.
+func RunMany(ctx context.Context, configs []Config) error {
+	if len(configs) == 0 {
+		return errors.New("discord: no mates to run")
+	}
+	var wg sync.WaitGroup
+	for _, cfg := range configs {
+		cfg := cfg
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := New(cfg).Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("discord: mate transport stopped", "persona", cfg.Persona, "err", err)
+			}
+		}()
+	}
+	wg.Wait()
+	return nil
 }

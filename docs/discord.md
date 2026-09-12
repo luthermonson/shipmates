@@ -1,166 +1,211 @@
 # Discord transport (EXPERIMENTAL)
 
-> **Status: experimental.** This is a vertical slice that proves one loop —
-> one mate ↔ one Discord bot ↔ one channel, inbound and outbound. It ships as
-> the `shipmates discord` command, but the live path (a real bot in a real
-> server talking to a running ship) has not been smoke-tested here, and there is
-> no multi-persona routing yet — see [Live smoke-test](#live-smoke-test). Do not
+> **Status: experimental.** Each mate speaks as its own Discord bot — inbound and
+> outbound — with an optional shared all-hands channel. It ships as the
+> `shipmates discord` command. The live path (real bots in a real server talking
+> to a running ship) has not been smoke-tested here — see
+> [Live smoke-test](#live-smoke-test) — and inbound @mention routing from the
+> all-hands channel is not implemented yet (all-hands is **post-only**). Do not
 > point this at a busy production server.
 
 ## What it does
 
-`internal/discord` bridges a single Discord text channel to a single mate:
+`internal/discord` bridges Discord channels to the mates on this machine's ship.
+Each mate is one Discord bot bound to one channel:
 
-- **Inbound** — a message in the configured channel, from an allowlisted Discord
-  user, becomes the *content* of a `tell` to the configured persona. It is
-  dispatched to the ship's local captain server via the existing authenticated
-  `POST /tell/{persona}` seam.
-- **Outbound** — the transport polls the captain's `GET /events` and posts the
-  configured persona's assistant replies back to the channel as the bot.
+- **Inbound** — a message in a mate's channel, from an allowlisted Discord user,
+  becomes the *content* of a `tell` to that persona, dispatched to the ship's
+  local captain server via the authenticated `POST /tell/{persona}` seam.
+- **Outbound** — each transport polls the captain's `GET /events` and posts its
+  persona's assistant replies back to that mate's channel as its own bot.
+- **All-hands (optional)** — when `allHandsChannel` is set, every mate *also*
+  posts its outbound replies to that shared channel, as its own bot (so
+  identities stay distinct). This is **post-only** for now: messages typed in the
+  all-hands channel are not routed to any mate — command a mate in its own
+  channel.
 
 It reuses the same tell/events seam the voice conversation loop uses
 (`internal/fleet/conversation.go`), through `internal/client` (loopback +
 `Authorization: Bearer <server.token>`). No new tell/events plumbing is
-introduced; Discord is just a second front-end onto the existing loop.
+introduced; Discord is just another front-end onto the existing loop.
 
-## Setup
+## Two ways to configure it
 
-### 1. Create a bot and get its token
+- **Multi-bot mode** — an operator config file `~/.shipmates/discord.yaml`,
+  defining one bot per mate plus an optional all-hands channel. This is the
+  feature's main path.
+- **Single-bot mode** — four environment variables, no file. Used automatically
+  when `~/.shipmates/discord.yaml` is absent. This is the quickstart, and the
+  simplest way to try one bot.
 
-1. Go to the Discord Developer Portal → **Applications** → **New Application**.
-2. Open the **Bot** tab → **Add Bot**.
-3. Under **Privileged Gateway Intents**, enable **MESSAGE CONTENT INTENT**
-   (required to read message text) and **SERVER MEMBERS**/**PRESENCE** are not
-   needed.
-4. **Reset Token** and copy it. This is a secret — it goes in an environment
-   variable, never into the repo or any config file (see [Security model](#security-model)).
+In both, **a bot token is never stored in config**: the file/env names the
+*environment variable* that holds the token (exactly like the openai runtime's
+`api_key_env` and `~/.shipmates/personas.yaml`). The token is read at startup and
+never logged.
 
-### 2. Invite the bot to your server
+## Multi-bot: `~/.shipmates/discord.yaml`
 
-Build an OAuth2 invite URL (Developer Portal → **OAuth2** → **URL Generator**):
+The file lives in the operator's home, outside every repo checkout — the same
+trust boundary as `~/.shipmates/personas.yaml`.
 
-- Scopes: `bot`
-- Bot permissions: **View Channel**, **Send Messages**, **Read Message History**
+```yaml
+allowedUsers: ["<discord-user-id>", ...]   # who may command ANY mate; fail-closed
+allHandsChannel: "<channel-id>"            # optional shared channel; omit to disable
+mates:
+  architect:
+    tokenEnv: DISCORD_TOKEN_ARCHITECT      # NAME of the env var holding the token
+    channel: "<channel-id>"
+  security:
+    tokenEnv: DISCORD_TOKEN_SECURITY
+    channel: "<channel-id>"
+```
 
-Open the URL and add the bot to a server you control. Then create (or pick) the
-single channel it will use.
+- `allowedUsers` — the shared allowlist for every mate. **Fail-closed:** an empty
+  list means nobody can command any mate (it is refused at startup as a
+  misconfiguration). There is no wildcard.
+- `allHandsChannel` — omit it to disable the all-hands mirror.
+- `mates` — keys are persona names (must match `.claude/agents/<persona>.md`).
+  Each mate names its own `tokenEnv` and `channel`.
 
-### 3. Get the channel id
+**One Discord application per mate.** Discord identity is per bot, so each mate
+needs its own application/bot and its own token:
 
-Enable **Developer Mode** in Discord (User Settings → Advanced), right-click the
-channel → **Copy Channel ID**.
+1. For each mate, create an application (Developer Portal → **New Application**),
+   open the **Bot** tab, enable **MESSAGE CONTENT INTENT** under *Privileged
+   Gateway Intents*, and **Reset Token** to copy its token.
+2. Export each token into the env var you named in `tokenEnv`, e.g.:
 
-### 4. Get your Discord user id(s) for the allowlist
+   ```
+   export DISCORD_TOKEN_ARCHITECT='<architect bot token>'
+   export DISCORD_TOKEN_SECURITY='<security bot token>'
+   ```
 
-Right-click your username → **Copy User ID**. These are the only users allowed to
-command the mate. Anyone not listed is read-only.
+3. Invite each bot to your server (OAuth2 → URL Generator → scope `bot`,
+   permissions **View Channel**, **Send Messages**, **Read Message History**),
+   and create one channel per mate (plus one all-hands channel if you want the
+   mirror).
+4. With Developer Mode on (User Settings → Advanced), right-click each channel →
+   **Copy Channel ID**, and right-click your own name → **Copy User ID** for
+   `allowedUsers`.
 
-### 5. Environment variables
+A mate whose `tokenEnv` variable is unset (or whose persona/channel is invalid)
+is **skipped with a warning naming the mate**; the healthy mates still start. The
+whole command aborts only if the file is unparseable, `allowedUsers` is empty,
+`mates` is empty, or *every* mate fails preflight.
 
-All configuration is operator-owned and read from the environment — nothing lives
-in the checkout.
+## Single-bot: environment variables
 
-| Variable                          | Meaning                                                           |
-| --------------------------------- | ---------------------------------------------------------------- |
-| `DISCORD_BOT_TOKEN`               | The bot token. **Secret.** Never logged, never in the repo.      |
-| `DISCORD_TRAINING_CHANNEL`        | The single channel id to listen on and post to.                  |
-| `SHIPMATES_DISCORD_ALLOWED_USERS` | Comma-separated Discord user ids permitted to command the mate.  |
-| `SHIPMATES_DISCORD_PERSONA`       | The persona a tell is addressed to (e.g. `captain`).             |
+Used automatically when `~/.shipmates/discord.yaml` does not exist.
 
-The ship server address is discovered automatically: loopback + the port from
-`.shipmates/sessions/server.port`, using the per-run captain bearer token from
-`.shipmates/sessions/server.token` — the same files `internal/client` reads.
+| Variable                          | Meaning                                                          |
+| --------------------------------- | --------------------------------------------------------------- |
+| `DISCORD_BOT_TOKEN`               | The bot token. **Secret.** Never logged, never in the repo.     |
+| `DISCORD_TRAINING_CHANNEL`        | The single channel id to listen on and post to.                 |
+| `SHIPMATES_DISCORD_ALLOWED_USERS` | Comma-separated Discord user ids permitted to command the mate. |
+| `SHIPMATES_DISCORD_PERSONA`       | The persona a tell is addressed to (e.g. `captain`).            |
+
+Set up the one bot exactly as in step 1–4 above (MESSAGE CONTENT INTENT, invite,
+channel id, your user id).
 
 ## Running it
 
-Run the transport from inside the ship's repo directory (so
-`.shipmates/sessions/*` resolves), with a captain already running:
+The ship server address is discovered automatically: loopback + the port from
+`.shipmates/sessions/server.port`, using the per-run captain bearer token from
+`.shipmates/sessions/server.token` — the same files `internal/client` reads. So
+run from inside the ship's repo directory, with a captain already running:
 
 ```
 shipmates discord
 ```
 
-It reads all four env vars, validates them (failing fast with a message that
-names any missing/invalid variable — the token value is never printed), connects
-to Discord, and runs until interrupted. Ctrl-C (SIGINT) or SIGTERM cancels the
-run context and shuts down cleanly.
+It resolves config (file if present, else env), validates it — failing fast with
+a message that names any missing/invalid variable, and **never printing a token
+value** — then connects one bot per mate and runs until interrupted. Ctrl-C
+(SIGINT) or SIGTERM cancels the shared run context; every transport shuts down
+and the command waits for all of them before exiting. Add `--verbose` on the root
+command (`shipmates --verbose discord`) to see connect/dispatch logs; no token
+appears in them.
 
 ## Live smoke-test
 
-The pure logic (allowlist, sanitization, config parsing) is unit-tested, but the
-live wire — a real bot in a real server talking to a running ship — has not been
-exercised here. Minimal steps to verify it:
+The pure logic (allowlist, sanitization, config-file parsing, token-env
+resolution) is unit-tested, but the live wire — real bots talking to a running
+ship — has not been exercised here. Minimal multi-bot steps:
 
-1. **Create the bot and enable the intent.** Discord Developer Portal → new
-   Application → **Bot** tab → **Reset Token** and copy it. Under **Privileged
-   Gateway Intents**, enable **MESSAGE CONTENT INTENT** (without it the bot
-   receives empty message bodies and inbound silently does nothing).
-2. **Invite it.** OAuth2 URL Generator → scope `bot`, permissions **View
-   Channel**, **Send Messages**, **Read Message History**. Open the URL and add
-   the bot to a server you control; pick or create one channel for it.
-3. **Collect ids** (Discord Developer Mode on): right-click the channel → **Copy
-   Channel ID**; right-click your own name → **Copy User ID**.
-4. **Start a ship** in the repo so `.shipmates/sessions/server.port` /
-   `server.token` exist and `GET /events` + `POST /tell/{persona}` are live —
-   e.g. `shipmates tell <persona> "hello"` (or `shipmates open`) puts a mate to
-   work and spawns the coordination server.
-5. **Export the env vars** (use the persona you just put to work):
+1. **Create two bots**, one per mate. For each: Developer Portal → new
+   Application → **Bot** → enable **MESSAGE CONTENT INTENT** (without it message
+   bodies arrive empty and inbound silently does nothing) → **Reset Token** and
+   copy it.
+2. **Invite both** (OAuth2 URL Generator → scope `bot`, permissions **View
+   Channel / Send Messages / Read Message History**) to a server you control.
+   Create one channel per mate and, optionally, one all-hands channel.
+3. **Collect ids** (Developer Mode on): each channel id, and your own user id.
+4. **Start a ship** with those personas at work so `.shipmates/sessions/server.*`
+   exist and `GET /events` + `POST /tell/{persona}` are live — e.g.
+   `shipmates tell architect "hello"` and `shipmates tell security "hello"`
+   (or `shipmates open`).
+5. **Write `~/.shipmates/discord.yaml`** using the schema above, with the two
+   personas, their channel ids, their `tokenEnv` names, your user id in
+   `allowedUsers`, and an `allHandsChannel`.
+6. **Export the token env vars** named by each `tokenEnv`
+   (`DISCORD_TOKEN_ARCHITECT`, `DISCORD_TOKEN_SECURITY`, …).
+7. **Run from the repo root:** `shipmates --verbose discord`. Confirm it logs
+   `mode=file mates=2` and that no token value appears in any log line.
+8. **Inbound:** from the allowlisted account, post in the *architect* channel —
+   it should reach the architect mate as a tell; post in the *security* channel —
+   it should reach security. A message from a non-allowlisted account must be
+   ignored in both.
+9. **Outbound + identity:** each mate's reply posts back to its own channel as
+   its own bot, and also appears in the all-hands channel under that same bot's
+   identity. Confirm a reply containing `@everyone` or `<@id>` posts without
+   pinging anyone.
+10. **Degraded start:** unset one mate's token env and re-run — that mate is
+    skipped with a warning, the other still starts.
+11. **Shutdown:** Ctrl-C; the process exits cleanly (no error, no stack) after
+    all bots disconnect.
 
-   ```
-   export DISCORD_BOT_TOKEN='<bot token>'
-   export DISCORD_TRAINING_CHANNEL='<channel id>'
-   export SHIPMATES_DISCORD_ALLOWED_USERS='<your user id>'
-   export SHIPMATES_DISCORD_PERSONA='<persona>'
-   ```
+(For a one-bot check, skip the file and use the four single-bot env vars instead;
+everything else is the same.)
 
-6. **Run it from the repo root:** `shipmates discord` (add `--verbose` on the
-   root command — `shipmates --verbose discord` — to see connect/dispatch logs;
-   the token is never among them).
-7. **Inbound:** from the allowlisted account, post a message in the channel. It
-   should arrive at the mate as a tell. A message from any other account must be
-   ignored.
-8. **Outbound:** the persona's next assistant reply should post back into the
-   channel as the bot. Confirm a reply containing `@everyone` or a `<@id>`
-   mention posts without pinging anyone.
-9. **Shutdown:** Ctrl-C; the process should exit cleanly (no error, no stack).
-
-This feature stays marked experimental until steps 7–9 are confirmed against a
-live bot.
+This feature stays marked experimental until steps 7–11 are confirmed against
+live bots.
 
 ## Security model
 
-The five constraints this spike enforces, and where:
+The properties the transport enforces, and where — all re-verified in the
+multi-bot path:
 
-1. **Token is operator-only and never logged.** The bot token is read from
-   `DISCORD_BOT_TOKEN` only, at the moment of use (`tokenFromEnv`,
-   `internal/discord/config.go`), and is never stored on `Config`, never
-   returned, and never placed in a log line or error message. This mirrors the
-   openai runtime's `api_key_env` posture (`internal/runtime/openai/config.go`):
-   a secret is named by an env var, never read from config-in-repo.
+1. **Tokens are operator-only and never logged.** A token is read only from the
+   env var named by `tokenEnv` (multi-bot) or `DISCORD_BOT_TOKEN` (single-bot),
+   at the moment of use (`readToken`, `internal/discord/config.go`). `Config`
+   holds the env-var *name* (`TokenEnv`), never the value; `MateError` carries
+   only the name too, so a per-mate failure names the missing var without ever
+   echoing a token. This mirrors the openai runtime's `api_key_env` posture
+   (`internal/runtime/openai/config.go`).
 
 2. **Inbound Discord text is hostile input — data, not instructions.**
    `sanitizeInbound` (`internal/discord/sanitize.go`) only trims and hard-bounds
-   the message (`MaxInboundRunes`). It never interprets the text; the message
-   becomes the *content* of a tell and nothing more, so it cannot smuggle a
-   command. This is the same stance `catalog/routing/github.md` takes toward
-   GitHub-sourced text.
+   the message (`MaxInboundRunes`); it never interprets the text, which becomes
+   the *content* of a tell and nothing more. Same stance as
+   `catalog/routing/github.md`.
 
-3. **The allowlist is fail-closed.** `Allowlist.Allows`
+3. **The allowlist is fail-closed and shared.** `allowedUsers` builds one
+   `Allowlist` (`ParseAllowlistSlice`) shared by every mate; `Allowlist.Allows`
    (`internal/discord/allowlist.go`) returns true only for ids explicitly
-   present. An empty allowlist allows nobody (not everybody), there is no
-   wildcard, and a non-allowlisted message is dropped (read-only) in
-   `onMessageCreate` (`internal/discord/transport.go`).
+   present. Empty allows nobody (and is refused at startup), there is no
+   wildcard, and a non-allowlisted message is dropped in `onMessageCreate`
+   (`internal/discord/transport.go`).
 
-4. **Outbound mentions are neutralized, twice, and escapes scrubbed.**
-   `stripMentions` (`internal/discord/sanitize.go`) neutralizes `@everyone`,
-   `@here`, `<@userid>`, and `<@&roleid>` before posting, and `sanitizeOutbound`
-   additionally runs the text through the terminal-escape scrubber
-   `bridge.Chrome`. As a second layer, every post sets discordgo's
-   `AllowedMentions` to an empty parse set (`postToChannel`,
-   `internal/discord/transport.go`), so Discord parses no mentions of any kind.
+4. **Outbound mentions are neutralized, twice, and escapes scrubbed — on every
+   post, all-hands included.** `stripMentions` neutralizes `@everyone`, `@here`,
+   `<@userid>`, and `<@&roleid>`, and `sanitizeOutbound` additionally runs the
+   text through the terminal-escape scrubber `bridge.Chrome`
+   (`internal/discord/sanitize.go`). Every post — to the mate's own channel and
+   to the all-hands mirror — goes through `postTo`
+   (`internal/discord/transport.go`), which sets discordgo's `AllowedMentions` to
+   an empty parse set, so Discord parses no mentions of any kind.
 
 5. **The captain API is always authenticated.** Both `POST /tell/{persona}` and
    `GET /events` go through `internal/client`, which attaches
-   `Authorization: Bearer <server.token>` on every request. The transport never
-   talks to the captain API unauthenticated.
-```
+   `Authorization: Bearer <server.token>` on every request. No transport talks to
+   the captain API unauthenticated.

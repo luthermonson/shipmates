@@ -64,18 +64,46 @@ const (
 )
 
 // Config is the resolved, validated configuration for one Discord transport
-// instance. The bot token is deliberately NOT a field: it is read from the
-// environment at connect time only, so it never sits in a struct that could be
-// logged with %+v. See tokenFromEnv.
+// instance (one bot ↔ one persona ↔ one channel). The bot token VALUE is
+// deliberately NOT a field: Config holds only the NAME of the env var that
+// carries it (TokenEnv), so the secret never sits in a struct that could be
+// logged with %+v. The value is read from the environment at connect time only.
+// See readToken.
 type Config struct {
 	// Channel is the one channel id this transport is bound to.
 	Channel string
 	// Persona is the crew persona a tell is addressed to.
 	Persona string
+	// TokenEnv is the NAME of the environment variable holding this mate's bot
+	// token — never the token itself. In single-bot env mode this is
+	// EnvBotToken; in multi-bot file mode it is each mate's tokenEnv.
+	TokenEnv string
 	// Allowed is the fail-closed set of Discord user ids permitted to command.
 	Allowed Allowlist
+	// AllHandsChannel, when non-empty, is a shared channel every mate ALSO posts
+	// its outbound replies to (post-only fan-out). Empty disables it.
+	AllHandsChannel string
 	// PollInterval is the GET /events poll cadence.
 	PollInterval time.Duration
+}
+
+// preflight validates one resolved Config without connecting: the channel must
+// be set, the persona must be a legal persona name (it becomes a /tell path
+// segment), and the named token env var must actually hold a value. It never
+// reads the token into anything but a discarded local, and its errors name the
+// env var, never its value. The allowlist is validated at a higher level
+// (shared across mates), not here.
+func (c Config) preflight() error {
+	if strings.TrimSpace(c.Channel) == "" {
+		return fmt.Errorf("channel is empty")
+	}
+	if err := personaname.Validate(c.Persona); err != nil {
+		return err
+	}
+	if _, err := readToken(c.TokenEnv); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ConfigFromEnv builds a Config from the operator's environment. It reads and
@@ -97,6 +125,7 @@ func ConfigFromEnv() (Config, error) {
 	return Config{
 		Channel:      channel,
 		Persona:      persona,
+		TokenEnv:     EnvBotToken,
 		Allowed:      allowed,
 		PollInterval: DefaultPollInterval,
 	}, nil
@@ -125,7 +154,7 @@ func Preflight() (Config, error) {
 		return Config{}, fmt.Errorf("discord: %s is invalid: %w", EnvPersona, err)
 	}
 	// Presence-only check on the token; the value is intentionally discarded.
-	if _, err := tokenFromEnv(); err != nil {
+	if _, err := readToken(cfg.TokenEnv); err != nil {
 		return Config{}, err
 	}
 	if len(cfg.Allowed) == 0 {
@@ -134,13 +163,18 @@ func Preflight() (Config, error) {
 	return cfg, nil
 }
 
-// tokenFromEnv reads the bot token from the environment at the moment of use.
-// The token is never stored on Config, never logged, and a missing value is
-// reported by env-var NAME only — never by echoing any value back.
-func tokenFromEnv() (string, error) {
-	tok := strings.TrimSpace(os.Getenv(EnvBotToken))
+// readToken reads a bot token from the named environment variable at the moment
+// of use. The token is never stored on Config, never logged, and a missing
+// value is reported by env-var NAME only — never by echoing any value back. An
+// empty envName is itself an error (a mate with no tokenEnv configured).
+func readToken(envName string) (string, error) {
+	envName = strings.TrimSpace(envName)
+	if envName == "" {
+		return "", fmt.Errorf("discord: no token env var configured (set tokenEnv, or DISCORD_BOT_TOKEN in single-bot mode)")
+	}
+	tok := strings.TrimSpace(os.Getenv(envName))
 	if tok == "" {
-		return "", fmt.Errorf("discord: %s is unset or empty; the bot token must be provided in the environment", EnvBotToken)
+		return "", fmt.Errorf("discord: %s is unset or empty; the bot token must be provided in the environment", envName)
 	}
 	return tok, nil
 }
