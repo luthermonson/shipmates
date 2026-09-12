@@ -141,7 +141,7 @@ func MatchPath(pattern, path string) bool {
 	if pattern == "" {
 		return true
 	}
-	pattern = filepath.ToSlash(pattern)
+	pattern = toSlashAll(pattern)
 	path = cleanMatchPath(path)
 
 	// Windows filesystems fold case, so a rule naming `C:\Windows` must also
@@ -213,7 +213,7 @@ func cleanMatchPath(p string) string {
 	if p == "" {
 		return ""
 	}
-	cleaned := path.Clean(filepath.ToSlash(p))
+	cleaned := path.Clean(toSlashAll(p))
 	if cleaned == "." {
 		// `.` and `./` name the project root itself, not a file. Returning
 		// the dot would let `*` patterns match it; empty matches nothing,
@@ -234,11 +234,11 @@ func absoluteUnder(p, root string) (string, bool) {
 	if p == "" || root == "" {
 		return "", false
 	}
-	s := filepath.ToSlash(p)
+	s := toSlashAll(p)
 	if isAbsSlash(s) {
 		return "", false
 	}
-	r := strings.TrimSuffix(filepath.ToSlash(root), "/")
+	r := strings.TrimSuffix(toSlashAll(root), "/")
 	return path.Clean(r + "/" + s), true
 }
 
@@ -253,6 +253,15 @@ func isAbsSlash(s string) bool {
 // path like `C:/…`. It is the signal MatchPath uses to switch to
 // case-insensitive comparison: a volume-rooted path lives on a case-folding
 // filesystem, while a leading-`/` Unix path does not.
+// toSlashAll converts backslashes to forward slashes on EVERY host, unlike
+// filepath.ToSlash which is a no-op off Windows. The path matcher must judge a
+// Windows-shaped path (`C:\Windows\...`) identically regardless of the OS the
+// check runs on — a macOS fleet may evaluate a rule against a Windows ship's
+// path, and tests must be deterministic across CI legs. A literal backslash in
+// a genuine Unix filename is exotic, and folding it to `/` only ever makes a
+// deny match more, never less — the fail-safe direction.
+func toSlashAll(p string) string { return strings.ReplaceAll(p, "\\", "/") }
+
 func isVolumeRooted(s string) bool {
 	if len(s) < 3 || s[1] != ':' || s[2] != '/' {
 		return false
