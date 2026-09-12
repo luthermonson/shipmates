@@ -79,7 +79,10 @@ func Install() error {
 	if u, err := user.Current(); err == nil {
 		uname = u.Username
 	}
-	if out, err := exec.Command("loginctl", "enable-linger", uname).CombinedOutput(); err != nil {
+	if uname == "" {
+		slog.Warn("ship: could not determine the current user to enable linger; " +
+			"the ship will stop when you log out. Run `loginctl enable-linger <you>` manually to keep it running.")
+	} else if out, err := exec.Command("loginctl", "enable-linger", uname).CombinedOutput(); err != nil {
 		slog.Warn("ship: could not enable linger; the ship will stop when you log out. "+
 			"To keep it running, run this manually as an admin",
 			"cmd", "loginctl enable-linger "+uname,

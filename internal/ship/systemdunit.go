@@ -16,8 +16,11 @@ import "fmt"
 func systemdUnit(exePath, logPath, pathEnv string) string {
 	return fmt.Sprintf(`[Unit]
 Description=Shipmates ship supervisor
-After=network-online.target
-Wants=network-online.target
+# Intentionally no After=/Wants=network-online.target: that is a SYSTEM target,
+# absent from the systemd --user manager, so ordering a user unit against it
+# only logs "Unit network-online.target not found" and orders nothing.
+# Restart=always (below) is what covers a start before the network is ready —
+# ship serve exits and systemd restarts it after RestartSec.
 
 [Service]
 Type=simple
