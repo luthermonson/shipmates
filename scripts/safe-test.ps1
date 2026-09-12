@@ -53,7 +53,7 @@ param(
     [string]$Target = './...',
     [int]$CapMB = 2000,
     [int]$TimeoutMinutes = 15,
-    [double]$PollSeconds = 1.0,
+    [double]$PollSeconds = 0.5,
     [int]$TailLines = 40,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$GoTestArgs

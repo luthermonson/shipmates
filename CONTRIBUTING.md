@@ -15,7 +15,14 @@ the commit charge / resident memory of every `*.test` child descended from that
 run, records a per-package peak, and if any child crosses a cap it kills that
 child **and** the parent `go` tree, then prints which package tripped and the
 tail of its output. It exits non-zero if it kills anything or if `go test`
-fails, so it is safe to use in CI or a pre-push hook.
+fails, which makes it suitable for a pre-push hook or CI (the repo's CI
+currently runs `go test` directly; the watchdog is a local guardrail).
+
+It samples on an interval (default 0.5s), so it catches a *growing* leak — the
+kind that has actually taken this machine down — reliably. A single instantaneous
+giant allocation that commits and returns between two polls can still land before
+the next sample; the watchdog is a safety net for runaway growth, not a hard
+per-allocation ceiling.
 
 Healthy shipmates packages peak near ~100 MB, so the default 2000 MB cap leaves
 plenty of headroom while still catching a runaway long before it can hurt the

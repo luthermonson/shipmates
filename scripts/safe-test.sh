@@ -32,7 +32,7 @@ set -u
 TARGET='./...'
 CAP_MB="${SAFE_TEST_CAP_MB:-2000}"
 TIMEOUT_MIN="${SAFE_TEST_TIMEOUT_MIN:-15}"
-POLL_SECS="${SAFE_TEST_POLL_SECS:-1}"
+POLL_SECS="${SAFE_TEST_POLL_SECS:-0.5}"
 TAIL_LINES=40
 
 while [ $# -gt 0 ]; do
@@ -67,14 +67,19 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # BFS the process table for every descendant pid of $1. ps -A is POSIX; rss is
-# KB and comm is the command basename on Linux / the exe path on macOS (we strip
-# the path). One awk pass builds the tree and prints, for each descendant whose
-# command ends in `.test`: "<pkg> <pid> <rssKB>".
+# KB. We match on the ARGS column (argv[0] = the full binary path) rather than
+# comm: Linux truncates comm to 15 chars (TASK_COMM_LEN), so a binary named
+# `permissions.test` (16) arrives as `permissions.tes` and silently fails the
+# `\.test$` match — a hole for every package whose name exceeds 10 chars, which
+# includes permissions, personaname, and containment. argv[0] from `ps args=`
+# is read from the cmdline and is NOT truncated; its first token is the exe path,
+# which we basename. One awk pass builds the tree and prints, for each descendant
+# whose binary basename ends in `.test`: "<pkg> <pid> <rssKB>".
 snapshot() {
-    ps -Ao pid=,ppid=,rss=,comm= | awk -v root="$1" '
+    ps -Ao pid=,ppid=,rss=,args= | awk -v root="$1" '
     {
-        pid=$1; ppid=$2; rss=$3; comm=$4;
-        RSS[pid]=rss; COMM[pid]=comm;
+        pid=$1; ppid=$2; rss=$3; exe=$4;   # exe = argv[0], first token of args
+        RSS[pid]=rss; EXE[pid]=exe;
         kids[ppid] = kids[ppid] " " pid;
     }
     END {
@@ -84,7 +89,7 @@ snapshot() {
             for (j=1; j<=m; j++) if (a[j] != "") { desc[a[j]]=1; queue[n++]=a[j]; }
         }
         for (p in desc) {
-            c=COMM[p]; sub(/.*\//, "", c);
+            c=EXE[p]; sub(/.*\//, "", c);
             if (c ~ /\.test$/) { pkg=c; sub(/\.test$/, "", pkg); print pkg, p, RSS[p]; }
         }
     }'
