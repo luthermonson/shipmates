@@ -130,8 +130,21 @@ var kernelEntries = []kernelEntry{
 	},
 	{
 		article: 15, // stay-aboard
+		// The .ssh/.aws/.gnupg targets are `**/`-anchored on a basename, so
+		// they already match `C:/Users/x/.ssh/...` — no Windows twin needed.
+		// The only Unix-shaped absolute target is /etc, and its intent —
+		// "the machine's system configuration, outside the ship" — has a
+		// Windows equivalent the matcher cannot reach from a Unix path:
+		// C:\Windows (the system tree, which is also where the real hosts
+		// file lives, under System32\drivers\etc). The per-user Startup
+		// folder is the second: a write there is an autorun-persistence
+		// foothold, the same "touch a high-value OS location, not the
+		// project" move /etc guards against. Patterns are written in the
+		// slash spelling the matcher normalizes every path to.
 		deny: []string{
 			"Write(/etc/**)", "Edit(/etc/**)", "MultiEdit(/etc/**)",
+			"Write(C:/Windows/**)", "Edit(C:/Windows/**)", "MultiEdit(C:/Windows/**)",
+			"Write(**/Start Menu/Programs/Startup/**)", "Edit(**/Start Menu/Programs/Startup/**)", "MultiEdit(**/Start Menu/Programs/Startup/**)",
 			"Write(**/.ssh/**)", "Edit(**/.ssh/**)", "MultiEdit(**/.ssh/**)",
 			"Write(**/.aws/**)", "Edit(**/.aws/**)", "MultiEdit(**/.aws/**)",
 			"Write(**/.gnupg/**)", "Edit(**/.gnupg/**)", "MultiEdit(**/.gnupg/**)",
