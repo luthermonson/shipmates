@@ -501,7 +501,7 @@ func evalArgs(sub string) []string {
 // Bundled short flags are honored (`sh -ec 'script'`), since `c` combines.
 func shellScriptArgs(sub string) []string {
 	toks := shellSplit(normalizeHeadToken(prepareBashCommand(sub)))
-	if len(toks) == 0 || !shellInterpreters[toks[0]] {
+	if len(toks) == 0 || !shellInterpreters[interpreterKey(toks[0])] {
 		return nil
 	}
 	var out []string
@@ -543,7 +543,7 @@ func shellScriptArgs(sub string) []string {
 // as its own token or glued to the word (`bash <<<'curl…'`); both are handled.
 func hereStringArgs(sub string) []string {
 	toks := shellSplit(normalizeHeadToken(prepareBashCommand(sub)))
-	if len(toks) == 0 || !shellInterpreters[toks[0]] {
+	if len(toks) == 0 || !shellInterpreters[interpreterKey(toks[0])] {
 		return nil
 	}
 	var out []string
@@ -589,27 +589,52 @@ func hereStringArgs(sub string) []string {
 // past on the interpreter's head token.
 func powerShellCommandArgs(sub string) []string {
 	toks := shellSplit(normalizeHeadToken(prepareBashCommand(sub)))
-	if len(toks) == 0 || !powerShellInterpreters[strings.ToLower(toks[0])] {
+	if len(toks) == 0 || !powerShellInterpreters[interpreterKey(toks[0])] {
 		return nil
 	}
+	// `-File script.ps1` is a deliberate blind spot: the script lives in a file
+	// whose contents the gate cannot read, the same as `sh script.sh` — there is
+	// nothing to evaluate here, so it is not matched on.
 	var out []string
-	for i := 1; i < len(toks)-1; i++ {
+	for i := 1; i < len(toks); i++ {
 		flag := toks[i]
 		if len(flag) < 2 || flag[0] != '-' {
 			continue
 		}
-		name := strings.ToLower(strings.TrimLeft(flag, "-"))
+		// PowerShell also accepts the `-Param:Value` colon form. Split the inline
+		// value off the flag token (on the FIRST colon, so a value like
+		// `http://…` or `C:\…` survives intact) before matching the parameter.
+		name := flag
+		inline, hasInline := "", false
+		if c := strings.IndexByte(flag, ':'); c >= 0 {
+			name, inline, hasInline = flag[:c], flag[c+1:], true
+		}
+		name = strings.ToLower(strings.TrimLeft(name, "-"))
 		switch {
 		case name == "ec" || isFlagPrefix(name, "encodedcommand"):
-			if s := decodeEncodedCommand(toks[i+1]); s != "" {
+			// -EncodedCommand takes a single base64 token, never the rest.
+			blob := inline
+			if !hasInline && i+1 < len(toks) {
+				blob = toks[i+1]
+				i++
+			}
+			if s := decodeEncodedCommand(blob); s != "" {
 				out = append(out, s)
 			}
-			i++
 		case isFlagPrefix(name, "command"):
-			if s := strings.TrimSpace(toks[i+1]); s != "" {
+			// -Command takes the REST of the line as its script, not just the
+			// next token: `pwsh -Command Remove-Item C:\d -Recurse` is one
+			// script, so joining everything after the flag is what PowerShell
+			// actually runs. Over-capturing only ADDS a match candidate.
+			var parts []string
+			if hasInline && inline != "" {
+				parts = append(parts, inline)
+			}
+			parts = append(parts, toks[i+1:]...)
+			i = len(toks) // the flag consumed the remainder of the line
+			if s := strings.TrimSpace(strings.Join(parts, " ")); s != "" {
 				out = append(out, s)
 			}
-			i++
 		}
 	}
 	return out
@@ -741,12 +766,29 @@ func normalizeHeadTokenWith(cmd string, prefixes map[string]bool) string {
 // canonicalHead reduces one head token to a bare program name: a leading
 // backslash (the shell's alias-suppression prefix) is dropped and a path is
 // reduced to its last component.
+//
+// The basename split honors BOTH separators. Windows spells an interpreter path
+// with backslashes (`C:\…\powershell.exe`, `C:\…\bash.exe`), and reducing only
+// on `/` left the whole path standing as the head token — so the interpreter
+// lookup missed and every extraction gated on it (`-c`, `<<<`,
+// `-Command`/`-EncodedCommand`) returned nil, laundering a deny into an allow on
+// the very platform the fix exists for. Mirrors cleanMatchPath, which already
+// treats a backslash as a separator.
 func canonicalHead(tok string) string {
 	t := strings.TrimPrefix(tok, `\`)
-	if i := strings.LastIndex(t, "/"); i >= 0 && i+1 < len(t) {
+	if i := strings.LastIndexAny(t, `/\`); i >= 0 && i+1 < len(t) {
 		t = t[i+1:]
 	}
 	return t
+}
+
+// interpreterKey normalizes a head token for a shell/PowerShell interpreter-set
+// lookup: lower-cased (Windows program names are case-insensitive) with a
+// trailing `.exe` stripped, so `C:\…\BASH.EXE` and `PowerShell.exe` resolve to
+// `bash` and `powershell`. No real interpreter is spelled in uppercase or
+// carries a different extension, so folding here cannot widen the set.
+func interpreterKey(tok string) string {
+	return strings.TrimSuffix(strings.ToLower(tok), ".exe")
 }
 
 // isAssignment reports whether a token is a `NAME=value` environment

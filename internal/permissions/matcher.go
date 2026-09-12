@@ -144,6 +144,18 @@ func MatchPath(pattern, path string) bool {
 	pattern = filepath.ToSlash(pattern)
 	path = cleanMatchPath(path)
 
+	// Windows filesystems fold case, so a rule naming `C:\Windows` must also
+	// catch `c:\windows`. When the PATH being judged is volume-rooted (`C:/…`),
+	// lower-case BOTH sides so a case change can't dodge the rule — including on
+	// the pre-existing `**/.ssh/**` family once it lands on a `C:\Users\…` path.
+	// The switch is keyed on the path's shape, not the OS, so a genuine Unix
+	// `/etc` stays case-sensitive (a `/ETC` is a different file there) and every
+	// relative/bare-basename pattern is matched exactly as before.
+	if isVolumeRooted(path) {
+		pattern = strings.ToLower(pattern)
+		path = strings.ToLower(path)
+	}
+
 	// Gitignore convention: patterns without a slash match by basename
 	// anywhere. `.env` matches `foo/.env`.
 	if !strings.Contains(pattern, "/") {
@@ -234,12 +246,19 @@ func isAbsSlash(s string) bool {
 	if strings.HasPrefix(s, "/") {
 		return true
 	}
-	// `C:/…` — a volume-rooted Windows path in slash form.
-	if len(s) >= 3 && s[1] == ':' && s[2] == '/' {
-		c := s[0]
-		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	return isVolumeRooted(s)
+}
+
+// isVolumeRooted reports whether s (in slash form) is a Windows volume-rooted
+// path like `C:/…`. It is the signal MatchPath uses to switch to
+// case-insensitive comparison: a volume-rooted path lives on a case-folding
+// filesystem, while a leading-`/` Unix path does not.
+func isVolumeRooted(s string) bool {
+	if len(s) < 3 || s[1] != ':' || s[2] != '/' {
+		return false
 	}
-	return false
+	c := s[0]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // pathGlob is a small glob matcher with `**` (any path segments) and `*`

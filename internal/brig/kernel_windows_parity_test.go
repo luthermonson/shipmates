@@ -77,3 +77,29 @@ func TestKernelArticle15WindowsParityResolvesTraversal(t *testing.T) {
 		t.Error("an ordinary project file was matched by the C:/Windows target")
 	}
 }
+
+// TestKernelArticle15WindowsCaseInsensitive is the end-to-end half of matcher
+// bypass #2: a case change on a volume-rooted path must not dodge Article 15 on
+// a case-folding filesystem. The Unix /etc target stays case-sensitive.
+func TestKernelArticle15WindowsCaseInsensitive(t *testing.T) {
+	e := evalWithBrig(DefaultSettings())
+	cases := []struct {
+		name  string
+		input map[string]any
+		want  permissions.Effect
+	}{
+		{"lowercase c:/windows denied", fileInput("c:/windows/system32/drivers/etc/hosts"), permissions.EffectDeny},
+		{"mixed-case Startup denied", fileInput("C:/Users/x/AppData/Roaming/Microsoft/Windows/START MENU/Programs/STARTUP/evil.lnk"), permissions.EffectDeny},
+		{"uppercase .SSH denied", fileInput("C:/Users/x/.SSH/authorized_keys"), permissions.EffectDeny},
+		// Unix /etc stays case-sensitive: /ETC is a different file, untouched.
+		{"unix /ETC untouched", fileInput("/ETC/passwd"), permissions.EffectAllow},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := e.EvaluateFor("backend", "Write", tc.input)
+			if d.Effect != tc.want {
+				t.Fatalf("Write %v => %s (%s), want %s", tc.input, d.Effect, d.Reason, tc.want)
+			}
+		})
+	}
+}
