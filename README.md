@@ -301,7 +301,7 @@ is not the Brig's to waive — it holds even with the Brig off.
 
 | Command | What it does |
 |---|---|
-| `ship install` | install the per-host supervisor (Windows Scheduled Task / macOS launchd) |
+| `ship install` | install the per-host supervisor (Windows Scheduled Task / macOS launchd / Linux systemd --user unit) |
 | `ship serve` | run the supervisor in foreground |
 | `ship uninstall` | remove the supervisor |
 | `ship add <dir>` | add a project to the ship's supervised list |
