@@ -16,7 +16,8 @@ import "fmt"
 func systemdUnit(exePath, logPath, pathEnv string) string {
 	return fmt.Sprintf(`[Unit]
 Description=Shipmates ship supervisor
-After=default.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
