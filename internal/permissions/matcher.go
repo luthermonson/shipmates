@@ -141,7 +141,7 @@ func MatchPath(pattern, path string) bool {
 	if pattern == "" {
 		return true
 	}
-	pattern = toSlashAll(pattern)
+	pattern = matchSlash(pattern)
 	path = cleanMatchPath(path)
 
 	// Windows filesystems fold case, so a rule naming `C:\Windows` must also
@@ -213,7 +213,7 @@ func cleanMatchPath(p string) string {
 	if p == "" {
 		return ""
 	}
-	cleaned := path.Clean(toSlashAll(p))
+	cleaned := path.Clean(matchSlash(p))
 	if cleaned == "." {
 		// `.` and `./` name the project root itself, not a file. Returning
 		// the dot would let `*` patterns match it; empty matches nothing,
@@ -234,11 +234,11 @@ func absoluteUnder(p, root string) (string, bool) {
 	if p == "" || root == "" {
 		return "", false
 	}
-	s := toSlashAll(p)
+	s := matchSlash(p)
 	if isAbsSlash(s) {
 		return "", false
 	}
-	r := strings.TrimSuffix(toSlashAll(root), "/")
+	r := strings.TrimSuffix(matchSlash(root), "/")
 	return path.Clean(r + "/" + s), true
 }
 
@@ -253,14 +253,24 @@ func isAbsSlash(s string) bool {
 // path like `C:/…`. It is the signal MatchPath uses to switch to
 // case-insensitive comparison: a volume-rooted path lives on a case-folding
 // filesystem, while a leading-`/` Unix path does not.
-// toSlashAll converts backslashes to forward slashes on EVERY host, unlike
-// filepath.ToSlash which is a no-op off Windows. The path matcher must judge a
-// Windows-shaped path (`C:\Windows\...`) identically regardless of the OS the
-// check runs on — a macOS fleet may evaluate a rule against a Windows ship's
-// path, and tests must be deterministic across CI legs. A literal backslash in
-// a genuine Unix filename is exotic, and folding it to `/` only ever makes a
-// deny match more, never less — the fail-safe direction.
-func toSlashAll(p string) string { return strings.ReplaceAll(p, "\\", "/") }
+// matchSlash normalizes separators for path matching. A drive-letter-prefixed
+// path (`C:...`) is unambiguously Windows on ANY host, so its backslashes are
+// converted everywhere — this is what lets a rule catch `C:\WINDOWS\...` on a
+// macOS/Linux CI leg or fleet. A path WITHOUT a drive letter defers to
+// filepath.ToSlash, which is a no-op off Windows: that preserves the deliberate
+// contract (see TestMatchPath_NormalizesWindowsSeparators) that `\` is a legal
+// character in a Unix filename, so a bare `.claude\foo` stays literal on Unix
+// rather than being misread as a traversal.
+func matchSlash(p string) string {
+	if len(p) >= 2 && p[1] == ':' && isASCIILetter(p[0]) {
+		return strings.ReplaceAll(p, "\\", "/")
+	}
+	return filepath.ToSlash(p)
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
 
 func isVolumeRooted(s string) bool {
 	if len(s) < 3 || s[1] != ':' || s[2] != '/' {
