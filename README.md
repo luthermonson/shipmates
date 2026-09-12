@@ -94,6 +94,8 @@ To build from source with a Go toolchain (1.26+), clone the repo and run `go bui
 
 Shipmates drives the [`claude` CLI](https://claude.com/claude-code), so make sure Claude Code is installed and authenticated.
 
+> **Running the tests?** Use the memory-watchdog wrapper, not raw `go test ./...`: `scripts\safe-test.ps1` on Windows, `scripts/safe-test.sh` on Linux/macOS. A runaway test binary has taken this machine down more than once — see [CONTRIBUTING.md](CONTRIBUTING.md#running-tests-safely).
+
 ## Quickstart — single ship
 
 ```bash
