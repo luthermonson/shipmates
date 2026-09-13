@@ -198,6 +198,19 @@ func sampleCPUSeconds(pid int) (float64, error) {
 	return filetimeSeconds(kernel) + filetimeSeconds(user), nil
 }
 
+// sampleTreeRSS and sampleTreeCPUSeconds measure only the root process on
+// Windows, and that is deliberate. Tree-wide memory containment is the Job
+// Object's job — JOB_OBJECT_LIMIT_JOB_MEMORY caps committed memory across every
+// descendant in the kernel, with no polling gap — so the sampler here stays
+// defense-in-depth on the root rather than reimplementing tree enumeration.
+// CPU-seconds, which the Job Object does not express this way, is likewise
+// approximated on the root; tightening it to the whole tree would mean walking
+// the toolhelp snapshot each tick, which is not warranted while the memory cap
+// is already kernel-enforced tree-wide.
+func sampleTreeRSS(pgid int) (int64, error) { return sampleRSS(pgid) }
+
+func sampleTreeCPUSeconds(pgid int) (float64, error) { return sampleCPUSeconds(pgid) }
+
 // filetimeSeconds converts a FILETIME's 100-nanosecond units to seconds.
 func filetimeSeconds(ft windows.Filetime) float64 {
 	units := (int64(ft.HighDateTime) << 32) | int64(ft.LowDateTime)
