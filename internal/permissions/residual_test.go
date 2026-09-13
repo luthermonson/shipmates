@@ -334,6 +334,22 @@ func TestMatchPath_WindowsVolumeRootedIsCaseInsensitive(t *testing.T) {
 		{"/etc/**", "/ETC/passwd", false},
 		// Volume-rooted but genuinely different location: still no match.
 		{"C:/Windows/**", "c:/users/x/notes.txt", false},
+		// UNC network share: drive-letter-less but unambiguously Windows, so
+		// case must not matter. A ship whose repo lives on `\\server\share`
+		// must not let `.CLAUDE` dodge Article 14, nor `.SSH` dodge `**/.ssh`.
+		{"**/.claude/settings.json", `\\server\share\repo\.CLAUDE\settings.json`, true},
+		{"**/.ssh/**", `\\server\share\home\.SSH\authorized_keys`, true},
+		// The already-slashed UNC spelling folds identically.
+		{"**/.claude/settings.json", "//server/share/repo/.CLAUDE/settings.json", true},
+		// A correct-case UNC path still matches (folding is additive, not a gate).
+		{"**/.claude/settings.json", `\\server\share\repo\.claude\settings.json`, true},
+		// UNC but a genuinely different location: still no match.
+		{"**/.ssh/**", `\\server\share\repo\src\main.go`, false},
+		// The double-slash-vs-single-slash distinction: a UNC `//` folds, an
+		// ordinary absolute Unix `/` does not. `/ETC` stays case-sensitive
+		// above; the `//ETC` twin folds and matches.
+		{"/etc/**", "//etc/passwd", false}, // pattern is single-slash `/etc`, UNC path is a different root
+		{"**/etc/**", "//srv/ETC/passwd", true},
 	}
 	for _, tc := range cases {
 		if got := MatchPath(tc.pattern, tc.path); got != tc.want {

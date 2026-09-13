@@ -145,13 +145,15 @@ func MatchPath(pattern, path string) bool {
 	path = cleanMatchPath(path)
 
 	// Windows filesystems fold case, so a rule naming `C:\Windows` must also
-	// catch `c:\windows`. When the PATH being judged is volume-rooted (`C:/…`),
-	// lower-case BOTH sides so a case change can't dodge the rule — including on
-	// the pre-existing `**/.ssh/**` family once it lands on a `C:\Users\…` path.
-	// The switch is keyed on the path's shape, not the OS, so a genuine Unix
-	// `/etc` stays case-sensitive (a `/ETC` is a different file there) and every
-	// relative/bare-basename pattern is matched exactly as before.
-	if isVolumeRooted(path) {
+	// catch `c:\windows`. When the PATH being judged is volume-rooted (`C:/…`)
+	// or a UNC network share (`//server/share/…`), lower-case BOTH sides so a
+	// case change can't dodge the rule — including on the pre-existing
+	// `**/.ssh/**` family once it lands on a `C:\Users\…` or `\\srv\share\…`
+	// path. The switch is keyed on the path's shape, not the OS, so a genuine
+	// Unix `/etc` (a SINGLE leading slash) stays case-sensitive (a `/ETC` is a
+	// different file there) and every relative/bare-basename pattern is matched
+	// exactly as before.
+	if isVolumeRooted(path) || isUNCRooted(path) {
 		pattern = strings.ToLower(pattern)
 		path = strings.ToLower(path)
 	}
@@ -213,12 +215,20 @@ func cleanMatchPath(p string) string {
 	if p == "" {
 		return ""
 	}
-	cleaned := path.Clean(matchSlash(p))
+	slashed := matchSlash(p)
+	cleaned := path.Clean(slashed)
 	if cleaned == "." {
 		// `.` and `./` name the project root itself, not a file. Returning
 		// the dot would let `*` patterns match it; empty matches nothing,
 		// which is what an unnamed target deserves.
 		return ""
+	}
+	// path.Clean collapses a leading `//` to a single `/`, erasing the UNC
+	// signal MatchPath's case-fold gate keys on (path.Clean("//server/share/x")
+	// == "/server/share/x"). Restore it when the input was UNC-shaped so a
+	// genuine `\\server\share\…` path stays recognizable as Windows and folds.
+	if isUNCRooted(slashed) && !isUNCRooted(cleaned) {
+		cleaned = "/" + cleaned
 	}
 	return cleaned
 }
@@ -265,6 +275,14 @@ func matchSlash(p string) string {
 	if len(p) >= 2 && p[1] == ':' && isASCIILetter(p[0]) {
 		return strings.ReplaceAll(p, "\\", "/")
 	}
+	// A leading `\\` (two backslashes) is a UNC path (`\\server\share\…`) — a
+	// drive-letter-less but unambiguously Windows shape. Like the drive-letter
+	// branch, convert its backslashes on ANY host so a network-share rule is
+	// caught off Windows too, yielding a leading `//`. A single leading `\`
+	// falls through to filepath.ToSlash and is NOT treated as UNC.
+	if isUNCBackslashed(p) {
+		return strings.ReplaceAll(p, "\\", "/")
+	}
 	return filepath.ToSlash(p)
 }
 
@@ -278,6 +296,21 @@ func isVolumeRooted(s string) bool {
 	}
 	c := s[0]
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// isUNCBackslashed reports whether the raw (pre-normalization) path opens with
+// two backslashes — the on-Windows spelling of a UNC path, `\\server\share\…`.
+func isUNCBackslashed(p string) bool {
+	return len(p) >= 2 && p[0] == '\\' && p[1] == '\\'
+}
+
+// isUNCRooted reports whether s (in slash form) is a UNC path — a DOUBLE leading
+// slash (`//server/share/…`). It is the UNC-shape companion to isVolumeRooted:
+// a UNC path lives on a network filesystem that folds case, so MatchPath folds
+// it too. A SINGLE leading `/` (an ordinary absolute Unix path) is deliberately
+// excluded, so `/etc` vs `/ETC` stays case-sensitive.
+func isUNCRooted(s string) bool {
+	return strings.HasPrefix(s, "//")
 }
 
 // pathGlob is a small glob matcher with `**` (any path segments) and `*`
