@@ -62,7 +62,36 @@ type liveProc struct {
 	persona string
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
+
+	// Pipe lifecycle (issue #41 twin). The stdout/stderr read ends are owned
+	// here — wired onto cmd via os.Pipe — instead of through cmd.StdoutPipe/
+	// cmd.StderrPipe, so os/exec's Wait can never close them out from under a
+	// reader mid-stream. reapLive is the sole closer, and it closes them only
+	// after both readers have drained.
+	stdoutR    *os.File
+	stderrR    *os.File
+	stdoutDone chan struct{} // closed once pump has finished with stdoutR
+	stderrDone chan struct{} // closed once the stderr tee has finished with stderrR
+	procDone   chan struct{} // closed once cmd.Wait() has returned (child reaped)
 }
+
+// claudeBinary is the command spawnCrewLive execs. It is a package var only so
+// tests can point it at a fake stream-json child; production always resolves
+// "claude" from PATH exactly as before.
+var claudeBinary = "claude"
+
+// liveStartupWindow is how long the resume path waits for the stale-session
+// error to surface before treating the spawn as healthy. A package var only so
+// tests can shrink it; production keeps the 6s window (see the spawn site).
+var liveStartupWindow = 6 * time.Second
+
+// liveReaderDrainGrace bounds how long reapLive waits for the stdout/stderr
+// readers to finish after the child is reaped before it closes the read ends
+// anyway. The child's own write ends are already closed by the time Wait
+// returns, so a reader only lingers if a descendant inherited a write end; the
+// grace keeps that from wedging teardown. Mirrors runtime/claude's
+// readerDrainGrace.
+const liveReaderDrainGrace = 10 * time.Second
 
 // pending is a crew permission request awaiting an allow/deny decision.
 type pending struct {
@@ -928,32 +957,74 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	if prime := beadsPrime(); prime != "" {
 		args = append(args, "--append-system-prompt", prime)
 	}
-	cmd := exec.Command("claude", args...)
+	cmd := exec.Command(claudeBinary, args...)
 	cmd.Dir = cwd // berth or frontmatter override; empty = today's behavior (shipmates process cwd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
 	}
-	stdoutRaw, err := cmd.StdoutPipe()
+	// Own the stdout/stderr pipes via os.Pipe wired onto cmd, rather than
+	// cmd.StdoutPipe/cmd.StderrPipe. os/exec's Wait closes the pipes it hands
+	// out the instant it reaps the child — "it is incorrect to call Wait
+	// before all reads from the pipe have completed" — which would truncate
+	// the final stream-json frames under pump (the result event's cost/model,
+	// the last assistant text) and cut off the stderr tail. This is the twin
+	// of issue #41, already fixed in internal/runtime/claude. reapLive closes
+	// these read ends instead, and only after the readers have drained.
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	stderr, err := cmd.StderrPipe()
+	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
 		return nil, err
 	}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 	if err := cmd.Start(); err != nil {
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		_ = stderrR.Close()
+		_ = stderrW.Close()
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}
+	// The child holds its own dups of the write ends now; drop ours or the
+	// read ends would never reach EOF.
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
+
+	lp := &liveProc{
+		persona:    persona,
+		cmd:        cmd,
+		stdin:      stdin,
+		stdoutR:    stdoutR,
+		stderrR:    stderrR,
+		stdoutDone: make(chan struct{}),
+		stderrDone: make(chan struct{}),
+		procDone:   make(chan struct{}),
+	}
+
+	// The single reaper: the ONLY caller of cmd.Wait() and the ONLY closer of
+	// the pipe read ends. Started here so it runs on BOTH the fresh and resume
+	// paths — every spawned child is reaped, closing the zombie/leaked-handle
+	// leak the old code left on every fresh spawn (it called Wait on the resume
+	// path only). It drains before closing, so teardown never truncates a
+	// reader. See reapLive.
+	go s.reapLive(lp)
 
 	// Tee stderr to our own so the operator still sees any claude errors,
-	// and flag the stale-session pattern on --resume attempts.
+	// and flag the stale-session pattern on --resume attempts. Reads the read
+	// end reapLive owns; a teardown-closed pipe surfaces as a read error here
+	// and is treated as a clean end, never logged as a failure.
 	staleFlag := make(chan struct{}, 1)
 	go func() {
+		defer close(lp.stderrDone)
 		buf := make([]byte, 4096)
 		var carry []byte
 		for {
-			n, err := stderr.Read(buf)
+			n, err := stderrR.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
 				os.Stderr.Write(chunk)
@@ -982,7 +1053,7 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	// claude sometimes writes a partial byte to stdout BEFORE printing the
 	// "No conversation found" error, which would falsely signal a healthy
 	// spawn. Stale detection is stderr-only.
-	stdout := bufio.NewReader(stdoutRaw)
+	stdout := bufio.NewReader(stdoutR)
 
 	// Give claude a window to either produce the stale-session error or
 	// begin streaming. Empirically the error appears ~2-3s into startup, so
@@ -990,16 +1061,18 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	// tell to a mate — subsequent tells reuse the live proc via ensureLive's
 	// short-circuit.
 	if !fresh {
-		procDone := make(chan struct{})
-		go func() { _ = cmd.Wait(); close(procDone) }()
 		select {
 		case <-staleFlag:
 			_ = cmd.Process.Kill()
-			<-procDone
+			<-lp.procDone
+			// No pump ran on this path, so tell reapLive the stdout reader is
+			// done rather than making it sit out the full drain grace.
+			close(lp.stdoutDone)
 			return nil, errStaleSession
-		case <-procDone:
+		case <-lp.procDone:
+			close(lp.stdoutDone)
 			return nil, fmt.Errorf("claude exited during startup for %s", persona)
-		case <-time.After(6 * time.Second):
+		case <-time.After(liveStartupWindow):
 			// Healthy: no error surfaced within the detection window.
 			// 6s is generous enough for claude's variable startup — the
 			// stale error appears anywhere from 1 to 5 seconds after spawn
@@ -1013,16 +1086,51 @@ func (s *Server) spawnCrewLive(persona string, fresh bool) (*liveProc, error) {
 	s.refs++
 	s.lastActivity = time.Now()
 
-	lp := &liveProc{persona: persona, cmd: cmd, stdin: stdin}
 	s.live[persona] = lp
 	delete(s.exited, persona) // resurrect: a re-spawned mate is no longer "done"
 	s.lastSeen[persona] = time.Now()
 	_ = project.WriteSessionMeta(persona, sessName, sessID, fp, cwd)
 	// pump receives the bufio.Reader (not the raw pipe) so the byte we peeked
-	// in the healthy-flag goroutine is still available to be decoded.
-	go s.pump(persona, stdout)
+	// in the healthy-flag goroutine is still available to be decoded. It
+	// closes stdoutDone when it returns so reapLive can then close the read
+	// end — drain first, close second.
+	go func() {
+		s.pump(persona, stdout)
+		close(lp.stdoutDone)
+	}()
 	slog.Info("spawned live crew process", "persona", persona, "pid", cmd.Process.Pid, "session", sessID)
 	return lp, nil
+}
+
+// reapLive is the single owner of a live child's cmd.Wait() and of its
+// stdout/stderr pipe read ends. Exactly one runs per spawn, on both the fresh
+// and resume paths, so every child is reaped. It closes the read ends only
+// after both readers have finished draining — that drain-then-close ordering is
+// the fix for the teardown race (issue #41's twin): os/exec must never own
+// these pipes, and nothing may close them while pump or the stderr tee is still
+// mid-read. A descendant that inherited a write end can keep a reader from
+// reaching EOF, so the drain wait is bounded by liveReaderDrainGrace.
+func (s *Server) reapLive(lp *liveProc) {
+	_ = lp.cmd.Wait()
+	close(lp.procDone)
+	t := time.NewTimer(liveReaderDrainGrace)
+	defer t.Stop()
+	waitOrDeadline(lp.stdoutDone, t.C)
+	waitOrDeadline(lp.stderrDone, t.C)
+	_ = lp.stdoutR.Close()
+	_ = lp.stderrR.Close()
+}
+
+// waitOrDeadline blocks until c is closed or the deadline fires, whichever
+// comes first.
+func waitOrDeadline(c <-chan struct{}, deadline <-chan time.Time) {
+	if c == nil {
+		return
+	}
+	select {
+	case <-c:
+	case <-deadline:
+	}
 }
 
 // pump reads a crew process's stream-json output and tees it into the feed as
