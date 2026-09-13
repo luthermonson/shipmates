@@ -64,6 +64,7 @@ func main() {
 			commands.Brig(),
 			commands.Freeze(),
 			commands.Release(),
+			commands.Doctor(),
 		},
 	}
 
