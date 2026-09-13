@@ -66,3 +66,16 @@ func sampleRSS(int) (int64, error) {
 func sampleCPUSeconds(int) (float64, error) {
 	return 0, fmt.Errorf("watchdog: CPU sampling not implemented on this platform")
 }
+
+// sampleTreeRSS is unreachable while prepare refuses bounded launches; it
+// exists so the shared sampler compiles. It refuses rather than faking a
+// reading, keeping the "don't pretend to enforce" contract.
+func sampleTreeRSS(int) (int64, error) {
+	return 0, fmt.Errorf("watchdog: RSS sampling not implemented on this platform")
+}
+
+// sampleTreeCPUSeconds is unreachable while prepare refuses bounded launches;
+// it exists so the shared sampler compiles.
+func sampleTreeCPUSeconds(int) (float64, error) {
+	return 0, fmt.Errorf("watchdog: CPU sampling not implemented on this platform")
+}

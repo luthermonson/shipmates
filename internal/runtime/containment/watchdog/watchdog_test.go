@@ -193,6 +193,49 @@ func TestSampleRSS_ReturnsSomething(t *testing.T) {
 	}
 }
 
+// The tree samplers reduce to summing the members of one process group. This
+// membership + summation logic is factored into pure functions precisely so it
+// can be verified without a live process tree, on any host including Windows.
+func TestSumGroupRSSPages(t *testing.T) {
+	const pgid = 1000
+	procs := []procRSS{
+		{pgrp: pgid, rssPages: 10}, // root
+		{pgrp: pgid, rssPages: 25}, // a child in the group
+		{pgrp: pgid, rssPages: 5},  // a grandchild in the group
+		{pgrp: 2000, rssPages: 999},
+		{pgrp: 999, rssPages: 999},
+	}
+	pages, matched := sumGroupRSSPages(pgid, procs)
+	if matched != 3 {
+		t.Errorf("matched = %d, want 3", matched)
+	}
+	if pages != 40 {
+		t.Errorf("pages = %d, want 40 (10+25+5, other groups excluded)", pages)
+	}
+
+	// No member of the group present is a failed sample at the caller, signalled
+	// by a zero match count — never a silent 0 that reads as "under the cap".
+	if pages, matched := sumGroupRSSPages(pgid, []procRSS{{pgrp: 7, rssPages: 5}}); matched != 0 || pages != 0 {
+		t.Errorf("no-match = (%d pages, %d matched), want (0, 0)", pages, matched)
+	}
+}
+
+func TestSumGroupCPUSeconds(t *testing.T) {
+	const pgid = 1000
+	procs := []procCPU{
+		{pgrp: pgid, seconds: 1.5},
+		{pgrp: pgid, seconds: 0.25},
+		{pgrp: 2000, seconds: 100},
+	}
+	secs, matched := sumGroupCPUSeconds(pgid, procs)
+	if matched != 2 {
+		t.Errorf("matched = %d, want 2", matched)
+	}
+	if secs != 1.75 {
+		t.Errorf("seconds = %v, want 1.75 (other group excluded)", secs)
+	}
+}
+
 func awaitDone(t *testing.T, h containment.Handle, within time.Duration) containment.Event {
 	t.Helper()
 	select {

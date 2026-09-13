@@ -43,3 +43,41 @@ func TestParseProcStatCPU(t *testing.T) {
 		})
 	}
 }
+
+// pgrp is field 5 of /proc/<pid>/stat — index 2 after the last ')'. The parser
+// must survive a comm containing spaces and parentheses, same as the CPU parser.
+func TestParseProcStatPgrp(t *testing.T) {
+	// After ')': state(S) ppid(1) pgrp(4242) session ...
+	tail := "S 1 4242 1 0 -1 4194304 100 0 0 0 250 50 0 0"
+
+	cases := []struct {
+		name    string
+		in      string
+		want    int
+		wantErr bool
+	}{
+		{"plain comm", "1234 (cat) " + tail, 4242, false},
+		{"comm with spaces", "1234 (my program) " + tail, 4242, false},
+		{"comm with parens", "1234 (weird ) (name) " + tail, 4242, false},
+		{"no close paren", "1234 cat S 1", 0, true},
+		{"too few fields", "1234 (cat) S 1", 0, true},
+		{"non-numeric pgrp", "1234 (cat) S 1 x 1 0", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseProcStatPgrp(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("parseProcStatPgrp = %v, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseProcStatPgrp: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("parseProcStatPgrp = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

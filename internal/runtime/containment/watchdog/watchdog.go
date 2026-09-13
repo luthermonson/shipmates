@@ -202,13 +202,23 @@ func (h *handle) pollLoop() {
 
 // sample takes one reading of each configured limit and returns the breach
 // it found, or nil.
+//
+// The reading is taken over the child's whole process group, not the lone root
+// pid. The child is made a process-group leader at launch (Setpgid on Unix), so
+// its pid is the pgid, and every descendant it spawns inherits that group. That
+// is exactly the scope killTree signals with kill(-pgid) and the scope the
+// Windows Job Object enforces in the kernel, so a grandchild that hogs memory
+// or spins CPU is counted against the cap instead of escaping it.
 func (h *handle) sample() *breach {
-	pid := h.cmd.Process.Pid
+	// pgid == the root pid: the child is the leader of the group it was placed
+	// in at launch. On Windows this is just the root pid and the tree scope is
+	// the Job Object's concern; the sampler there stays defense-in-depth.
+	pgid := h.cmd.Process.Pid
 	if h.limits.MaxRSSBytes > 0 {
-		rss, err := sampleRSS(pid)
+		rss, err := sampleTreeRSS(pgid)
 		switch {
 		case err != nil:
-			slog.Debug("watchdog: rss sample failed", "pid", pid, "err", err)
+			slog.Debug("watchdog: rss sample failed", "pgid", pgid, "err", err)
 		case rss > h.limits.MaxRSSBytes:
 			return &breach{
 				reason: containment.ReasonMemoryLimit,
@@ -217,10 +227,10 @@ func (h *handle) sample() *breach {
 		}
 	}
 	if h.limits.MaxCPUSeconds > 0 {
-		cpu, err := sampleCPUSeconds(pid)
+		cpu, err := sampleTreeCPUSeconds(pgid)
 		switch {
 		case err != nil:
-			slog.Debug("watchdog: cpu sample failed", "pid", pid, "err", err)
+			slog.Debug("watchdog: cpu sample failed", "pgid", pgid, "err", err)
 		case cpu > h.limits.MaxCPUSeconds:
 			return &breach{
 				reason: containment.ReasonCPULimit,
@@ -232,3 +242,44 @@ func (h *handle) sample() *breach {
 }
 
 func (h *handle) stopSampler() { h.stopOnce.Do(func() { close(h.stop) }) }
+
+// procRSS pairs a process's group id with its resident set in pages — the two
+// facts the Linux tree sampler needs from each /proc entry.
+type procRSS struct {
+	pgrp     int
+	rssPages int64
+}
+
+// sumGroupRSSPages totals the resident pages of every process whose process
+// group matches pgid, returning the total and how many processes matched. It is
+// factored out of the /proc walk so the group-membership and summation logic
+// can be unit-tested on any host, without a live process tree.
+func sumGroupRSSPages(pgid int, procs []procRSS) (pages int64, matched int) {
+	for _, p := range procs {
+		if p.pgrp == pgid {
+			pages += p.rssPages
+			matched++
+		}
+	}
+	return pages, matched
+}
+
+// procCPU pairs a process's group id with its accumulated CPU seconds.
+type procCPU struct {
+	pgrp    int
+	seconds float64
+}
+
+// sumGroupCPUSeconds totals the CPU seconds of every process whose process
+// group matches pgid, returning the total and how many processes matched.
+// Factored out of the /proc walk for the same testability reason as
+// sumGroupRSSPages.
+func sumGroupCPUSeconds(pgid int, procs []procCPU) (seconds float64, matched int) {
+	for _, p := range procs {
+		if p.pgrp == pgid {
+			seconds += p.seconds
+			matched++
+		}
+	}
+	return seconds, matched
+}

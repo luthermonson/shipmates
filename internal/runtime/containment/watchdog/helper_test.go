@@ -56,6 +56,23 @@ func TestMain(m *testing.M) {
 		}
 		time.Sleep(30 * time.Second)
 		os.Exit(len(chunks) & 1)
+	case "hogchild":
+		// Stay small in the root and spawn a CHILD (grandchild of the test)
+		// that does the hogging. The child inherits this process's group —
+		// which the watchdog made this process the leader of — so a
+		// process-group sampler must count the child's RSS against the cap,
+		// while a root-only sampler never would. This is the case that
+		// distinguishes tree-scoped enforcement from root-only.
+		child := exec.Command(os.Args[0])
+		child.Env = append(os.Environ(), helperEnv+"=hog", helperArgEnv+"=")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(4)
+		}
+		// Linger so the root outlives the child's allocation; the watchdog
+		// kills the whole group on breach.
+		_ = child.Wait()
+		os.Exit(0)
 	default:
 		os.Exit(3)
 	}
