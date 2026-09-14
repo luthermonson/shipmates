@@ -26,11 +26,12 @@ import (
 func checkFleet(e Env) []Result {
 	conf, err := project.LoadConfig()
 	if err != nil {
-		return []Result{{
-			Name: "fleet config", Group: "Fleet", Status: Fail,
-			Detail: "shipmates.yaml does not parse: " + oneLine(err.Error()),
-			Hint:   "fix the YAML in " + project.ConfigName,
-		}}
+		// A malformed shipmates.yaml is a single fault surfaced once, under the
+		// Config group, by checkProjectConfig. Fleet cannot know its own wiring
+		// from an unparseable file, so it omits its group rather than re-FAILing
+		// the same parse error under a fleet-specific label — which was
+		// especially misleading for an operator who has no fleet configured.
+		return nil
 	}
 	url := strings.TrimSpace(conf.Fleet.URL)
 	if url == "" {

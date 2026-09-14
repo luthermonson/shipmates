@@ -17,6 +17,36 @@ import (
 	"github.com/luthermonson/shipmates/internal/ship"
 )
 
+// checkProjectConfig parses the project config (shipmates.yaml in the current
+// directory) once and is the single place a malformed project file is reported.
+// Absent is fine (an informational OK); the only failure is a file that EXISTS
+// but does not parse.
+//
+// This is deliberately the ONE reaction to a broken shipmates.yaml. The fleet,
+// beads and runtime checks all read (directly or indirectly) from the same
+// project, so before this check existed a single parse fault surfaced three
+// times under three labels — most misleadingly as a Fleet-group "fleet config"
+// FAIL for an operator who has no fleet at all. Those checks now assume the file
+// parses and defer the parse error here, so a malformed shipmates.yaml yields
+// exactly one correctly-labeled Config FAIL.
+func checkProjectConfig(e Env) []Result {
+	r := Result{Name: "project config (shipmates.yaml)", Group: "Config"}
+	if _, err := os.Stat(project.ConfigName); err != nil {
+		r.Status = OK
+		r.Detail = "absent — optional, this project has no " + project.ConfigName
+		return []Result{r}
+	}
+	if _, err := project.LoadConfig(); err != nil {
+		r.Status = Fail
+		r.Detail = "present but does not parse: " + oneLine(err.Error())
+		r.Hint = "fix the YAML in " + project.ConfigName + " — it will break at runtime"
+		return []Result{r}
+	}
+	r.Status = OK
+	r.Detail = "present and parses cleanly"
+	return []Result{r}
+}
+
 // checkConfigFiles reports presence and clean parse of the four operator files
 // under ~/.shipmates/. Absent is fine (an informational OK); the only failure
 // is a file that EXISTS but does not parse, because that will break at runtime.
@@ -38,15 +68,16 @@ func checkConfigFiles(e Env) []Result {
 		}))
 	}
 
-	shipPath := filepath.Join(home, project.Dir, "ship.yaml")
-	out = append(out, operatorFile("~/.shipmates/ship.yaml", shipPath, func() error {
-		raw, err := os.ReadFile(shipPath)
-		if err != nil {
-			return err
-		}
-		var c ship.Config
-		return yaml.Unmarshal(raw, &c)
-	}))
+	if shipPath, ok := userShipConfigPath(home); ok {
+		out = append(out, operatorFile("~/.shipmates/ship.yaml", shipPath, func() error {
+			raw, err := os.ReadFile(shipPath)
+			if err != nil {
+				return err
+			}
+			var c ship.Config
+			return yaml.Unmarshal(raw, &c)
+		}))
+	}
 
 	if p, ok := project.UserPersonasPath(home); ok {
 		out = append(out, operatorFile("~/.shipmates/personas.yaml", p, func() error {
@@ -66,6 +97,23 @@ func checkConfigFiles(e Env) []Result {
 	}
 
 	return out
+}
+
+// userShipConfigPath returns ~/.shipmates/ship.yaml, or ok=false when the home
+// directory cannot be resolved. It mirrors config.UserPath /
+// project.UserPersonasPath / discord.DiscordConfigPath so ship.yaml follows the
+// same ok-guarded pattern as the other operator files: an unresolvable home
+// omits the check rather than silently stat-ing a cwd-relative .shipmates/ship.yaml
+// (which would report the wrong project's file, or a phantom one).
+func userShipConfigPath(home string) (string, bool) {
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		home = h
+	}
+	return filepath.Join(home, project.Dir, "ship.yaml"), true
 }
 
 // operatorFile builds a Config-group result for one operator file: absent is an

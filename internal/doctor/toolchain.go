@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,10 +47,19 @@ func checkToolchain(e Env) []Result {
 	}
 
 	_, bdErr := e.LookPath("bd")
-	configured, why := beadsConfigured()
+	configured, why, cfgErr := beadsConfigured()
 	switch {
 	case bdErr == nil:
 		out = append(out, Result{Name: "bd (Beads)", Group: "Toolchain", Status: OK, Detail: "found on PATH"})
+	case cfgErr != nil:
+		// shipmates.yaml is malformed. That single fault is FAILed once, under
+		// the Config group, by checkProjectConfig — so here we neither re-report
+		// the parse error nor let it collapse into a misleading "Beads is not
+		// configured". We simply cannot tell whether Beads is configured.
+		out = append(out, Result{
+			Name: "bd (Beads)", Group: "Toolchain", Status: OK,
+			Detail: "not found on PATH; whether Beads is configured is unknown because " + project.ConfigName + " does not parse (see the Config group)",
+		})
 	case configured:
 		out = append(out, Result{
 			Name: "bd (Beads)", Group: "Toolchain", Status: Warn,
@@ -70,13 +81,22 @@ func checkToolchain(e Env) []Result {
 // voyage.tracker: beads in shipmates.yaml. The tracker field is read the same
 // way internal/commands.selectVoyageTracker reads it (that loader is
 // unexported), against the same shipmates.yaml.
-func beadsConfigured() (bool, string) {
+//
+// A parse error is returned rather than swallowed into a false "not configured":
+// checkProjectConfig FAILs on a malformed shipmates.yaml under the Config group,
+// and the caller uses this error to avoid contradicting it with a bogus
+// "Beads is not configured" verdict derived from a file that does not parse.
+// An absent file is the ordinary "no project config" case and is not an error.
+func beadsConfigured() (bool, string, error) {
 	if beads.Workspace(".") {
-		return true, "an initialized .beads workspace is present"
+		return true, "an initialized .beads workspace is present", nil
 	}
 	raw, err := os.ReadFile(filepath.Join(".", project.ConfigName))
 	if err != nil {
-		return false, ""
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, "", nil
+		}
+		return false, "", err
 	}
 	var cfg struct {
 		Voyage struct {
@@ -84,10 +104,10 @@ func beadsConfigured() (bool, string) {
 		} `yaml:"voyage"`
 	}
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
-		return false, ""
+		return false, "", err
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.Voyage.Tracker), "beads") {
-		return true, "voyage.tracker: beads in " + project.ConfigName
+		return true, "voyage.tracker: beads in " + project.ConfigName, nil
 	}
-	return false, ""
+	return false, "", nil
 }
