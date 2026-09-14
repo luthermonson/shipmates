@@ -56,13 +56,13 @@ func TestCheckToolchainBeads(t *testing.T) {
 
 func TestBeadsConfiguredViaWorkspace(t *testing.T) {
 	proj, _ := isolate(t)
-	if ok, _ := beadsConfigured(); ok {
-		t.Fatal("empty project should not be Beads-configured")
+	if ok, _, err := beadsConfigured(); ok || err != nil {
+		t.Fatalf("empty project should not be Beads-configured and not error (ok=%v err=%v)", ok, err)
 	}
 	if err := os.MkdirAll(filepath.Join(proj, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if ok, why := beadsConfigured(); !ok {
-		t.Fatalf("a .beads workspace should count as configured (why=%q)", why)
+	if ok, why, err := beadsConfigured(); !ok || err != nil {
+		t.Fatalf("a .beads workspace should count as configured (why=%q err=%v)", why, err)
 	}
 }

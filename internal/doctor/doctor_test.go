@@ -178,11 +178,19 @@ func TestParseSupervisor(t *testing.T) {
 		{"unsupported os", "plan9", SupervisorProbe{Supported: false}, OK, "unknown"},
 		{"systemd enabled", "linux", SupervisorProbe{Supported: true, Out: "enabled\n"}, OK, "enabled"},
 		{"systemd disabled", "linux", SupervisorProbe{Supported: true, Out: "disabled\n", Err: true}, Warn, "disabled"},
+		// N2: masked and enabled-runtime must not fall through to a false "not
+		// installed" OK; a genuinely unrecognized state must be an honest Warn.
+		{"systemd masked", "linux", SupervisorProbe{Supported: true, Out: "masked\n", Err: true}, Warn, "masked"},
+		{"systemd enabled-runtime", "linux", SupervisorProbe{Supported: true, Out: "enabled-runtime\n"}, Warn, "enabled-runtime"},
+		{"systemd unknown state", "linux", SupervisorProbe{Supported: true, Out: "some-future-state\n", Err: true}, Warn, "unrecognized"},
 		{"systemd not installed", "linux", SupervisorProbe{Supported: true, Out: "Failed to get unit file state: No such file or directory\n", Err: true}, OK, "not installed"},
 		{"launchd loaded", "darwin", SupervisorProbe{Supported: true, Out: "PID\tStatus\tLabel\n1\t0\tcc.shipmates.ship\n"}, OK, "loaded"},
 		{"launchd not loaded", "darwin", SupervisorProbe{Supported: true, Out: "PID\tStatus\tLabel\n1\t0\tcom.apple.foo\n"}, OK, "not loaded"},
-		{"schtasks installed", "windows", SupervisorProbe{Supported: true, Out: "TaskName: \\ShipmatesShip\nStatus: Ready\n"}, OK, "installed"},
-		{"schtasks disabled", "windows", SupervisorProbe{Supported: true, Out: "TaskName: \\ShipmatesShip\nStatus: Disabled\n"}, Warn, "disabled"},
+		// N3: schtasks is parsed from the verbose CSV "Scheduled Task State"
+		// column, not a substring scan of localized LIST text.
+		{"schtasks installed enabled", "windows", SupervisorProbe{Supported: true, Out: "\"TaskName\",\"Status\",\"Scheduled Task State\"\n\"\\ShipmatesShip\",\"Ready\",\"Enabled\"\n"}, OK, "installed"},
+		{"schtasks disabled", "windows", SupervisorProbe{Supported: true, Out: "\"TaskName\",\"Status\",\"Scheduled Task State\"\n\"\\ShipmatesShip\",\"Ready\",\"Disabled\"\n"}, Warn, "disabled"},
+		{"schtasks disabled localized stays honest", "windows", SupervisorProbe{Supported: true, Out: "\"TaskName\",\"Status\",\"Scheduled Task State\"\n\"\\ShipmatesShip\",\"Bereit\",\"Deaktiviert\"\n"}, OK, "locale"},
 		{"schtasks not installed", "windows", SupervisorProbe{Supported: true, Out: "ERROR: The system cannot find the file specified.\n", Err: true}, OK, "not installed"},
 	}
 	for _, tc := range tests {

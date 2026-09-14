@@ -136,6 +136,7 @@ func (e Env) homeDir() string {
 func checks() []func(Env) []Result {
 	return []func(Env) []Result{
 		checkToolchain,
+		checkProjectConfig,
 		checkConfigFiles,
 		checkRuntimeSelection,
 		checkSecretEnv,

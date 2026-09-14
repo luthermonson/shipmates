@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/csv"
 	"fmt"
 	"io/fs"
 	"os"
@@ -157,6 +158,13 @@ func parseSupervisor(goos string, p SupervisorProbe) Result {
 }
 
 // parseSystemd reads `systemctl --user is-enabled shipmates-ship.service`.
+//
+// systemctl reports a fixed vocabulary of unit-file states. Each recognized
+// state maps to an honest verdict: only "enabled" is a clean OK; "masked" and
+// "enabled-runtime" are installed-but-degraded (previously mis-mapped to the
+// not-installed default, which reported them as absent); the other installed
+// states remain Warns. A genuinely unrecognized line becomes a Warn "unknown
+// state" — never a false OK claiming the unit is not installed.
 func parseSystemd(p SupervisorProbe) Result {
 	r := Result{Name: "supervisor (ship)", Group: "Ship"}
 	s := strings.ToLower(strings.TrimSpace(p.Out))
@@ -164,14 +172,34 @@ func parseSystemd(p SupervisorProbe) Result {
 	case s == "enabled":
 		r.Status = OK
 		r.Detail = "systemd --user unit shipmates-ship.service is enabled"
-	case s == "disabled" || s == "linked" || s == "static" || s == "indirect" || s == "generated":
+	case s == "enabled-runtime":
+		r.Status = Warn
+		r.Detail = "systemd --user unit shipmates-ship.service is enabled only for the current boot (enabled-runtime) — it will not start after a reboot"
+		r.Hint = "systemctl --user enable shipmates-ship.service"
+	case s == "masked" || s == "masked-runtime":
+		r.Status = Warn
+		r.Detail = "systemd --user unit shipmates-ship.service is installed but " + s + " — it cannot be started until it is unmasked"
+		r.Hint = "systemctl --user unmask shipmates-ship.service"
+	case s == "disabled" || s == "linked" || s == "linked-runtime" ||
+		s == "static" || s == "indirect" || s == "generated" ||
+		s == "transient" || s == "alias":
 		r.Status = Warn
 		r.Detail = "systemd --user unit shipmates-ship.service is installed but " + s + " (will not start at login)"
 		r.Hint = "systemctl --user enable --now shipmates-ship.service"
-	default:
-		// not-found / "No such file" / any unrecognized non-zero result.
+	case p.Err && (s == "" ||
+		strings.Contains(s, "no such file") ||
+		strings.Contains(s, "not found") ||
+		strings.Contains(s, "could not be found") ||
+		strings.Contains(s, "no unit")):
+		// not-found: is-enabled exits non-zero and names a missing unit file.
 		r.Status = OK
 		r.Detail = "systemd --user unit shipmates-ship.service is not installed — optional (`shipmates ship install`)"
+	default:
+		// Anything else (e.g. "bad", "transient" variants we don't model, or a
+		// future systemctl state) is reported honestly as unknown, never
+		// assumed absent.
+		r.Status = Warn
+		r.Detail = "systemd --user unit shipmates-ship.service is in an unrecognized state (" + oneLine(p.Out) + ") — treated as unknown rather than assumed not installed"
 	}
 	return r
 }
@@ -187,22 +215,83 @@ func parseLaunchctl(p SupervisorProbe) Result {
 	return r
 }
 
-// parseSchtasks reads `schtasks /query /tn ShipmatesShip /fo LIST`.
+// parseSchtasks reads `schtasks /query /tn ShipmatesShip /fo CSV /v`.
+//
+// The old LIST form was scanned for the literal substring "disabled", but that
+// word is localized on a non-English Windows, so a disabled task there silently
+// read as installed-and-fine. The verbose CSV form exposes a dedicated
+// "Scheduled Task State" column that we isolate and compare, which is robust to
+// text elsewhere in the output. The state VALUE ("Enabled"/"Disabled") is itself
+// localized, so a value we cannot map is reported as installed with the locale
+// limitation stated in the Detail — honest rather than over-claiming enabled.
+//
+// The task NAME (ShipmatesShip) is our own literal and is not localized, so
+// presence detection stays reliable across locales.
 func parseSchtasks(p SupervisorProbe) Result {
 	r := Result{Name: "supervisor (ship)", Group: "Ship", Status: OK}
-	low := strings.ToLower(p.Out)
-	if !strings.Contains(low, "shipmatesship") {
+	if !strings.Contains(strings.ToLower(p.Out), "shipmatesship") {
 		r.Detail = "Scheduled Task ShipmatesShip is not installed — optional (`shipmates ship install`)"
 		return r
 	}
-	if strings.Contains(low, "disabled") {
+
+	state, ok := schtasksState(p.Out)
+	switch {
+	case !ok:
+		// Couldn't isolate the state column (unexpected/older output format).
+		// Installed, but do not over-claim the enable-state.
+		r.Detail = "Scheduled Task ShipmatesShip is installed (its enable-state could not be read from the query output)"
+	case strings.EqualFold(state, "disabled"):
 		r.Status = Warn
 		r.Detail = "Scheduled Task ShipmatesShip is installed but disabled (will not start at logon)"
 		r.Hint = "schtasks /Change /TN ShipmatesShip /ENABLE"
-		return r
+	case strings.EqualFold(state, "enabled"):
+		r.Detail = "Scheduled Task ShipmatesShip is installed and enabled"
+	default:
+		// A non-English Windows returns a localized state value we cannot map to
+		// enabled/disabled. Report installed and state the limitation rather than
+		// guess (the previous substring scan guessed wrong here).
+		r.Detail = "Scheduled Task ShipmatesShip is installed; its enable-state reads as " + oneLine(state) + ", which this check cannot map to enabled/disabled on a non-English Windows locale"
 	}
-	r.Detail = "Scheduled Task ShipmatesShip is installed"
 	return r
+}
+
+// schtasksState extracts the "Scheduled Task State" column value for the task
+// from `schtasks ... /fo CSV /v` output. It returns ok=false when the output is
+// not the expected verbose CSV (so the caller can avoid claiming a state). The
+// column HEADER is matched in English; on a localized host the header will not
+// match and the caller falls back to the honest "state unknown" path.
+func schtasksState(out string) (string, bool) {
+	rd := csv.NewReader(strings.NewReader(out))
+	rd.FieldsPerRecord = -1 // schtasks rows are wide and occasionally uneven
+	records, err := rd.ReadAll()
+	if err != nil || len(records) < 2 {
+		return "", false
+	}
+	col := -1
+	for i, h := range records[0] {
+		if strings.EqualFold(strings.TrimSpace(h), "Scheduled Task State") {
+			col = i
+			break
+		}
+	}
+	if col < 0 {
+		return "", false
+	}
+	// Prefer the data row that actually names our task; fall back to the first.
+	for _, row := range records[1:] {
+		if col >= len(row) {
+			continue
+		}
+		for _, f := range row {
+			if strings.Contains(strings.ToLower(f), "shipmatesship") {
+				return strings.TrimSpace(row[col]), true
+			}
+		}
+	}
+	if col < len(records[1]) {
+		return strings.TrimSpace(records[1][col]), true
+	}
+	return "", false
 }
 
 // productionSupervisor runs the read-only per-OS supervisor-status query. Every
@@ -218,7 +307,9 @@ func productionSupervisor(goos string) SupervisorProbe {
 		out, err := exec.Command("launchctl", "list").CombinedOutput()
 		return SupervisorProbe{Supported: true, Out: string(out), Err: err != nil}
 	case "windows":
-		out, err := exec.Command("schtasks", "/query", "/tn", "ShipmatesShip", "/fo", "LIST").CombinedOutput()
+		// /v /fo CSV exposes the "Scheduled Task State" column parseSchtasks
+		// isolates, instead of scanning LIST text for a localized "disabled".
+		out, err := exec.Command("schtasks", "/query", "/tn", "ShipmatesShip", "/v", "/fo", "CSV").CombinedOutput()
 		return SupervisorProbe{Supported: true, Out: string(out), Err: err != nil}
 	default:
 		return SupervisorProbe{Supported: false}
